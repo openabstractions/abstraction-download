@@ -228,6 +228,17 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	if rec.State.Terminal() {
 		return nil
 	}
+	// Already delivered. Polling again would ask about a job the delegate
+	// destroyed on Finalize — BITS removes it from the queue — which reads back
+	// as Gone, and Gone means "take the work back", so a second sweep would
+	// re-download a file that is already correct at its final path.
+	//
+	// StateTransferred is deliberately not terminal (the consumer has yet to
+	// acknowledge), so the terminal check above does not cover this. Delivered
+	// is what distinguishes "the delegate finished" from "the delegate lost it".
+	if rec.Delegation.Delivered || rec.State == job.StateTransferred {
+		return nil
+	}
 	d, ok := r.Delegators.BySystem(rec.Delegation.System)
 	if !ok {
 		return fmt.Errorf("%w: nothing here understands %q", ErrNoDelegator, rec.Delegation.System)
@@ -326,6 +337,10 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 	n := 0
 	for _, rec := range all {
 		if rec.Kind != Kind || !rec.Delegated() || rec.State.Terminal() {
+			continue
+		}
+		// Nothing to catch up on, and asking would undo it — see Reconcile.
+		if rec.Delegation.Delivered || rec.State == job.StateTransferred {
 			continue
 		}
 		if err := r.Reconcile(ctx, rec.ID); err != nil {

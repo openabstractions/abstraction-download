@@ -226,11 +226,21 @@ func (d *Delegator) probe() error {
 // expiring, redirecting CDN URL of the HuggingFace or S3 kind satisfies this
 // while the signature is valid: BITS follows the 302 (its default SecurityFlags
 // include RedirectPolicyAllowSilent) and the CDN answers with Accept-Ranges and
-// a Content-Length. Measured, not assumed: see the CDN test in this package.
-// What remains untested is a transfer long enough, or interrupted long enough,
-// that the signature expires before BITS finishes; the expected symptom is
-// BG_JOB_STATE_ERROR with an HTTP 403, which Poll reports as DelegateFailed and
-// the Runner turns into an in-process retry against the original source.
+// a Content-Length. Measured, not assumed: see TestSignedRedirectingCDN.
+//
+// The part that is still untested, and the part that will bite: the signature
+// on that redirect was measured at roughly ONE HOUR of validity, not a day. A
+// 40 GB model on a domestic link does not finish in an hour, and BITS is
+// deliberately slow. Whether BITS re-requests the original huggingface.co URL —
+// and so picks up a fresh signature — or retries the resolved CDN URL it was
+// redirected to, is not documented and was not tested here. If it is the
+// latter, the symptom is BG_JOB_STATE_ERROR with an HTTP 403 partway through a
+// long download; Poll reports that as DelegateFailed with the HTTP status
+// attached, and the Runner answers it by taking the work back in-process
+// against the original source, which does still work. So the failure mode is
+// slow and wasteful rather than silent or lossy — but it is a real reason a
+// facade might resolve the redirect chain itself, or refuse to delegate a
+// transfer it expects to outlive the signature.
 func (d *Delegator) Start(ctx context.Context, spec download.Spec, from int64) (string, error) {
 	if err := d.Available(); err != nil {
 		return "", err

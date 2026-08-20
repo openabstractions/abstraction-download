@@ -233,6 +233,52 @@ func TestReconcileFinalizesAndVerifies(t *testing.T) {
 	}
 }
 
+// TestReconcileTwiceDoesNotUndoDelivery: a delegate destroys its job when told
+// to hand the file over — BITS removes it from the queue on Complete() — so
+// polling again reports the handle as unknown. Unknown means "take the work
+// back", which would re-download a file already sitting correct at its final
+// path. A delivered job must be left alone.
+//
+// Found by the BITS binding, not by the fake: StateTransferred is deliberately
+// not terminal, because the consumer has still to acknowledge it, so the
+// terminal check did not cover this.
+func TestReconcileTwiceDoesNotUndoDelivery(t *testing.T) {
+	body, digest := payload(t, 8<<10)
+	r, store, fd, root := newDelegatingRunner(t, body)
+	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: "https://example.invalid/x"})
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	handle := fd.handleOf(t, store, id)
+	fd.advance(handle, int64(len(body)), DelegateTransferred)
+	if err := r.Reconcile(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+
+	// The delegate forgets the job, exactly as BITS does after Complete().
+	fd.Abandon(context.Background(), handle)
+
+	if err := r.Reconcile(context.Background(), id); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	rec, _ := store.Load(id)
+	if rec.State != job.StateTransferred {
+		t.Fatalf("state = %s after a second reconcile; a delivered file was thrown away", rec.State)
+	}
+	if _, err := os.Stat(finalOf(t, store, id)); err != nil {
+		t.Fatalf("the delivered file is gone: %v", err)
+	}
+
+	// And a sweep must leave it alone too.
+	if _, err := r.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = store.Load(id)
+	if rec.State != job.StateTransferred {
+		t.Fatalf("state = %s after ReconcileAll; the sweep undid the delivery", rec.State)
+	}
+}
+
 // TestDelegateDeliveringWrongBytesIsRefused is the reason this layer hashes even
 // when the delegate reported success. BITS verifies size and timestamp only and
 // says so; a delegate reporting "transferred" is not evidence the file is right.
