@@ -43,6 +43,18 @@ type Runner struct {
 	// process dies, so it trades re-downloaded bytes against record writes.
 	// 8 MiB of re-download after a crash is cheap; fsyncing per chunk is not.
 	PersistEvery int64
+
+	// PersistInterval is the same trade measured in time, and it exists because
+	// a byte threshold alone is silently wrong on a slow link: a real 313 MB
+	// download killed after 12 seconds had 2 MB on disk and had checkpointed
+	// NOTHING, because it had not yet reached 8 MiB. Ten minutes on a bad
+	// connection would have saved nothing either — and a slow connection is
+	// exactly when resuming matters most.
+	//
+	// It also keeps the lease alive. Renewal rides the same callback, so
+	// without a time bound a transfer that is progressing slowly would let its
+	// own lease expire and be adopted as an orphan while still running.
+	PersistInterval time.Duration
 }
 
 func NewRunner(store *job.FileStore, owner string) *Runner {
@@ -53,6 +65,9 @@ func NewRunner(store *job.FileStore, owner string) *Runner {
 		Owner:        owner,
 		LeaseTTL:     30 * time.Second,
 		PersistEvery: 8 << 20,
+		// Comfortably inside LeaseTTL, so the lease is renewed several times
+		// over before it could lapse.
+		PersistInterval: 5 * time.Second,
 	}
 }
 
@@ -204,16 +219,23 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		// bytes are proven as they land rather than by a second pass later.
 		w := io.MultiWriter(f, h)
 		lastPersist := from
+		lastPersistAt := time.Now()
 		res, err := fetcher.Fetch(ctx, Request{
 			Source: src,
 			From:   from,
 			Out:    w,
 			Report: func(written int64) {
 				at := from + written
-				if at-lastPersist < r.PersistEvery {
+				// Bytes OR time, whichever comes first. The byte threshold
+				// keeps a fast link from writing the record constantly; the
+				// interval keeps a slow one from never writing it at all.
+				enough := at-lastPersist >= r.PersistEvery
+				overdue := r.PersistInterval > 0 && time.Since(lastPersistAt) >= r.PersistInterval
+				if !enough && !overdue {
 					return
 				}
 				lastPersist = at
+				lastPersistAt = time.Now()
 				// Durability before the claim: recording "the first N bytes are
 				// proven" while N of them are still in a buffer would make a
 				// crash resume from bytes that were never written.
