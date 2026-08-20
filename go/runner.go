@@ -193,7 +193,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// wanted them has not said so yet. See job.StateTransferred.
 	_, err = r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 		rr.Progress.Done = total
-		rr.Progress.UpdatedAt = time.Now().UTC()
+		rr.Progress.UpdatedAt = job.At(time.Now())
 		rr.State = job.StateTransferred
 		rr.Error = ""
 		return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: total})
@@ -244,7 +244,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				}
 				if _, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 					rr.Progress.Done = at
-					rr.Progress.UpdatedAt = time.Now().UTC()
+					rr.Progress.UpdatedAt = job.At(time.Now())
 					return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: at})
 				}); err != nil {
 					return

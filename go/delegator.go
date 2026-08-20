@@ -264,7 +264,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			if st.Total > 0 {
 				rr.Progress.Total = st.Total
 			}
-			rr.Progress.UpdatedAt = time.Now().UTC()
+			rr.Progress.UpdatedAt = job.At(time.Now())
 			return nil
 		})
 		r.Store.Release(id, epoch)
@@ -316,7 +316,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		}
 		_, err = r.Store.Update(id, epoch, func(rr *job.Record) error {
 			rr.Progress.Done = total
-			rr.Progress.UpdatedAt = time.Now().UTC()
+			rr.Progress.UpdatedAt = job.At(time.Now())
 			rr.State = job.StateTransferred
 			rr.Error = ""
 			rr.Delegation.Delivered = true
