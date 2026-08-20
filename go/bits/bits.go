@@ -420,10 +420,11 @@ func stateOf(name string) download.DelegateState {
 		return download.DelegateFailed
 
 	case "acknowledged":
-		// Complete() has been called; the job is on its way out of the queue.
-		// Reporting Transferred would ask the Runner to Finalize an already
-		// finalised job. The file is at its final path and Gone routes the
-		// Runner back to an in-process run, which will find it there.
+		// Complete() has been called and the job is on its way out of the
+		// queue. Reporting Transferred would ask the Runner to Finalize an
+		// already finalised job, which cannot succeed. Gone is the same answer
+		// this returns a moment later, once BITS has actually dropped the job
+		// and Get-BitsTransfer stops finding it — so it is the consistent one.
 		return download.DelegateGone
 	}
 	// An unrecognised state is not a licence to guess. Running is the only
