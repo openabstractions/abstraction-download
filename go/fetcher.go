@@ -55,6 +55,12 @@ type Request struct {
 	// Out receives the bytes, in order, starting at From.
 	Out io.Writer
 
+	// Headers are already resolved and ready to send. A Fetcher never learns
+	// that a credential exists: the Runner turns the source's credential NAME
+	// into a secret at the last moment, so the secret is never in the job
+	// record and never in a Fetcher's hands longer than one request.
+	Headers map[string]string
+
 	// Report is called as bytes land, with the running total written by THIS
 	// request (not including From). It is advisory: the runner decides when to
 	// persist, because persisting on every chunk would write the record

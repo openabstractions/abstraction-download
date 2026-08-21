@@ -31,7 +31,12 @@ type Runner struct {
 	// service, a NAS daemon. Empty by default: nothing is delegated to unless
 	// somebody registers something that can be delegated to.
 	Delegators *Delegators
-	Owner      string
+
+	// Credentials turns a credential NAME from a source into the headers that
+	// authenticate it. The record only ever holds the name; see credentials.go.
+	Credentials Credentials
+
+	Owner string
 
 	// LeaseTTL is how long a claim lasts. Short on purpose: a crashed owner's
 	// job becomes available again after roughly this long, and the only cost of
@@ -62,6 +67,7 @@ func NewRunner(store *job.FileStore, owner string) *Runner {
 		Store:        store,
 		Fetchers:     DefaultRegistry(),
 		Delegators:   NewDelegators(),
+		Credentials:  EnvCredentials{},
 		Owner:        owner,
 		LeaseTTL:     30 * time.Second,
 		PersistEvery: 8 << 20,
@@ -215,15 +221,24 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 			continue
 		}
 
+		// Resolve the credential now, so the secret exists only for the length
+		// of this request and never reaches the record or the Fetcher's source.
+		headers, err := headersFor(src, r.Credentials)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
 		// Everything written goes through the hash as well as the file, so the
 		// bytes are proven as they land rather than by a second pass later.
 		w := io.MultiWriter(f, h)
 		lastPersist := from
 		lastPersistAt := time.Now()
 		res, err := fetcher.Fetch(ctx, Request{
-			Source: src,
-			From:   from,
-			Out:    w,
+			Source:  src,
+			From:    from,
+			Out:     w,
+			Headers: headers,
 			Report: func(written int64) {
 				at := from + written
 				// Bytes OR time, whichever comes first. The byte threshold

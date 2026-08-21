@@ -64,7 +64,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	for k, v := range req.Source.Attrs {
+	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
 	}
 	if req.From > 0 {
