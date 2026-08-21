@@ -146,6 +146,43 @@ HTTP fetcher does not claim `survives_process_exit`, because it dies with its
 caller. Bindings differ enormously; pretending otherwise lies to the caller on
 the tier most people actually run.
 
+## jobd — the supervisor
+
+`Fetcher` and `Delegator` both leave the same gap: they only run when something
+calls them. A delegated transfer that finishes while no application is open sits
+there — BITS will not release the file until someone calls `Complete()`, and
+nothing verifies the digest until someone asks. Without a supervisor that happens
+the next time a human types a command, which may be days later.
+
+```bash
+jobd once          # one sweep — what a scheduled task runs
+jobd run           # supervise until stopped
+jobd status        # what is in the store, and what is stalled
+jobd install       # prints the schtasks lines; does not run them for you
+```
+
+It does not move bytes. It reconciles delegated jobs, finalises and verifies the
+finished ones, and adopts orphans. Reconcile runs before adopt, so the orphan
+pass never picks up work a delegate has in fact already completed.
+
+**Proved** ([`docs/results/SUPERVISOR1.txt`](../docs/results/SUPERVISOR1.txt)): a
+real 313 MB download killed with `SIGKILL`, then **no human runs the downloader
+again** — a single `jobd once` finds the abandoned job, finishes it, and delivers
+a file matching the digest HuggingFace published. A second sweep correctly does
+nothing.
+
+**A scheduled task, not a Windows service, and on purpose.** A real service means
+SCM plumbing and a dependency, and buys exactly one thing: jobs owned by
+LocalSystem keep running while the user is *logged off*, because that account is
+always logged on. Under a normal user account BITS still survives the application
+closing and a reboot — it suspends at logoff and resumes at logon. For a desktop
+that is nearly the whole win, at no cost and with no elevation. Note that BITS
+itself never needed elevation; only the SYSTEM account does.
+
+`jobd install` prints the `schtasks` commands rather than running them.
+Registering a scheduled task changes your machine and you should see exactly what
+it is first.
+
 ## What ships today
 
 | Fetcher | Schemes | Resume | Survives process exit | Status |
