@@ -2,6 +2,7 @@ package download
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	job "github.com/ReinisLusis/abstraction-job"
@@ -109,7 +110,10 @@ func Submit(store *job.FileStore, spec Spec, requires ...string) (string, error)
 	}
 	id := job.NewID()
 	if spec.Sink.Partial == "" {
-		spec.Sink.Partial = store.WorkPath(id)
+		// Relative, deliberately. The store knows where its work directory is on
+		// whichever machine is asking; baking this machine's answer into the
+		// record is what would stop a NAS from ever adopting the job.
+		spec.Sink.Partial = "work/" + id
 	}
 	rec := job.Record{ID: id, Kind: Kind, Requires: requires}
 	rec.Progress.Total = spec.Artifact.Size
@@ -138,4 +142,49 @@ func CheckpointOf(rec *job.Record) (Checkpoint, error) {
 	var c Checkpoint
 	err := rec.DecodeCheckpoint(&c)
 	return c, err
+}
+
+// Resolve turns the sink's paths into paths on THIS machine.
+//
+// A job record is a file that another machine reads. The moment the store lives
+// on a share — a NAS mount, an SMB path — an absolute sink is a lie: the PC
+// wrote `\nas\models\job\work\abc`, and the container that adopts the job sees
+// that same directory as `/store/work/abc`. Neither string is wrong; they are
+// two views of one directory, and a record that hard-codes either one only works
+// on the machine that wrote it.
+//
+// So a relative path means "under the store root", and each machine resolves it
+// against its own view. This is the same move a container image makes: the
+// contents are portable because nothing inside names the host's mount point.
+// Absolute paths are left alone — a caller who names `D:\models\x.gguf` means
+// that drive, and it is not this function's business to second-guess them.
+func (s Sink) Resolve(root string) (partial, final string) {
+	return resolveUnder(root, s.Partial), resolveUnder(root, s.Final)
+}
+
+func resolveUnder(root, p string) string {
+	if p == "" || !relativeEverywhere(p) {
+		return p
+	}
+	return filepath.Join(root, filepath.FromSlash(p))
+}
+
+// relativeEverywhere reports whether p is relative under BOTH conventions.
+//
+// filepath.IsAbs alone is not enough, because it answers for the OS running it:
+// on Linux `D:\models\x.gguf` is "relative", and joining it onto the store root
+// would silently produce a directory literally named `D:\models` on the NAS.
+// A path that is absolute anywhere is treated as absolute everywhere, so a
+// mistake surfaces as a plain "no such file" rather than as a strange one.
+func relativeEverywhere(p string) bool {
+	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
+		return false // POSIX absolute, or a UNC path
+	}
+	if len(p) >= 2 && p[1] == ':' {
+		c := p[0]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			return false // Windows drive letter
+		}
+	}
+	return !filepath.IsAbs(p)
 }

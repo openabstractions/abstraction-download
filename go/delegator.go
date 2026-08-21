@@ -185,6 +185,10 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		}
 		one := spec
 		one.Sources = []Source{src}
+		// A delegate is a different process, sometimes a different account, and
+		// it has no idea where our store lives. Hand it paths that are already
+		// real on the machine it runs on.
+		one.Sink.Partial, one.Sink.Final = spec.Sink.Resolve(r.Store.Root())
 		extID, err := d.Start(ctx, one, cp.VerifiedPrefix)
 		if err != nil {
 			continue
@@ -298,7 +302,8 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		}
 		// Now the file is ours, and now we check it — because the delegate did
 		// not.
-		total, digest, err := hashFile(spec.Sink.Final)
+		_, final := spec.Sink.Resolve(r.Store.Root())
+		total, digest, err := hashFile(final)
 		if err != nil {
 			return err
 		}

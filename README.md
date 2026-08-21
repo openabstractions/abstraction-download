@@ -140,6 +140,14 @@ queue database gets discarded wholesale when corrupt, and machines get rebuilt.
 A handle that no longer resolves returns the job to `pending` with its sources
 and checkpoint intact, so an ordinary in-process run can finish it.
 
+**It works on a record another machine wrote.** Sink paths are relative to the
+store root unless you say otherwise, and each machine resolves them against its
+own view of it. A record written by Windows into `\\nas\models\store` is the same
+record a container reading `/store` acts on — which is the entire NAS story, with
+no NAS-specific code anywhere. A path that is absolute under *either* convention
+is left alone, so `D:\models\x.gguf` handed to Linux fails with "no such file"
+rather than quietly creating a directory called `D:\models`.
+
 **It honours required capabilities.** A job that asks for a fetcher which
 survives process exit is not quietly served by one that does not — the in-process
 HTTP fetcher does not claim `survives_process_exit`, because it dies with its

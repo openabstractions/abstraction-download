@@ -109,23 +109,29 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		return err
 	}
 
+	// The record's paths may be relative to the store, which is what lets the
+	// same record be worked on by this machine or by a NAS that mounts the store
+	// somewhere else entirely. Resolve once, here, and everything below deals in
+	// paths that are real on this machine.
+	partial, final := spec.Sink.Resolve(r.Store.Root())
+
 	// Resume position: the smaller of what the checkpoint says was proven and
 	// what is actually on disk. They differ after a crash — the checkpoint is
 	// written periodically, so the file can be ahead of it, and a partial can
 	// also be truncated or missing entirely. Trusting either one alone is how a
 	// resumed download ends up the right length and the wrong bytes.
-	if err := os.MkdirAll(filepath.Dir(spec.Sink.Partial), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
 		return err
 	}
 	onDisk := int64(0)
-	if st, err := os.Stat(spec.Sink.Partial); err == nil {
+	if st, err := os.Stat(partial); err == nil {
 		onDisk = st.Size()
 	}
 	from := cp.VerifiedPrefix
 	if onDisk < from {
 		from = onDisk
 	}
-	if err := truncate(spec.Sink.Partial, from); err != nil {
+	if err := truncate(partial, from); err != nil {
 		return err
 	}
 
@@ -135,12 +141,12 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// way the digest check at the end covers bytes an earlier owner wrote.
 	h := sha256.New()
 	if from > 0 {
-		if err := hashPrefix(spec.Sink.Partial, from, h); err != nil {
+		if err := hashPrefix(partial, from, h); err != nil {
 			return err
 		}
 	}
 
-	f, err := os.OpenFile(spec.Sink.Partial, os.O_WRONLY|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(partial, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
@@ -182,7 +188,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		if !strings.EqualFold(got, want) {
 			// Do not keep bytes that failed. Leaving them would mean the next
 			// runner resumes onto a prefix already known to be wrong.
-			os.Remove(spec.Sink.Partial)
+			os.Remove(partial)
 			r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 				rr.Progress.Done = 0
 				return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: 0})
@@ -191,7 +197,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		}
 	}
 
-	if err := deliver(spec.Sink.Partial, spec.Sink.Final); err != nil {
+	if err := deliver(partial, final); err != nil {
 		return err
 	}
 

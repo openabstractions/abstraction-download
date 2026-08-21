@@ -65,7 +65,8 @@ func partialOf(t *testing.T, store *job.FileStore, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return spec.Sink.Partial
+	partial, _ := spec.Sink.Resolve(store.Root())
+	return partial
 }
 
 func finalOf(t *testing.T, store *job.FileStore, id string) string {
@@ -78,7 +79,8 @@ func finalOf(t *testing.T, store *job.FileStore, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return spec.Sink.Final
+	_, final := spec.Sink.Resolve(store.Root())
+	return final
 }
 
 // rangeServer serves content and honours Range, like any sane file host.
