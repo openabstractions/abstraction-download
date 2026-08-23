@@ -491,7 +491,11 @@ func failureText(pr pollResult) string {
 // It is not idempotent, and cannot be: after it succeeds the job is gone from
 // the queue, so a second call cannot tell "already delivered" from "never
 // existed". The Runner records Delegation.Delivered for exactly this reason.
-func (d *Delegator) Finalize(ctx context.Context, externalID string) error {
+//
+// dest is ignored: BITS was told the destination at Start and has been holding
+// the file there ever since. Complete() moves it into place, and pointing it
+// somewhere else at this stage is not a thing the API offers.
+func (d *Delegator) Finalize(ctx context.Context, externalID, dest string) error {
 	if err := d.Available(); err != nil {
 		return err
 	}

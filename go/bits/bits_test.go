@@ -310,7 +310,7 @@ func TestStartPollFinalize(t *testing.T) {
 		t.Fatal("the file existed at its final path before Finalize; BITS is supposed to withhold it until Complete()")
 	}
 
-	if err := d.Finalize(ctx, id); err != nil {
+	if err := d.Finalize(ctx, id, spec.Sink.Final); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 	got, err := os.ReadFile(spec.Sink.Final)
@@ -387,7 +387,7 @@ func TestPollReportsProgressWhileRunning(t *testing.T) {
 		// to Transferred between two polls. Worth knowing when it happens.
 		t.Log("never observed a running poll; the transfer finished between polls")
 	}
-	if err := d.Finalize(ctx, id); err != nil {
+	if err := d.Finalize(ctx, id, spec.Sink.Final); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 	if fi, err := os.Stat(spec.Sink.Final); err != nil || fi.Size() != int64(len(body)) {
@@ -610,7 +610,7 @@ func TestSignedRedirectingCDN(t *testing.T) {
 		// redirect chain before delegating.
 		t.Fatalf("BITS could not fetch a signed, redirecting CDN URL: state=%q err=%q", st.State, st.Err)
 	}
-	if err := d.Finalize(ctx, id); err != nil {
+	if err := d.Finalize(ctx, id, spec.Sink.Final); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 	fi, err := os.Stat(spec.Sink.Final)

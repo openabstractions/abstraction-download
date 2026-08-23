@@ -42,6 +42,7 @@ import (
 
 	"github.com/ReinisLusis/abstraction-download"
 	"github.com/ReinisLusis/abstraction-download/bits"
+	"github.com/ReinisLusis/abstraction-download/nas"
 	job "github.com/ReinisLusis/abstraction-job"
 )
 
@@ -77,7 +78,9 @@ func usage() {
   jobd status                  what is in the store right now
 
 env:
-  MODELGET_STORE   the job store (default ~/.modelget), shared with modelget`)
+  MODELGET_STORE         the job store (default ~/.modelget), shared with modelget
+  ABSTRACTION_NAS_STORE  a store on a share watched by a jobd elsewhere; when
+                         set and reachable, work is handed there rather than run`)
 }
 
 func fatal(err error) {
@@ -96,19 +99,34 @@ func storeRoot() string {
 	return filepath.Join(home, ".modelget")
 }
 
-func openRunner() (*download.Runner, *job.FileStore, bool) {
+// openRunner registers whatever this machine has, best first. On a NAS that is
+// nothing at all — no BITS, no further NAS to pass work to — and the supervisor
+// simply does the transfers itself, which is exactly what it is there for.
+func openRunner() (*download.Runner, *job.FileStore, string) {
 	store, err := job.NewFileStore(storeRoot())
 	if err != nil {
 		fatal(err)
 	}
 	host, _ := os.Hostname()
 	r := download.NewRunner(store, fmt.Sprintf("jobd@%s:%d", host, os.Getpid()))
+
+	var ds []download.Delegator
+	tier := "here"
+	if n := nas.FromEnv(); n != nil {
+		if err := n.Available(); err == nil {
+			ds = append(ds, n)
+			tier = "nas"
+		}
+	}
 	b := bits.New()
 	if err := b.Available(); err == nil {
-		r.Delegators = download.NewDelegators(b)
-		return r, store, true
+		ds = append(ds, b)
+		if tier == "here" {
+			tier = "bits"
+		}
 	}
-	return r, store, false
+	r.Delegators = download.NewDelegators(ds...)
+	return r, store, tier
 }
 
 // pass is one sweep, and the order matters.
@@ -135,7 +153,7 @@ func cmdOnce(args []string) {
 	quiet := fs.Bool("quiet", false, "say nothing unless something happened")
 	fs.Parse(args)
 
-	r, _, haveService := openRunner()
+	r, _, tier := openRunner()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
@@ -143,8 +161,8 @@ func cmdOnce(args []string) {
 	if *quiet && rec == 0 && ad == 0 {
 		return
 	}
-	fmt.Printf("%s  reconciled=%d adopted=%d service=%v\n",
-		time.Now().Format(time.RFC3339), rec, ad, haveService)
+	fmt.Printf("%s  reconciled=%d adopted=%d delegates-to=%s\n",
+		time.Now().Format(time.RFC3339), rec, ad, tier)
 }
 
 func cmdRun(args []string) {
@@ -152,8 +170,8 @@ func cmdRun(args []string) {
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
 	fs.Parse(args)
 
-	r, _, haveService := openRunner()
-	fmt.Printf("jobd: watching %s (os transfer service: %v)\n", storeRoot(), haveService)
+	r, _, tier := openRunner()
+	fmt.Printf("jobd: watching %s (delegates to: %s)\n", storeRoot(), tier)
 
 	// Stop cleanly on Ctrl+C or a service stop. An interrupted sweep is safe —
 	// the lease lapses and the next owner continues — but exiting tidily
@@ -178,12 +196,12 @@ func cmdRun(args []string) {
 }
 
 func cmdStatus() {
-	_, store, haveService := openRunner()
+	_, store, tier := openRunner()
 	all, err := store.List()
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("store: %s\nos transfer service: %v\n\n", storeRoot(), haveService)
+	fmt.Printf("store: %s\ndelegates to: %s\n\n", storeRoot(), tier)
 	n := 0
 	for _, rec := range all {
 		if rec.Kind != download.Kind {

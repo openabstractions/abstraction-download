@@ -53,10 +53,19 @@ type Delegator interface {
 	// outside, which a callback cannot be.
 	Poll(ctx context.Context, externalID string) (Status, error)
 
-	// Finalize takes delivery. BITS calls this Complete(), and until it happens
-	// the file is not the caller's and may not exist at its final path at all.
-	// A job left unacknowledged sits in the BITS queue for 90 days.
-	Finalize(ctx context.Context, externalID string) error
+	// Finalize takes delivery into dest. BITS calls this Complete(), and until
+	// it happens the file is not the caller's and may not exist at its final
+	// path at all. A job left unacknowledged sits in the BITS queue for 90 days.
+	//
+	// dest is the job's destination resolved on THIS machine. BITS ignores it,
+	// because it was told where to put the file at Start and has been holding it
+	// there. That is exactly why the parameter was missing at first, and why it
+	// had to be added: an implementation whose work lands somewhere else — a NAS
+	// writing to its own disk — has no way to discover the local destination
+	// from a handle alone. The interface described one binding's habits rather
+	// than the operation. "Take delivery" needs to say delivery of what, and
+	// where.
+	Finalize(ctx context.Context, externalID, dest string) error
 
 	// Abandon cancels the work and cleans up after it. Note that BITS's Cancel
 	// deletes completed files as well as partial ones, so this is not a way to
@@ -297,12 +306,13 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if err := d.Finalize(ctx, rec.Delegation.ExternalID); err != nil {
+		_, final := spec.Sink.Resolve(r.Store.Root())
+		if err := d.Finalize(ctx, rec.Delegation.ExternalID, final); err != nil {
 			return err
 		}
-		// Now the file is ours, and now we check it — because the delegate did
-		// not.
-		_, final := spec.Sink.Resolve(r.Store.Root())
+		// Now the file is ours, and now we check it — because the delegate
+		// mostly did not, and even the one that did sent the bytes over a second
+		// network to get here.
 		total, digest, err := hashFile(final)
 		if err != nil {
 			return err

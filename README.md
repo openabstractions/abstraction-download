@@ -193,20 +193,27 @@ it is first.
 
 ## What ships today
 
-| Fetcher | Schemes | Resume | Survives process exit | Status |
-|---|---|---|---|---|
-| `HTTP` | `http`, `https` | yes, `Range` | **no** | working |
-| `File` | `file`, `smb` | yes, seek | **no** | working |
-| BITS | `http`, `https`, `smb` | yes | **yes** | interface ready, binding not written |
-| NAS delegation | any | yes | yes | interface ready, binding not written |
+| implementation | shape | schemes | resume | survives process exit | status |
+|---|---|---|---|---|---|
+| `HTTP` | Fetcher | `http`, `https` | yes, `Range` | **no** | working |
+| `File` | Fetcher | `file`, `smb` | yes, seek | **no** | working |
+| `bits` | Delegator | `http`, `https`, `smb` | yes | **yes** | working, 12 tests against real BITS |
+| `nas` | Delegator | `http`, `https` | yes, over there | **yes** | working, verified against a Synology |
 
-The `Delegator` interface those two need is written and tested against a fake
-that behaves like BITS — including delivering the wrong bytes, and vanishing.
-What is missing is the binding itself.
-`research/transfer/SUMMARY.txt` says adopt BITS rather than write it: it already
-has persistent jobs with a GUID any process can open, documented ownership
-transfer, auto-resume on logon and network recovery, and it speaks SMB in the
-same job — so on Windows one binding covers the NAS case too.
+**Nothing above chooses between them.** A caller asks for bytes; the Runner
+offers the job to whatever is registered and capable, and registration comes from
+configuration. A NAS outranks BITS because it is always on; BITS outranks
+in-process because it survives this process exiting. There is no argument
+anywhere that names a tier — see [`deploy/nas`](../deploy/nas/README.md).
+
+`research/transfer/SUMMARY.txt` said adopt BITS rather than write it, and that
+held up: persistent jobs with a GUID any process can open, documented ownership
+transfer, auto-resume on logon and network recovery.
+
+The `nas` binding needed no new wire format and no network protocol. It writes a
+job record into a store the far side can also see, and polls it by reading a file
+on a share. That it required nothing new is the strongest evidence the job layer
+was cut in the right place.
 
 ## Why these two exist and aria2 does not
 

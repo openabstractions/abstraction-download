@@ -109,6 +109,14 @@ func Submit(store *job.FileStore, spec Spec, requires ...string) (string, error)
 		return "", err
 	}
 	id := job.NewID()
+	// Slashes, always, for the paths that are relative. filepath.Join on Windows
+	// produces `models\x.gguf`, and on Linux that is not a directory and a file
+	// — it is ONE file whose name contains a backslash. The job would "succeed"
+	// and put the weights somewhere nobody would ever look. A record is read by
+	// machines that do not share this one's separator, so the separator is part
+	// of the contract, not a local detail.
+	spec.Sink.Partial = Portable(spec.Sink.Partial)
+	spec.Sink.Final = Portable(spec.Sink.Final)
 	if spec.Sink.Partial == "" {
 		// Relative, deliberately. The store knows where its work directory is on
 		// whichever machine is asking; baking this machine's answer into the
@@ -148,7 +156,7 @@ func CheckpointOf(rec *job.Record) (Checkpoint, error) {
 //
 // A job record is a file that another machine reads. The moment the store lives
 // on a share — a NAS mount, an SMB path — an absolute sink is a lie: the PC
-// wrote `\nas\models\job\work\abc`, and the container that adopts the job sees
+// wrote `\\nas\models\store\work\abc`, and the container that adopts the job sees
 // that same directory as `/store/work/abc`. Neither string is wrong; they are
 // two views of one directory, and a record that hard-codes either one only works
 // on the machine that wrote it.
@@ -166,7 +174,11 @@ func resolveUnder(root, p string) string {
 	if p == "" || !relativeEverywhere(p) {
 		return p
 	}
-	return filepath.Join(root, filepath.FromSlash(p))
+	// Forgive a backslash in a RELATIVE path, because records written before
+	// Submit normalised them are on disk already, and because a backslash cannot
+	// legally appear in a Windows filename anyway — so reading it as a separator
+	// is the only interpretation that is ever right.
+	return filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(p, `\`, "/")))
 }
 
 // relativeEverywhere reports whether p is relative under BOTH conventions.
@@ -187,4 +199,15 @@ func relativeEverywhere(p string) bool {
 		}
 	}
 	return !filepath.IsAbs(p)
+}
+
+// Portable puts a relative path into the one form every machine reads the same
+// way. Absolute paths are left exactly as given — they already name a specific
+// machine's filesystem, and rewriting their separators would not make them any
+// more portable, only harder to recognise.
+func Portable(p string) string {
+	if !relativeEverywhere(p) {
+		return p
+	}
+	return filepath.ToSlash(p)
 }

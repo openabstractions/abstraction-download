@@ -96,6 +96,12 @@ func (r *Runner) Run(ctx context.Context, id string) error {
 		})
 		return err
 	}
+	// Let go. The bytes are delivered and proven, and the only thing left is for
+	// whoever wanted them to say so — which means claiming this job. Holding the
+	// lease until it lapses blocks exactly that, and it blocked it silently: the
+	// requester's acknowledgement was refused, gave up quietly, and a finished
+	// job sat on a NAS marked "waiting to be taken delivery of" forever.
+	r.Store.Release(rec.ID, epoch)
 	return nil
 }
 
@@ -307,6 +313,15 @@ func (r *Runner) Adopt(ctx context.Context) (int, error) {
 	for _, o := range orphans {
 		// Someone else's kind of job is none of our business.
 		if o.Kind != Kind {
+			continue
+		}
+		// Neither is someone else's job. A record holding a delegation handle is
+		// in another system's hands; Reconcile is the path for it, and running it
+		// here would fetch the same bytes a second time while the first transfer
+		// is still going. If the handle has gone stale, Reconcile is what clears
+		// the delegation and returns the job to pending — and only then is it
+		// ours to adopt.
+		if o.Delegated() {
 			continue
 		}
 		if err := r.Run(ctx, o.ID); err != nil {

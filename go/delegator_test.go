@@ -84,7 +84,7 @@ func (f *fakeDelegate) Poll(ctx context.Context, id string) (Status, error) {
 	return Status{State: j.state, Done: j.done, Total: j.total}, nil
 }
 
-func (f *fakeDelegate) Finalize(ctx context.Context, id string) error {
+func (f *fakeDelegate) Finalize(ctx context.Context, id, dest string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
@@ -404,4 +404,55 @@ func TestReconcileRefusesUndelegatedJob(t *testing.T) {
 		t.Fatalf("Reconcile = %v, want ErrNotDelegated", err)
 	}
 	_ = time.Now
+}
+
+// A job in someone else's hands must not be adopted and re-run here.
+//
+// Delegate releases the lease on purpose, so a delegated job sits in the store
+// with no live lease. Without a guard, the very next supervisor sweep sees an
+// unleased download and starts fetching the same bytes locally while the
+// delegate is still fetching them remotely — two transfers, two lots of
+// bandwidth, both writing the same partial.
+func TestAdoptSkipsDelegatedJobs(t *testing.T) {
+	body, digest := payload(t, 4<<10)
+	r, store, _, root := newDelegatingRunner(t, body)
+
+	// A source this process COULD fetch from, so that adopting the job would
+	// visibly succeed. Pointing at something unreachable would make the test
+	// pass whether or not the guard exists — Adopt counts only what it
+	// finished, and a failed fetch is skipped either way.
+	src := filepath.Join(root, "mirror.bin")
+	if err := os.WriteFile(src, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "file", Locator: src})
+
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err := store.Load(id); err != nil || !rec.Delegated() {
+		t.Fatalf("setup: the job is not delegated (%v)", err)
+	}
+
+	n, err := r.Adopt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("Adopt took on %d delegated job(s); the same bytes are being fetched twice", n)
+	}
+
+	rec, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Delegated() {
+		t.Fatal("adopting locally threw away the delegation handle")
+	}
+	if rec.State != job.StateRunning {
+		t.Fatalf("state = %s; the delegate is still working on this", rec.State)
+	}
+	if _, err := os.Stat(finalOf(t, store, id)); err == nil {
+		t.Fatal("the file was delivered locally behind the delegate's back")
+	}
 }

@@ -70,3 +70,51 @@ func TestAbsolutePathsAreNotRebased(t *testing.T) {
 		t.Errorf("empty path should stay empty, got %q", got)
 	}
 }
+
+// A Windows caller uses filepath.Join, which produces `models\x.gguf`. Written
+// into a record verbatim that is not a directory and a file on Linux — it is one
+// file whose name contains a backslash, so the job "succeeds" and puts 40 GB of
+// weights somewhere nobody will ever look. Found by actually submitting from
+// Windows into a store on a NAS.
+func TestSubmitNormalisesWindowsSeparators(t *testing.T) {
+	root := t.TempDir()
+	store, err := job.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := Submit(store, Spec{
+		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/x.gguf"}},
+		Sink:    Sink{Final: filepath.Join("models", "x.gguf")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := SpecOf(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Sink.Final != "models/x.gguf" {
+		t.Fatalf("record holds %q; a machine with the other separator cannot read that as a path", spec.Sink.Final)
+	}
+	// And it still resolves to the right place on a POSIX machine.
+	if _, final := spec.Sink.Resolve("/store"); final != filepath.Join("/store", "models", "x.gguf") {
+		t.Fatalf("resolved to %q", final)
+	}
+}
+
+// Records written before Submit normalised separators are already on disk, so
+// resolving must forgive them rather than fail.
+func TestResolveForgivesLegacyBackslashes(t *testing.T) {
+	sink := Sink{Partial: `work\abc`, Final: `models\x.gguf`}
+	partial, final := sink.Resolve("/store")
+	if partial != filepath.Join("/store", "work", "abc") {
+		t.Errorf("partial resolved to %q", partial)
+	}
+	if final != filepath.Join("/store", "models", "x.gguf") {
+		t.Errorf("final resolved to %q", final)
+	}
+}
