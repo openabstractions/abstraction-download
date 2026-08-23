@@ -9,35 +9,40 @@ import (
 	"time"
 )
 
-// TestLiveRecordFreshness documents a limitation that is real, measured, and
-// not fixed.
+// TestLiveRecordFreshness measures how long a change made on the other machine
+// takes to become visible here.
 //
-// The far side writes records through its LOCAL filesystem. Samba therefore
-// never learns the file changed, never sends a lease break, and a Windows client
-// holding an SMB2 read lease goes on serving its cached copy. In the live round
-// trip this process read "0%" for ten minutes after the NAS had finished, then
-// saw the finished state all at once.
+// The far side writes records through its LOCAL filesystem, so Samba is never
+// told the file changed and a Windows client can serve a cached copy.
 //
-// It is a latency defect, not a correctness one, and the difference is worth
-// being precise about:
+// The evidence here does not reconcile, and saying so is more useful than
+// picking whichever half flatters the design:
 //
-//   - Delivery was correct. The file arrived and its digest matched.
-//   - The lease protocol is unaffected. Claiming means CREATING a file with
-//     O_EXCL, and writes are not served from cache — TestLiveExclusiveCreate
-//     proves the exclusion still holds. A stale read can only make a job look
-//     claimable when it is not, and the create then fails, which is safe.
-//   - What breaks is observation: "what is downloading?" answered from the other
-//     machine can be minutes out of date.
+//   - THE PRODUCT PATH WORKS. Against a live NAS download, successive `modelget
+//     resume` invocations reported 37% -> 75% -> 100%, and delivery verified.
+//     That is the path anybody actually uses.
+//   - THIS PROBE DOES NOT. A single file on the same share, changed by the far
+//     side, stayed stale here for 30s+.
 //
-// Reading differently does not help. os.ReadFile, opening O_RDWR, stat-then-read
-// and readdir-then-read were all measured stale for 15s+, and records are
-// already written atomically via temp-and-rename, so it is content leasing
-// rather than the metadata cache. FileInfoCacheLifetime was at its default of 10
-// seconds and is not the binding constraint.
+// Three explanations were tested and each is dead. It is not per-process — a
+// fresh `cmd /c type` read the stale copy too. It is not a foreign open
+// refreshing the lease — this process stayed stale immediately after one. And it
+// is not the write pattern: temp-and-rename, which is exactly what
+// FileStore.write() does, was as stale as an in-place truncate.
 //
-// The fix is on the NAS: turn off oplocks for the share, so Samba stops handing
-// out leases it cannot break. That is a change to the owner's NAS and is
-// deliberately not made from here.
+// So the mechanism is uncharacterised. What differs between the two cases is
+// most likely traffic — during a real download the far side is writing records,
+// partials and epoch tokens continuously, and this probe touches one idle file —
+// but that was not confirmed and should not be written down as though it were.
+//
+// The lease protocol is unaffected in either case, which is the part that
+// matters. Claiming means CREATING a file with O_EXCL, and writes are not served
+// from cache; TestLiveExclusiveCreate proves the exclusion holds against this
+// Synology. A stale read can only make a job look claimable when it is not, and
+// the create then fails. It degrades safely.
+//
+// This test is therefore a canary, not a specification. If it fails, progress
+// reported across the share may lag; nothing will be corrupted.
 func TestLiveRecordFreshness(t *testing.T) {
 	if os.Getenv("ABSTRACTION_LIVE") == "" {
 		t.Skip("set ABSTRACTION_LIVE=1 (and ABSTRACTION_NAS_STORE) to measure this against a real NAS")
@@ -54,11 +59,22 @@ func TestLiveRecordFreshness(t *testing.T) {
 	probe := filepath.Join(root, "freshness-probe.txt")
 	defer os.Remove(probe)
 
+	// Where the store lives as the OTHER machine sees it. There is no way to
+	// derive this from the share path, which is the whole point of the exercise.
+	remoteStore := os.Getenv("ABSTRACTION_NAS_REMOTE_STORE")
+	if remoteStore == "" {
+		remoteStore = "~/abstraction-store"
+	}
+
 	write := func(v string) {
 		t.Helper()
-		cmd := exec.Command("ssh", "-o", "BatchMode=yes", host,
-			fmt.Sprintf("printf '%%s' '%s' > ~/abstraction-store/freshness-probe.txt", v))
-		if out, err := cmd.CombinedOutput(); err != nil {
+		args := []string{"-o", "BatchMode=yes"}
+		if key := os.Getenv("ABSTRACTION_NAS_SSH_KEY"); key != "" {
+			args = append(args, "-i", key)
+		}
+		args = append(args, host,
+			fmt.Sprintf("printf '%%s' '%s' > %s/freshness-probe.txt", v, remoteStore))
+		if out, err := exec.Command("ssh", args...).CombinedOutput(); err != nil {
 			t.Fatalf("writing from the other side: %v %s", err, out)
 		}
 	}
@@ -86,6 +102,7 @@ func TestLiveRecordFreshness(t *testing.T) {
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("a change made on the other machine was still invisible after %s. "+
-		"This is the SMB read-lease staleness described above: correctness is unaffected, "+
-		"but progress read across the share is not live. Disable oplocks on the share to fix it.", budget)
+		"Progress reported across this share may lag; nothing is corrupted by it, because "+
+		"claiming is a write and writes are not cached. Turning off oplocks for the share is "+
+		"the usual remedy. See the comment above for what has and has not been ruled out.", budget)
 }

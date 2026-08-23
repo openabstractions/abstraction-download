@@ -13,13 +13,31 @@ right now. This layer adds the one thing missing — something that can fetch.
 ## The split, and why it is where it is
 
 ```
-  job         id · state · lease · progress · delegation · spec(opaque)  ← survives
+  model       AI-specific: what a "quantisation" is, where a digest is published
+              ── builds on download. download never imports it ──
   ─────────────────────────────────────────────────────────────────
-  download    owns the spec: artifact · sources · sink
+  download    THIS package. artifact · sources · sink, and nothing about
+              what the bytes are for
               Runner: claim → resume → hash → verify → deliver
   ─────────────────────────────────────────────────────────────────
-  Fetcher     http · file/smb · (BITS) · (NAS) · (peer)            ← replaceable
+  job         id · state · lease · progress · delegation · spec(opaque)  ← survives
 ```
+
+**This package is the download abstraction, not the model download abstraction.**
+The AI layer sits above it as a consumer — it resolves `hf://org/repo#Q4_K_M`
+into an ordinary `Spec` and hands it down. Dependencies point one way: `model`
+imports `download`, `download` imports `job`, and nothing imports `model`.
+
+The rule that keeps it honest is that this package must contain no word from the
+other domain. It slipped twice and both were caught by grepping for them:
+`jobd` read an environment variable called `MODELGET_STORE`, and the NAS
+delegator defaulted to delivering into a directory called `models`. Both are now
+generic (`ABSTRACTION_STORE`, `nas.DefaultDir = "files"`), and the model layer
+sets `Dir = "models"` itself — specific naming the generic, never the reverse.
+
+Anything that can be described as "an artifact, some places to get it, and
+somewhere to put it" belongs here. Datasets, container layers, game assets, a
+firmware blob: none of them need this package to change.
 
 **The job layer does not know what a download is.** `artifact`, `sources` and
 `sink` live in this package's `Spec`, which the job record carries as an opaque

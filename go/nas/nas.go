@@ -45,6 +45,10 @@ const System = "nas"
 // exists is a property of the machine, not of the download somebody asked for.
 const EnvStore = "ABSTRACTION_NAS_STORE"
 
+// DefaultDir is where delivered files land inside the remote store when nobody
+// says otherwise. "files", not "models": this is the generic download tier.
+const DefaultDir = "files"
+
 // Delegator hands work to a supervisor watching a store on a shared filesystem.
 type Delegator struct {
 	// Root is the remote store as THIS machine sees it — a UNC path, a mapped
@@ -55,6 +59,12 @@ type Delegator struct {
 
 	// Dir is where finished files land inside the remote store. Relative,
 	// because it goes into a record the other machine reads.
+	//
+	// The default is deliberately not "models". This package moves bytes and has
+	// no opinion about what they are; a layer that does know — the AI model layer
+	// above — sets this to something meaningful for its domain. The moment the
+	// generic tier starts naming directories after one kind of payload, it has
+	// stopped being the generic tier.
 	Dir string
 
 	store *job.FileStore
@@ -69,7 +79,7 @@ func New(root string) (*Delegator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nas: %s is not usable as a store: %w", root, err)
 	}
-	return &Delegator{Root: root, Dir: "models", store: s}, nil
+	return &Delegator{Root: root, Dir: DefaultDir, store: s}, nil
 }
 
 // FromEnv builds a delegator from configuration, and returns nil when there is
@@ -145,11 +155,13 @@ func (d *Delegator) Start(ctx context.Context, spec download.Spec, from int64) (
 // Poll reads the remote record — an ordinary file read that any process on any
 // machine can do, including one that never started anything.
 //
-// What it reads may be minutes out of date, and that is not a bug here. The far
-// side writes records through its local filesystem, so Samba never learns the
-// file changed and never breaks the SMB read lease this client is holding. See
-// TestLiveRecordFreshness: correctness survives it (claiming is a write, and
-// writes are not cached) but observation does not.
+// Reads across SMB can lag: the far side writes records through its local
+// filesystem, so Samba is not told the file changed and the client may serve a
+// cached copy. In practice successive polls against a live NAS tracked a real
+// download accurately, while an isolated probe on the same share stayed stale
+// for 30s+, and the difference is not understood. See TestLiveRecordFreshness
+// for what has been ruled out. Correctness does not depend on it — claiming is a
+// write, and writes are not cached.
 func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Status, error) {
 	rec, err := d.store.Load(externalID)
 	if err != nil {

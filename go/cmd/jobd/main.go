@@ -78,7 +78,10 @@ func usage() {
   jobd status                  what is in the store right now
 
 env:
-  MODELGET_STORE         the job store (default ~/.modelget), shared with modelget
+  ABSTRACTION_STORE      the job store (default ~/.abstraction). Any tool that
+                         speaks the job record shares it — jobd knows nothing
+                         about what is being downloaded
+  MODELGET_STORE         honoured as a legacy alias
   ABSTRACTION_NAS_STORE  a store on a share watched by a jobd elsewhere; when
                          set and reachable, work is handed there rather than run`)
 }
@@ -88,15 +91,34 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+// storeRoot finds the job store.
+//
+// ABSTRACTION_STORE is the name that belongs here. jobd supervises downloads of
+// anything — it has never known what a model is — and reading MODELGET_STORE
+// meant the generic tier was configured by a variable named after one consumer
+// sitting above it. MODELGET_STORE is still honoured, because stores exist on
+// disk under it and silently ignoring it would orphan jobs.
 func storeRoot() string {
-	if v := os.Getenv("MODELGET_STORE"); v != "" {
-		return v
+	for _, name := range []string{"ABSTRACTION_STORE", "MODELGET_STORE"} {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fatal(err)
 	}
-	return filepath.Join(home, ".modelget")
+	// An existing store keeps being the store. Moving the default would strand
+	// whatever is in flight the day this is upgraded.
+	if legacy := filepath.Join(home, ".modelget"); exists(legacy) {
+		return legacy
+	}
+	return filepath.Join(home, ".abstraction")
+}
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // openRunner registers whatever this machine has, best first. On a NAS that is

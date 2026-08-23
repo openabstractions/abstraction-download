@@ -176,7 +176,9 @@ func TestDestinationOnTheShareIsNotCopied(t *testing.T) {
 	ctx := context.Background()
 
 	// The local job's destination resolves to the very file the far side wrote.
-	dest := filepath.Join(m.remoteRoot, "models", "model.gguf")
+	// DefaultDir, not "models": this tier does not know what it is carrying, and
+	// a test that hardcodes a domain's name would let that leak back in.
+	dest := filepath.Join(m.remoteRoot, DefaultDir, "model.gguf")
 	id := m.submit(t, dest)
 	if err := m.runner.Delegate(ctx, id); err != nil {
 		t.Fatal(err)
