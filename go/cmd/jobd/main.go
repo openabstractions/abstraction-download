@@ -41,8 +41,7 @@ import (
 	"time"
 
 	"github.com/ReinisLusis/abstraction-download"
-	"github.com/ReinisLusis/abstraction-download/bits"
-	"github.com/ReinisLusis/abstraction-download/nas"
+	_ "github.com/ReinisLusis/abstraction-download/all"
 	job "github.com/ReinisLusis/abstraction-job"
 
 	// Mozilla's CA bundle, compiled in. Used only when the system has no trust
@@ -74,6 +73,8 @@ func main() {
 		cmdUninstall()
 	case "status":
 		cmdStatus()
+	case "setup":
+		cmdSetup(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -88,6 +89,9 @@ func usage() {
   jobd install [--at-logon]    register a scheduled task, no elevation needed
   jobd uninstall               remove it
   jobd status                  what is in the store right now
+  jobd setup --nas-store <p>   record what this machine has, once, so that every
+                               application finds it without being configured
+  jobd setup --show            what is configured, and which file said so
 
 env:
   ABSTRACTION_STORE      the job store (default ~/.abstraction). Any tool that
@@ -111,56 +115,32 @@ func fatal(err error) {
 // sitting above it. MODELGET_STORE is still honoured, because stores exist on
 // disk under it and silently ignoring it would orphan jobs.
 func storeRoot() string {
-	for _, name := range []string{"ABSTRACTION_STORE", "MODELGET_STORE"} {
-		if v := os.Getenv(name); v != "" {
-			return v
-		}
+	// MODELGET_STORE is honoured for stores that already exist under it;
+	// everything else comes from the shared discovery.
+	if v := os.Getenv("MODELGET_STORE"); v != "" {
+		return v
 	}
-	home, err := os.UserHomeDir()
+	root, err := download.StoreRoot()
 	if err != nil {
 		fatal(err)
 	}
-	// An existing store keeps being the store. Moving the default would strand
-	// whatever is in flight the day this is upgraded.
-	if legacy := filepath.Join(home, ".modelget"); exists(legacy) {
-		return legacy
-	}
-	return filepath.Join(home, ".abstraction")
+	return root
 }
 
-func exists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-// openRunner registers whatever this machine has, best first. On a NAS that is
-// nothing at all — no BITS, no further NAS to pass work to — and the supervisor
-// simply does the transfers itself, which is exactly what it is there for.
+// openRunner uses the same discovery every other application uses.
+//
+// It used to hand-wire the tiers itself, which meant the supervisor and the
+// applications it supervises could disagree about what this machine has. Now
+// jobd is just another caller of Discover: on a NAS that finds nothing — no
+// BITS, no further NAS to pass work to — and the supervisor does the transfers
+// itself, which is exactly what it is there for.
 func openRunner() (*download.Runner, *job.FileStore, string) {
 	store, err := job.NewFileStore(storeRoot())
 	if err != nil {
 		fatal(err)
 	}
-	host, _ := os.Hostname()
-	r := download.NewRunner(store, fmt.Sprintf("jobd@%s:%d", host, os.Getpid()))
-
-	var ds []download.Delegator
-	tier := "here"
-	if n := nas.FromEnv(); n != nil {
-		if err := n.Available(); err == nil {
-			ds = append(ds, n)
-			tier = "nas"
-		}
-	}
-	b := bits.New()
-	if err := b.Available(); err == nil {
-		ds = append(ds, b)
-		if tier == "here" {
-			tier = "bits"
-		}
-	}
-	r.Delegators = download.NewDelegators(ds...)
-	return r, store, tier
+	r := download.DiscoverIn("jobd", store)
+	return r, store, r.Tier()
 }
 
 // pass is one sweep, and the order matters.
