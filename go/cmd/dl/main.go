@@ -43,7 +43,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "list":
-		cmdList()
+		cmdList(ctx)
 	case "watch":
 		cmdWatch(ctx)
 	case "tiers":
@@ -241,8 +241,17 @@ func report(store *job.FileStore, id string) {
 	}
 }
 
-func cmdList() {
-	_, store := openRunner()
+// cmdList reconciles before printing.
+//
+// Without that it reports the local record, which for a delegated job is only
+// as fresh as the last time somebody looked — so a download the NAS finished
+// minutes ago still reads "running". "What is downloading?" has to be true, not
+// merely cheap to answer, and reconciling is a few file reads.
+func cmdList(ctx context.Context) {
+	r, store := openRunner()
+	if r.Delegators != nil {
+		r.ReconcileAll(ctx)
+	}
 	all, err := store.List()
 	if err != nil {
 		fatal(err)
