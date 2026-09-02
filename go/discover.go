@@ -7,7 +7,7 @@ import (
 
 // Discover is the whole integration, for an application that knows nothing.
 //
-//	r, err := download.Discover("lemonade")
+//	r, err := download.Discover()
 //
 // It reads what this machine has — from the location a setup step wrote once,
 // not from anything the caller supplies — registers every tier that is present
@@ -18,18 +18,18 @@ import (
 //
 // Presence is the configuration. Lemonade chooses the NAS about as much as a
 // Java library chooses Logback.
-func Discover(program string) (*Runner, error) {
+func Discover() (*Runner, error) {
 	store, err := storeFor()
 	if err != nil {
 		return nil, err
 	}
-	return DiscoverIn(program, store), nil
+	return DiscoverIn(store), nil
 }
 
 // DiscoverIn is Discover against a store the caller already has open.
-func DiscoverIn(program string, store *job.FileStore) *Runner {
+func DiscoverIn(store *job.FileStore) *Runner {
 	cfg := config.Load()
-	r := NewRunner(store, Owner(program))
+	r := NewRunner(store, Owner())
 	r.Delegators = NewDelegators(available(cfg)...)
 	return r
 }

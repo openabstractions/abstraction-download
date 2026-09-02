@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	config "github.com/ReinisLusis/abstraction-config"
@@ -115,12 +116,38 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// Owner identifies this process in a lease. Host and pid are both needed: a
-// lease held by a process on another machine cannot be broken by checking
-// whether that pid is alive here.
-func Owner(program string) string {
+// Owner identifies this process in a lease: program, host and pid.
+//
+// All three are needed. A lease held by a process on another machine cannot be
+// broken by checking whether that pid is alive here, so the host has to be on
+// the record; the program name is what makes a stalled job legible to a human
+// reading the store later.
+//
+// The program name is NOT a parameter, and that is deliberate. Asking an
+// application to state its own name is asking for a claim, and this project has
+// spent a lot of effort establishing that claims are the weak kind of identity.
+// The operating system already knows which executable is running. Reading it
+// from there is both less work for the caller and harder to get wrong — nobody
+// can typo it, and nobody can copy an integration snippet from another project
+// and end up with every lease in the store claiming to be "lemonade".
+func Owner() string {
 	host, _ := os.Hostname()
-	return fmt.Sprintf("%s@%s:%d", program, host, os.Getpid())
+	return fmt.Sprintf("%s@%s:%d", Program(), host, os.Getpid())
+}
+
+// Program is the name of the running executable, as the OS reports it.
+//
+// Falls back to os.Args[0] and then to "unknown". An empty or invented name
+// would be worse than an honest "unknown": a store full of leases owned by
+// nobody in particular is a store nobody can debug.
+func Program() string {
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return strings.TrimSuffix(filepath.Base(exe), ".exe")
+	}
+	if len(os.Args) > 0 && os.Args[0] != "" {
+		return strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+	}
+	return "unknown"
 }
 
 // storeFor opens the store, for Discover.

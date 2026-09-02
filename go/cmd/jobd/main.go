@@ -139,7 +139,7 @@ func openRunner() (*download.Runner, *job.FileStore, string) {
 	if err != nil {
 		fatal(err)
 	}
-	r := download.DiscoverIn("jobd", store)
+	r := download.DiscoverIn(store)
 	return r, store, r.Tier()
 }
 
