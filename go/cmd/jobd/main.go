@@ -44,6 +44,18 @@ import (
 	"github.com/ReinisLusis/abstraction-download/bits"
 	"github.com/ReinisLusis/abstraction-download/nas"
 	job "github.com/ReinisLusis/abstraction-job"
+
+	// Mozilla's CA bundle, compiled in. Used only when the system has no trust
+	// store of its own, which is exactly the case in a FROM scratch container.
+	//
+	// This is what lets the image contain one file. Without it the binary needs
+	// /etc/ssl/certs/ca-certificates.crt from somewhere, that somewhere was
+	// Alpine, and the whole image existed to deliver one text file — with the
+	// real payload bind-mounted in from the host, which is not an image at all.
+	//
+	// It lives here in main rather than in the library, so nothing that imports
+	// the download package inherits a root store it did not ask for.
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 func main() {
