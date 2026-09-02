@@ -77,6 +77,10 @@ func (h Handoff) String() string {
 // machine ends up doing it.
 func (r *Runner) Handoff() Handoff {
 	if _, live := SupervisorOf(r.Store); live {
+		// Tell it to look now rather than at its next sweep. Best effort: if the
+		// nudge goes nowhere the sweep still finds the job, and the only thing
+		// lost is the wait. See nudge.go.
+		Nudge(r.Store)
 		return LeftToSupervisor
 	}
 	return RunHere

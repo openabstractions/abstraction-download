@@ -214,6 +214,19 @@ func cmdRun(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Listen for nudges. An application that has just submitted work can say
+	// "look now" instead of leaving it to sit until the next tick. The socket is
+	// an accelerant, never a source of truth: it carries no job id and no
+	// payload, so losing it costs latency and nothing else — which is why the
+	// ticker below stays exactly as it was.
+	var nudges <-chan struct{}
+	if n, err := download.ListenForNudges(store); err == nil {
+		defer n.Close()
+		nudges = n.C()
+	} else {
+		fmt.Fprintf(os.Stderr, "jobd: not listening for nudges (%v); sweeping on the timer only\n", err)
+	}
+
 	t := time.NewTicker(*interval)
 	defer t.Stop()
 	for {
@@ -231,6 +244,7 @@ func cmdRun(args []string) {
 		case <-ctx.Done():
 			fmt.Println("jobd: stopping. Anything in flight keeps its checkpoint.")
 			return
+		case <-nudges:
 		case <-t.C:
 		}
 	}
