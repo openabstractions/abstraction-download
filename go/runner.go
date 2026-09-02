@@ -400,3 +400,41 @@ func deliver(partial, final string) error {
 	in.Close()
 	return os.Remove(partial)
 }
+
+// TakeDelivery is the requester saying "I have it".
+//
+// StateTransferred means the bytes are here and proven and nobody has claimed
+// them yet. That second half existed in the design from the start — BITS forces
+// it, and the survey found the same shape everywhere the worker and the consumer
+// are different processes — but nothing in this layer ever performed it. So
+// finished jobs accumulated in the store forever, `dl watch` listed downloads
+// that had completed days earlier, and the state that was supposed to mean
+// "waiting for you" meant "waiting for nobody".
+//
+// It is idempotent and it is not an error to call on a job somebody else has
+// already acknowledged: taking delivery twice is the same as taking it once.
+func (r *Runner) TakeDelivery(id string) error {
+	rec, err := r.Store.Load(id)
+	if err != nil {
+		return err
+	}
+	if rec.State == job.StateComplete {
+		return nil
+	}
+	if rec.State != job.StateTransferred {
+		return fmt.Errorf("download: %s is %s, not %s", id, rec.State, job.StateTransferred)
+	}
+	claimed, err := r.Store.Claim(id, r.Owner, r.LeaseTTL)
+	if err != nil {
+		// Somebody else is mid-delivery. The bytes are still there and still
+		// proven, so this is not a failure of ours.
+		return nil
+	}
+	epoch := claimed.Lease.Epoch
+	_, err = r.Store.Update(id, epoch, func(rr *job.Record) error {
+		rr.State = job.StateComplete
+		return nil
+	})
+	r.Store.Release(id, epoch)
+	return err
+}

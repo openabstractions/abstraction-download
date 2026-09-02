@@ -1,10 +1,17 @@
 // dl downloads a URL, and shows you what actually happened.
 //
 // It is the generic downloader — the layer below modelget, which knows about
-// models. dl knows about bytes. Give it a URL and it prints which tiers this
-// machine has, which one took the work, and then follows the job wherever it
-// runs: in this process, inside the Windows transfer service, or on a NAS with
-// this program closed.
+// models. dl knows about bytes.
+//
+// Note what it does NOT import: no bits, no nas, no tier of any kind. An
+// application asks one question — is there a system downloader on this machine —
+// and if there is, the job is already sitting in the store that service watches,
+// so dl can exit. Whether the service then uses a NAS, the Windows transfer
+// service, or its own two hands is the service's business, configured once.
+//
+// A library that logs knows about a facade and a default. It does not know which
+// file or which collector the sinks point at, and it would be a worse library if
+// it did.
 //
 //	dl https://example.com/big.iso
 //	dl https://example.com/big.iso -o D:/downloads/
@@ -17,7 +24,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -27,7 +33,6 @@ import (
 	"time"
 
 	download "github.com/ReinisLusis/abstraction-download"
-	_ "github.com/ReinisLusis/abstraction-download/all"
 	job "github.com/ReinisLusis/abstraction-job"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -85,19 +90,30 @@ func openRunner() (*download.Runner, *job.FileStore) {
 }
 
 func cmdTiers() {
-	r, store := openRunner()
+	_, store := openRunner()
 	root, _ := download.StoreRoot()
-	fmt.Printf("store         %s\n", root)
-	fmt.Printf("linked in     %v\n", download.RegisteredTiers())
-	fmt.Printf("usable here   %s\n", r.Tier())
-	fmt.Println()
-	if r.Tier() == "here" {
-		fmt.Println("Nothing to delegate to, so downloads run in this process and stop when")
-		fmt.Println("it does. That is the bottom of the chain, not a failure.")
-	} else {
-		fmt.Printf("Downloads are handed to %q, which keeps going with this program closed.\n", r.Tier())
+	fmt.Printf("store        %s\n", root)
+
+	sup, live := download.SupervisorOf(store)
+	if !live {
+		if sup.Owner != "" {
+			fmt.Printf("supervisor   none (last seen %s, treated as gone)\n",
+				sup.Seen.Format(time.RFC3339))
+		} else {
+			fmt.Println("supervisor   none")
+		}
+		fmt.Println()
+		fmt.Println("Downloads run in this process and stop when it does. That is the bottom")
+		fmt.Println("of the chain, not a failure. Start one with:  jobd run")
+		return
 	}
-	_ = store
+	fmt.Printf("supervisor   %s\n", sup.Owner)
+	if sup.Tier != "" && sup.Tier != "here" {
+		fmt.Printf("             which itself delegates to %q\n", sup.Tier)
+	}
+	fmt.Println()
+	fmt.Println("Downloads are left for the system downloader, which keeps going with this")
+	fmt.Println("program closed. Where it sends them is its business, not dl's.")
 }
 
 func cmdGet(ctx context.Context, args []string) {
@@ -134,19 +150,21 @@ func cmdGet(ctx context.Context, args []string) {
 	fmt.Printf("%s\n", url)
 	fmt.Printf("  to        %s\n", abs)
 	fmt.Printf("  job       %s\n", id)
-	fmt.Printf("  tiers     %v linked, %q usable\n\n", download.RegisteredTiers(), r.Tier())
-
-	// Try to hand it over first. Nothing here names a tier: if this machine has
-	// something better than this process, it gets the work.
-	if err := r.Delegate(ctx, id); err == nil {
-		fmt.Printf("handed to %s — it continues if this program exits.\n\n", r.Tier())
-		follow(ctx, r, store, id, true)
+	// The only question an application gets to ask. Not "is there a NAS" — dl has
+	// never heard of one — but "is something else on this machine going to do
+	// this". If yes, the job is already in the store that service watches and
+	// there is nothing further to do.
+	if r.Handoff() == download.LeftToSupervisor {
+		sup, _ := download.SupervisorOf(store)
+		fmt.Printf("  left for  %s\n\n", sup.Owner)
+		fmt.Println("The system downloader has it. This program can exit and the download")
+		fmt.Println("will not stop. Following it anyway, by reading the record:")
+		fmt.Println()
+		follow(ctx, r, store, id, false)
 		return
-	} else if !errors.Is(err, download.ErrNoDelegator) {
-		fmt.Fprintf(os.Stderr, "dl: could not delegate (%v); doing it here\n", err)
 	}
 
-	fmt.Println("nothing better than this process on this machine; downloading here.")
+	fmt.Printf("  no supervisor on this machine, so downloading here\n\n")
 	fmt.Println("(close this and run `dl list` — the job and its progress survive)")
 	fmt.Println()
 
@@ -190,8 +208,14 @@ func follow(ctx context.Context, r *download.Runner, store *job.FileStore, id st
 		}
 		if rec.State == job.StateTransferred || rec.State.Terminal() {
 			fmt.Println()
-			if reconcile {
+			if rec.State == job.StateTransferred {
 				report(store, id)
+				// Take delivery: the requester saying "I have it". Without this a
+				// finished job waits in the store forever for somebody who never
+				// comes, and `dl watch` fills with downloads that ended days ago.
+				if err := r.TakeDelivery(id); err != nil {
+					fmt.Fprintf(os.Stderr, "dl: %v\n", err)
+				}
 			}
 			return
 		}
@@ -282,7 +306,10 @@ func cmdWatch(ctx context.Context) {
 		fmt.Print("\033[H\033[2J")
 		live := 0
 		for _, rec := range all {
-			if rec.Kind != download.Kind || rec.State == job.StateComplete {
+			// Terminal and transferred are both finished. Transferred used to be
+			// shown forever, because nothing in the layer ever took delivery, so
+			// watch filled with downloads that had ended days earlier.
+			if rec.Kind != download.Kind || rec.State.Terminal() || rec.State == job.StateTransferred {
 				continue
 			}
 			spec, _ := download.SpecOf(rec)

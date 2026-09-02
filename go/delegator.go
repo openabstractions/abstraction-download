@@ -365,3 +365,41 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// DelegateAll offers every unclaimed job to the tiers this process has, and it
+// is the second hop of the chain.
+//
+// Without it the chain stopped one link short. An application handed work to the
+// supervisor, and the supervisor — which is the process that knows about BITS
+// and a NAS — downloaded everything itself, because its sweep only reconciled
+// what was already delegated and adopted what was stranded. Nothing ever asked
+// "should this go somewhere better?". The NAS was configured, reachable,
+// registered, and never used.
+//
+// Order matters in the sweep that calls this: reconcile, then delegate, then
+// adopt. Delegating before adopting is what stops the supervisor grabbing a job
+// it should have passed on; adopting last means anything nobody wanted still
+// gets done here rather than sitting forever.
+func (r *Runner) DelegateAll(ctx context.Context) (int, error) {
+	if r.Delegators == nil || len(r.Delegators.all) == 0 {
+		return 0, nil
+	}
+	candidates, err := r.Store.Orphans()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, o := range candidates {
+		if o.Kind != Kind || o.Delegated() {
+			continue
+		}
+		// ErrNoDelegator is the ordinary answer for a job no registered tier can
+		// serve — a file: source when only BITS is present, say — and it means
+		// "leave it for Adopt", not "something went wrong".
+		if err := r.Delegate(ctx, o.ID); err != nil {
+			continue
+		}
+		n++
+	}
+	return n, nil
+}

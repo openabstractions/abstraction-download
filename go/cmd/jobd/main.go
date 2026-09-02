@@ -148,18 +148,25 @@ func openRunner() (*download.Runner, *job.FileStore, string) {
 // Reconcile first: a delegated job that has finished needs finalising and
 // verifying, and doing that before adopting means the orphan pass does not pick
 // up work the delegate has in fact already completed.
-func pass(ctx context.Context, r *download.Runner) (reconciled, adopted int) {
+func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopted int) {
 	if r.Delegators != nil {
-		n, err := r.ReconcileAll(ctx)
-		if err == nil {
+		if n, err := r.ReconcileAll(ctx); err == nil {
 			reconciled = n
 		}
+		// Then offer anything unclaimed to a better tier. This is the second hop
+		// of the chain, and it was missing: applications handed work to this
+		// supervisor, and the supervisor downloaded everything itself because
+		// nothing ever asked "should this go somewhere better?". A configured,
+		// reachable, registered NAS was never used.
+		if n, err := r.DelegateAll(ctx); err == nil {
+			delegated = n
+		}
 	}
-	n, err := r.Adopt(ctx)
-	if err == nil {
+	// Last: whatever nobody else wanted is still ours to finish.
+	if n, err := r.Adopt(ctx); err == nil {
 		adopted = n
 	}
-	return reconciled, adopted
+	return reconciled, delegated, adopted
 }
 
 func cmdOnce(args []string) {
@@ -171,12 +178,12 @@ func cmdOnce(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
-	rec, ad := pass(ctx, r)
-	if *quiet && rec == 0 && ad == 0 {
+	rec, del, ad := pass(ctx, r)
+	if *quiet && rec == 0 && del == 0 && ad == 0 {
 		return
 	}
-	fmt.Printf("%s  reconciled=%d adopted=%d delegates-to=%s\n",
-		time.Now().Format(time.RFC3339), rec, ad, tier)
+	fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delegates-to=%s\n",
+		time.Now().Format(time.RFC3339), rec, del, ad, tier)
 }
 
 func cmdRun(args []string) {
@@ -184,8 +191,22 @@ func cmdRun(args []string) {
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
 	fs.Parse(args)
 
-	r, _, tier := openRunner()
+	r, store, tier := openRunner()
 	fmt.Printf("jobd: watching %s (delegates to: %s)\n", storeRoot(), tier)
+
+	// Announce, so applications on this machine stop downloading things
+	// themselves. This is the entire discovery protocol: a file in the store both
+	// sides can already see. An application asks "is a system downloader alive
+	// here", never "is there a NAS" — which tier this supervisor uses is its
+	// business, one hop further down.
+	owner := download.Owner()
+	if err := download.Heartbeat(store, owner, tier, *interval); err != nil {
+		fmt.Fprintf(os.Stderr, "jobd: could not announce (%v); applications will download in-process\n", err)
+	}
+	// Stop announcing on a clean exit, so nothing hands work to a supervisor that
+	// has gone. A kill leaves the heartbeat behind, which is why readers treat it
+	// as stale rather than trusting it forever.
+	defer download.StopHeartbeat(store)
 
 	// Stop cleanly on Ctrl+C or a service stop. An interrupted sweep is safe —
 	// the lease lapses and the next owner continues — but exiting tidily
@@ -196,9 +217,15 @@ func cmdRun(args []string) {
 	t := time.NewTicker(*interval)
 	defer t.Stop()
 	for {
-		if rec, ad := pass(ctx, r); rec > 0 || ad > 0 {
-			fmt.Printf("%s  reconciled=%d adopted=%d\n",
-				time.Now().Format(time.RFC3339), rec, ad)
+		// Refresh before working, not after. A sweep can take a long time when it
+		// is doing a 40 GB download itself, and a heartbeat that went stale
+		// meanwhile would send every application back to downloading in-process
+		// while this one is busy.
+		download.Heartbeat(store, owner, tier, *interval)
+
+		if rec, del, ad := pass(ctx, r); rec > 0 || del > 0 || ad > 0 {
+			fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d\n",
+				time.Now().Format(time.RFC3339), rec, del, ad)
 		}
 		select {
 		case <-ctx.Done():
