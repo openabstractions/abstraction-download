@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	job "github.com/ReinisLusis/abstraction-job"
+	storage "github.com/ReinisLusis/abstraction-storage"
 )
 
 // Service is downloading, for an application that holds no store, no runner and
@@ -73,9 +74,20 @@ type Service interface {
 // NewService wraps a runner and its store. Applications get one from the
 // abstraction root rather than building it; this exists for the supervisor and
 // for tests, which legitimately work a layer down.
-func NewService(r *Runner) Service { return &service{runner: r} }
+func NewService(r *Runner, opts ...func(*service)) Service {
+	s := &service{runner: r}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
 
-type service struct{ runner *Runner }
+type service struct {
+	runner *Runner
+	// store is optional: without one the service always fetches, and the caller
+	// must name a destination. See store.go.
+	store storage.Store
+}
 
 func (s *service) Open(id string) job.Job { return job.Open(s.runner.Store, id, Owner()) }
 
@@ -97,7 +109,9 @@ func Open() (Service, job.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return NewService(r), r.Store, nil
+	// Whatever content-addressed stores this machine has, so a download that is
+	// already on the disk becomes a local copy instead of a transfer.
+	return NewService(r, WithStorage(storage.New(storage.Discover()...))), r.Store, nil
 }
 
 func (s *service) Jobs() job.Subscription { return job.Watch(s.runner.Store, Kind) }
@@ -136,6 +150,17 @@ func (s *service) Get(source, destination string) (job.Job, error) {
 }
 
 func (s *service) Submit(spec Spec, requires ...string) (job.Job, error) {
+	// Where the bytes land, when the caller did not say. Only possible for a
+	// caller that knows the digest, because the store is addressed by content —
+	// which is why Get, which has only a URL, still names a path.
+	spec, err := s.intoStorage(spec)
+	if err != nil {
+		return nil, err
+	}
+	// Bytes already on this machine go in front of the network. This is where
+	// 116 GB across four stores stops being four copies.
+	spec = s.alreadyHere(spec)
+
 	// Asking twice for the same thing is one piece of work, not two.
 	//
 	// Without this, running the same command again starts a SECOND transfer of
@@ -153,9 +178,9 @@ func (s *service) Submit(spec Spec, requires ...string) (job.Job, error) {
 		s.begin(existing)
 		return s.Open(existing), nil
 	}
-	id, err := Submit(s.runner.Store, spec, requires...)
-	if err != nil {
-		return nil, err
+	id, err2 := Submit(s.runner.Store, spec, requires...)
+	if err2 != nil {
+		return nil, err2
 	}
 	s.begin(id)
 	return s.Open(id), nil

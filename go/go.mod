@@ -12,3 +12,7 @@ require (
 replace github.com/ReinisLusis/abstraction-job => ../../job/go
 
 replace github.com/ReinisLusis/abstraction-config => ../../config/go
+
+require github.com/ReinisLusis/abstraction-storage v0.0.0
+
+replace github.com/ReinisLusis/abstraction-storage => ../../storage/go
