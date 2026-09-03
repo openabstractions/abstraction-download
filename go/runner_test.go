@@ -29,7 +29,7 @@ func payload(t *testing.T, n int) ([]byte, string) {
 	return b, "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func newRunner(t *testing.T) (*Runner, *job.FileStore, string) {
+func newRunner(t *testing.T) (*Runner, job.Store, string) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := job.NewFileStore(root)
@@ -41,7 +41,7 @@ func newRunner(t *testing.T) (*Runner, *job.FileStore, string) {
 	return r, store, root
 }
 
-func submit(t *testing.T, store *job.FileStore, root, digest string, size int64, sources ...Source) string {
+func submit(t *testing.T, store job.Store, root, digest string, size int64, sources ...Source) string {
 	t.Helper()
 	id, err := Submit(store, Spec{
 		Artifact: Artifact{Digest: digest, Size: size},
@@ -55,7 +55,7 @@ func submit(t *testing.T, store *job.FileStore, root, digest string, size int64,
 }
 
 // partialOf reads the working file's path out of the job's own spec.
-func partialOf(t *testing.T, store *job.FileStore, id string) string {
+func partialOf(t *testing.T, store job.Store, id string) string {
 	t.Helper()
 	rec, err := store.Load(id)
 	if err != nil {
@@ -65,11 +65,11 @@ func partialOf(t *testing.T, store *job.FileStore, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	partial, _ := spec.Sink.Resolve(store.Root())
+	partial, _ := LocalSink(store, spec.Sink)
 	return partial
 }
 
-func finalOf(t *testing.T, store *job.FileStore, id string) string {
+func finalOf(t *testing.T, store job.Store, id string) string {
 	t.Helper()
 	rec, err := store.Load(id)
 	if err != nil {
@@ -79,7 +79,7 @@ func finalOf(t *testing.T, store *job.FileStore, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, final := spec.Sink.Resolve(store.Root())
+	_, final := LocalSink(store, spec.Sink)
 	return final
 }
 
@@ -100,7 +100,7 @@ func rangeServer(t *testing.T, body []byte) *httptest.Server {
 // used 1ms, the Update below failed with ErrLeaseExpiry, the test ignored the
 // error, and the job was left with verified_prefix 0 — so two resume tests were
 // silently not testing resume at all.
-func stageDeadOwner(t *testing.T, store *job.FileStore, id string, done, verified int64) {
+func stageDeadOwner(t *testing.T, store job.Store, id string, done, verified int64) {
 	t.Helper()
 	const ttl = 100 * time.Millisecond
 	held, err := store.Claim(id, "dead-owner", ttl)
@@ -401,7 +401,7 @@ func TestProgressIsVisibleToAnotherProcess(t *testing.T) {
 	if err := r.Run(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	observer, err := job.NewFileStore(store.Root())
+	observer, err := job.NewFileStore(localRoot(store))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -116,6 +116,31 @@ func NewDelegators(ds ...Delegator) *Delegators { return &Delegators{all: ds} }
 
 func (d *Delegators) Add(x Delegator) { d.all = append(d.all, x) }
 
+// Without returns these delegators minus one system, so a supervisor can be run
+// deliberately one tier lower than the machine would otherwise choose.
+//
+// This is for the operator, not for applications, and the difference is the
+// whole design. An application must never say "not the NAS" — it does not know
+// what a NAS is. A person standing at the machine saying "show me what happens
+// without it" is asking a legitimate question about their own computer, and
+// answering it is how the tiers become demonstrable rather than asserted.
+//
+// Deliberately negative-only. There is no Only(system): forcing a tier that is
+// not configured or not reachable cannot work, and a flag that silently does
+// nothing is worse than no flag.
+func (d *Delegators) Without(system string) *Delegators {
+	if d == nil {
+		return NewDelegators()
+	}
+	kept := make([]Delegator, 0, len(d.all))
+	for _, x := range d.all {
+		if x.System() != system {
+			kept = append(kept, x)
+		}
+	}
+	return &Delegators{all: kept}
+}
+
 func (d *Delegators) For(src Source, requires []string) (Delegator, bool) {
 	for _, x := range d.all {
 		if !hasScheme(x.Schemes(), src.Scheme) {
@@ -187,8 +212,25 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		return err
 	}
 
+	// Work already proven must not be handed to something that will start over.
+	//
+	// Measured, not assumed: a 16 MiB transfer interrupted with 6,586,368 bytes
+	// checkpointed was delegated to BITS, which issued a GET with no Range header
+	// and fetched the whole file again. The digest still matched, so nothing was
+	// corrupt — it was simply thrown away, which on a 40 GB model over a slow
+	// link is the entire complaint this project exists to answer.
+	//
+	// So a delegate that cannot resume is only eligible from zero. When none
+	// qualifies, this returns ErrNoDelegator, the job stays unclaimed, and the
+	// supervisor's own adoption pass runs it here — where the checkpoint IS
+	// honoured. Slower than a NAS, and it keeps the bytes.
+	requires := rec.Requires
+	if cp.VerifiedPrefix > 0 {
+		requires = append(append([]string{}, requires...), string(CapResume))
+	}
+
 	for _, src := range spec.Sources {
-		d, ok := r.Delegators.For(src, rec.Requires)
+		d, ok := r.Delegators.For(src, requires)
 		if !ok {
 			continue
 		}
@@ -197,7 +239,7 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		// A delegate is a different process, sometimes a different account, and
 		// it has no idea where our store lives. Hand it paths that are already
 		// real on the machine it runs on.
-		one.Sink.Partial, one.Sink.Final = spec.Sink.Resolve(r.Store.Root())
+		one.Sink.Partial, one.Sink.Final = LocalSink(r.Store, spec.Sink)
 		extID, err := d.Start(ctx, one, cp.VerifiedPrefix)
 		if err != nil {
 			continue
@@ -219,6 +261,16 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		r.Store.Release(id, epoch)
 		return nil
 	}
+
+	// Nothing here can take it, so let go of the lease claimed at the top.
+	//
+	// Holding it would make the job invisible to the very sweep that should run
+	// it: Adopt only takes orphans, and a job leased by a supervisor that is not
+	// working on it is not an orphan. The result was a livelock — delegate,
+	// fail, hold, expire, delegate again — that never moved a byte. It was
+	// unreachable while every delegator claimed it could resume, and became the
+	// normal path the moment they stopped lying.
+	r.Store.Release(id, epoch)
 	return ErrNoDelegator
 }
 
@@ -306,7 +358,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		_, final := spec.Sink.Resolve(r.Store.Root())
+		_, final := LocalSink(r.Store, spec.Sink)
 		if err := d.Finalize(ctx, rec.Delegation.ExternalID, final); err != nil {
 			return err
 		}

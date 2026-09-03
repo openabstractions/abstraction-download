@@ -37,8 +37,15 @@ import (
 // is the failure this whole project exists to avoid.
 const nudgeName = "supervisor.sock"
 
-func nudgePath(store *job.FileStore) string {
-	return filepath.Join(store.Root(), nudgeName)
+// nudgePath is "" when the store's binding is not a local filesystem. A nudge is
+// a hint with no payload, so a binding that has its own channel will deliver it
+// its own way, and one that has neither still loses nothing: the sweep comes.
+func nudgePath(store job.Store) string {
+	root := localRoot(store)
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, nudgeName)
 }
 
 // Nudge asks the supervisor watching this store to sweep now.
@@ -46,7 +53,7 @@ func nudgePath(store *job.FileStore) string {
 // Best effort by construction. Every failure — no supervisor, a stale socket, a
 // busy one, a platform without unix sockets — is silently fine, because the
 // sweep is still coming.
-func Nudge(store *job.FileStore) {
+func Nudge(store job.Store) {
 	c, err := net.DialTimeout("unix", nudgePath(store), 250*time.Millisecond)
 	if err != nil {
 		return
@@ -68,7 +75,7 @@ type Nudges struct {
 // first — refusing to start because of the corpse of a previous run is not
 // useful behaviour, and the heartbeat is what actually establishes whether a
 // supervisor is alive.
-func ListenForNudges(store *job.FileStore) (*Nudges, error) {
+func ListenForNudges(store job.Store) (*Nudges, error) {
 	path := nudgePath(store)
 	os.Remove(path)
 	ln, err := net.Listen("unix", path)

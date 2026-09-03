@@ -142,10 +142,22 @@ func TestIdentity(t *testing.T) {
 	for _, c := range d.Capabilities() {
 		caps[c] = true
 	}
-	for _, c := range []download.Capability{download.CapResume, download.CapSurvivesProcessExit, download.CapDelegates} {
+	for _, c := range []download.Capability{download.CapSurvivesProcessExit, download.CapDelegates} {
 		if !caps[c] {
 			t.Fatalf("Capabilities = %v, missing %q", d.Capabilities(), c)
 		}
+	}
+	// CapResume must NOT be claimed, and this assertion used to say the
+	// opposite. Start-BitsTransfer owns its own temporary file; there is no way
+	// to hand it bytes another process already wrote, and Start ignores its
+	// `from` argument entirely. Measured: a handover with 6,586,368 bytes proven
+	// produced a GET carrying no Range header and re-fetched the whole file.
+	//
+	// The Runner now refuses to delegate work with a proven prefix to anything
+	// that does not claim this, so re-adding it here would silently reinstate
+	// throwing that work away.
+	if caps[download.CapResume] {
+		t.Fatal("BITS claims it can resume from an offset; it starts over, and the Runner trusts this")
 	}
 	// The one it must NOT claim. BITS "guarantees that the version of the file
 	// it transfers is consistent based on the file size and time stamp, not

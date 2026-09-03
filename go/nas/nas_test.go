@@ -22,7 +22,7 @@ import (
 // are two different roots, which is the only thing that made the real thing
 // hard — the record has to mean the same work in both.
 type twoMachines struct {
-	local, remote *job.FileStore
+	local, remote job.Store
 	localRoot     string
 	remoteRoot    string
 	del           *Delegator

@@ -155,7 +155,17 @@ func (d *Delegator) Schemes() []string { return []string{"http", "https", "smb"}
 // content, and claiming otherwise would tell the Runner it may skip the hash.
 func (d *Delegator) Capabilities() []download.Capability {
 	return []download.Capability{
-		download.CapResume,
+		// NOT CapResume, though this claimed it for a long time.
+		//
+		// CapResume means "can start from a byte offset rather than from zero",
+		// and BITS cannot. Start-BitsTransfer owns its own temporary file and
+		// there is no way to hand it a partial somebody else wrote; Start
+		// accepts a `from` argument here and has always ignored it. Measured: a
+		// job handed over with 6,586,368 bytes proven produced a GET with no
+		// Range header and re-fetched the lot.
+		//
+		// A false capability is worse than a missing one, because Requires
+		// exists so that callers can trust these.
 		download.CapSurvivesProcessExit,
 		download.CapDelegates,
 	}

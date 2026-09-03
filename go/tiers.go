@@ -151,7 +151,7 @@ func Program() string {
 }
 
 // storeFor opens the store, for Discover.
-func storeFor() (*job.FileStore, error) {
+func storeFor() (job.Store, error) {
 	root, err := StoreRoot()
 	if err != nil {
 		return nil, err

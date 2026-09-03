@@ -104,7 +104,7 @@ func (s Spec) Validate() error {
 // Submit creates a download job. It fills in a partial path under the store's
 // own work directory when the caller does not choose one, so a successor can
 // find what a predecessor left without either of them agreeing on a convention.
-func Submit(store *job.FileStore, spec Spec, requires ...string) (string, error) {
+func Submit(store job.Store, spec Spec, requires ...string) (string, error) {
 	if err := spec.Validate(); err != nil {
 		return "", err
 	}

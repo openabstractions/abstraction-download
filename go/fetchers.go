@@ -17,7 +17,8 @@ import (
 type reportWriter struct {
 	w       io.Writer
 	n       int64
-	report  func(int64)
+	total   int64 // the artifact's full size, if this source disclosed one
+	report  func(written, total int64)
 	lastRep time.Time
 }
 
@@ -26,7 +27,7 @@ func (rw *reportWriter) Write(p []byte) (int, error) {
 	rw.n += int64(n)
 	if rw.report != nil && time.Since(rw.lastRep) > 100*time.Millisecond {
 		rw.lastRep = time.Now()
-		rw.report(rw.n)
+		rw.report(rw.n, rw.total)
 	}
 	return n, err
 }
@@ -91,15 +92,17 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 		return Result{}, fmt.Errorf("download: %s: %s", req.Source.Locator, resp.Status)
 	}
 
-	rw := &reportWriter{w: req.Out, report: req.Report}
-	written, err := io.Copy(rw, resp.Body)
-	if err != nil {
-		return Result{Written: written}, err
-	}
-
+	// Worked out BEFORE the copy, not after it. Content-Length on a 200 is the
+	// whole artifact; on a 206 it is what remains, so From has to be added back.
 	total := int64(0)
 	if resp.ContentLength > 0 {
 		total = req.From + resp.ContentLength
+	}
+
+	rw := &reportWriter{w: req.Out, total: total, report: req.Report}
+	written, err := io.Copy(rw, resp.Body)
+	if err != nil {
+		return Result{Written: written, Total: total}, err
 	}
 	return Result{Written: written, Total: total}, nil
 }
@@ -136,7 +139,7 @@ func (File) Fetch(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
-	rw := &reportWriter{w: req.Out, report: req.Report}
+	rw := &reportWriter{w: req.Out, total: st.Size(), report: req.Report}
 	written, err := copyWithContext(ctx, rw, f)
 	if err != nil {
 		return Result{Written: written}, err

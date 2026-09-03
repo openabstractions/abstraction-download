@@ -57,13 +57,24 @@ type Supervisor struct {
 // heartbeatName sits beside jobs/ and work/ in the store.
 const heartbeatName = "supervisor.json"
 
-func heartbeatPath(store *job.FileStore) string {
-	return filepath.Join(store.Root(), heartbeatName)
+// heartbeatPath is "" when the store's binding is not a local filesystem.
+// Unlike a nudge, a heartbeat is not best-effort — an application decides
+// whether to hand work over based on it — so callers must not treat "" as a
+// quiet no-op. See ErrNoLocalArea.
+func heartbeatPath(store job.Store) string {
+	root := localRoot(store)
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, heartbeatName)
 }
 
 // Heartbeat records that a supervisor is alive and watching this store. jobd
 // calls it on every sweep.
-func Heartbeat(store *job.FileStore, owner, tier string, every time.Duration) error {
+func Heartbeat(store job.Store, owner, tier string, every time.Duration) error {
+	if heartbeatPath(store) == "" {
+		return ErrNoLocalArea
+	}
 	host, _ := os.Hostname()
 	s := Supervisor{
 		Owner: owner, Host: host, PID: os.Getpid(),
@@ -85,7 +96,7 @@ func Heartbeat(store *job.FileStore, owner, tier string, every time.Duration) er
 // StopHeartbeat removes the heartbeat on a clean exit, so applications stop
 // handing work to a supervisor that has gone away without waiting out the
 // staleness window.
-func StopHeartbeat(store *job.FileStore) error {
+func StopHeartbeat(store job.Store) error {
 	err := os.Remove(heartbeatPath(store))
 	if os.IsNotExist(err) {
 		return nil
@@ -99,7 +110,7 @@ func StopHeartbeat(store *job.FileStore) error {
 // is enough to survive a slow sweep or a clock that jitters, and short enough
 // that a killed supervisor stops attracting work within a minute or two rather
 // than forever.
-func SupervisorOf(store *job.FileStore) (Supervisor, bool) {
+func SupervisorOf(store job.Store) (Supervisor, bool) {
 	b, err := os.ReadFile(heartbeatPath(store))
 	if err != nil {
 		return Supervisor{}, false

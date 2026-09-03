@@ -124,7 +124,7 @@ func (f *fakeDelegate) vanish(id string) {
 	}
 }
 
-func (f *fakeDelegate) handleOf(t *testing.T, store *job.FileStore, id string) string {
+func (f *fakeDelegate) handleOf(t *testing.T, store job.Store, id string) string {
 	t.Helper()
 	rec, err := store.Load(id)
 	if err != nil {
@@ -136,7 +136,7 @@ func (f *fakeDelegate) handleOf(t *testing.T, store *job.FileStore, id string) s
 	return rec.Delegation.ExternalID
 }
 
-func newDelegatingRunner(t *testing.T, deliver []byte) (*Runner, *job.FileStore, *fakeDelegate, string) {
+func newDelegatingRunner(t *testing.T, deliver []byte) (*Runner, job.Store, *fakeDelegate, string) {
 	t.Helper()
 	r, store, root := newRunner(t)
 	fd := newFakeDelegate(deliver)

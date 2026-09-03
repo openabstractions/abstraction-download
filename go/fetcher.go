@@ -61,11 +61,22 @@ type Request struct {
 	// record and never in a Fetcher's hands longer than one request.
 	Headers map[string]string
 
-	// Report is called as bytes land, with the running total written by THIS
-	// request (not including From). It is advisory: the runner decides when to
-	// persist, because persisting on every chunk would write the record
-	// thousands of times a second.
-	Report func(written int64)
+	// Report is called as bytes land, with the running count written by THIS
+	// request (not including From), and the artifact's full size if the source
+	// has revealed it by now — 0 if it has not, and 0 is not a promise that it
+	// never will. It is advisory: the runner decides when to persist, because
+	// persisting on every chunk would write the record thousands of times a
+	// second.
+	//
+	// The size is here, and not only in Result, because of a failing case rather
+	// than an argument. Result is returned when the transfer ENDS, which is the
+	// one moment a size is no longer interesting. So `dl <url>` could never show
+	// a percentage — the server had sent Content-Length in its first response and
+	// the number sat in a local variable until the download was already over.
+	// modelget looked fine only because it resolves the size from HuggingFace
+	// before submitting, which hid the gap for every AI download and left it
+	// open for every other one.
+	Report func(written, total int64)
 }
 
 // Result is what one attempt achieved.

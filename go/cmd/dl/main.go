@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -77,22 +76,31 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func openRunner() (*download.Runner, *job.FileStore) {
-	root, err := download.StoreRoot()
+// open is the whole of this program's setup. It used to be four lines that
+// found a directory, opened a file store and built a runner — an application
+// assembling the machinery it was supposed to be spared.
+//
+// dl still takes the job.Store alongside, because it reads and renders records
+// and lives inside this layer. That is the INTERFACE, not the binding: dl cannot
+// tell whether there is a directory behind it, which is exactly the property
+// that was missing when this was a *job.FileStore.
+func open() (download.Service, job.Store) {
+	svc, store, err := download.Open()
 	if err != nil {
 		fatal(err)
 	}
-	store, err := job.NewFileStore(root)
-	if err != nil {
-		fatal(err)
-	}
-	return download.DiscoverIn(store), store
+	return svc, store
 }
 
 func cmdTiers() {
-	_, store := openRunner()
-	root, _ := download.StoreRoot()
-	fmt.Printf("store        %s\n", root)
+	_, store := open()
+	// A store that happens to be a directory says where. One that is not says
+	// what it is, rather than inventing a path to look familiar.
+	if sc, ok := store.(job.Scratch); ok {
+		fmt.Printf("store        %s\n", sc.Root())
+	} else {
+		fmt.Printf("store        a service — no local directory\n")
+	}
 
 	sup, live := download.SupervisorOf(store)
 	if !live {
@@ -129,48 +137,33 @@ func cmdGet(ctx context.Context, args []string) {
 		}
 	}
 
-	dest := out
-	if isDir(dest) {
-		dest = filepath.Join(dest, nameFromURL(url))
-	}
-	abs, err := filepath.Abs(dest)
+	svc, store := open()
+	// One call. Where the destination name comes from, whether a supervisor
+	// exists, and who ends up moving the bytes are all settled below this line —
+	// dl no longer asks and no longer branches.
+	h, err := svc.Get(url, out)
 	if err != nil {
 		fatal(err)
 	}
+	id := h.ID()
 
-	r, store := openRunner()
-	id, err := download.Submit(store, download.Spec{
-		Sources: []download.Source{{Scheme: schemeOf(url), Locator: url}},
-		Sink:    download.Sink{Final: abs},
-	})
+	rec, err := h.Record()
 	if err != nil {
 		fatal(err)
 	}
+	spec, _ := download.SpecOf(rec)
+	_, abs := download.LocalSink(store, spec.Sink)
 
 	fmt.Printf("%s\n", url)
 	fmt.Printf("  to        %s\n", abs)
 	fmt.Printf("  job       %s\n", id)
-	// The only question an application gets to ask. Not "is there a NAS" — dl has
-	// never heard of one — but "is something else on this machine going to do
-	// this". If yes, the job is already in the store that service watches and
-	// there is nothing further to do.
-	if r.Handoff() == download.LeftToSupervisor {
-		sup, _ := download.SupervisorOf(store)
-		fmt.Printf("  left for  %s\n\n", sup.Owner)
-		fmt.Println("The system downloader has it. This program can exit and the download")
-		fmt.Println("will not stop. Following it anyway, by reading the record:")
-		fmt.Println()
-		follow(ctx, r, store, id, false)
-		return
-	}
-
-	fmt.Printf("  no supervisor on this machine, so downloading here\n\n")
+	fmt.Printf("  fetched by %s\n\n", svc.Where())
 	fmt.Println("(close this and run `dl list` — the job and its progress survive)")
 	fmt.Println()
 
 	done := make(chan error, 1)
-	go func() { done <- r.Run(ctx, id) }()
-	go follow(ctx, r, store, id, false)
+	go func() { done <- waitForEnd(ctx, store, id) }()
+	go follow(ctx, svc, store, id)
 
 	if err := <-done; err != nil {
 		if ctx.Err() != nil {
@@ -183,19 +176,43 @@ func cmdGet(ctx context.Context, args []string) {
 	report(store, id)
 }
 
+// waitForEnd blocks until the job stops being in flight, by watching the live
+// collection — the only method that works when the process moving the bytes is
+// not this one. It replaces waiting on a Runner, which only ever knew about a
+// transfer this process was performing itself.
+func waitForEnd(ctx context.Context, store job.Store, id string) error {
+	sub := job.Watch(store, download.Kind)
+	defer sub.Close()
+	for {
+		for _, rec := range sub.Records() {
+			if rec.ID != id {
+				continue
+			}
+			if rec.State == job.StateFailed {
+				return fmt.Errorf("%s", rec.Error)
+			}
+			if rec.State.Terminal() || rec.State == job.StateTransferred {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-sub.Changes():
+		}
+	}
+}
+
 // follow prints progress by reading the record, which is the same thing any
 // other process would do. Nothing here is privileged and nothing is in memory:
 // stop this program, start it again, and the picture is identical.
-func follow(ctx context.Context, r *download.Runner, store *job.FileStore, id string, reconcile bool) {
+func follow(ctx context.Context, svc download.Service, store job.Store, id string) {
 	last := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Second):
-		}
-		if reconcile {
-			r.Reconcile(ctx, id)
 		}
 		rec, err := store.Load(id)
 		if err != nil {
@@ -213,7 +230,7 @@ func follow(ctx context.Context, r *download.Runner, store *job.FileStore, id st
 				// Take delivery: the requester saying "I have it". Without this a
 				// finished job waits in the store forever for somebody who never
 				// comes, and `dl watch` fills with downloads that ended days ago.
-				if err := r.TakeDelivery(id); err != nil {
+				if err := svc.TakeDelivery(id); err != nil {
 					fmt.Fprintf(os.Stderr, "dl: %v\n", err)
 				}
 			}
@@ -222,7 +239,7 @@ func follow(ctx context.Context, r *download.Runner, store *job.FileStore, id st
 	}
 }
 
-func statusLine(store *job.FileStore, rec *job.Record) string {
+func statusLine(store job.Store, rec *job.Record) string {
 	where := "here"
 	if rec.Delegated() {
 		where = rec.Delegation.System
@@ -242,7 +259,7 @@ func statusLine(store *job.FileStore, rec *job.Record) string {
 	return fmt.Sprintf("%-11s %-9s %s%s", rec.State, where, pct, note)
 }
 
-func report(store *job.FileStore, id string) {
+func report(store job.Store, id string) {
 	rec, err := store.Load(id)
 	if err != nil {
 		return
@@ -251,7 +268,7 @@ func report(store *job.FileStore, id string) {
 	if err != nil {
 		return
 	}
-	_, final := spec.Sink.Resolve(store.Root())
+	_, final := download.LocalSink(store, spec.Sink)
 	switch rec.State {
 	case job.StateTransferred, job.StateComplete:
 		fmt.Printf("\n%s\n", final)
@@ -272,10 +289,7 @@ func report(store *job.FileStore, id string) {
 // minutes ago still reads "running". "What is downloading?" has to be true, not
 // merely cheap to answer, and reconciling is a few file reads.
 func cmdList(ctx context.Context) {
-	r, store := openRunner()
-	if r.Delegators != nil {
-		r.ReconcileAll(ctx)
-	}
+	_, store := open()
 	all, err := store.List()
 	if err != nil {
 		fatal(err)
@@ -287,7 +301,7 @@ func cmdList(ctx context.Context) {
 		}
 		n++
 		spec, _ := download.SpecOf(rec)
-		_, final := spec.Sink.Resolve(store.Root())
+		_, final := download.LocalSink(store, spec.Sink)
 		fmt.Printf("%-11s %s\n", statusLine(store, rec), filepath.Base(final))
 	}
 	if n == 0 {
@@ -296,13 +310,21 @@ func cmdList(ctx context.Context) {
 }
 
 func cmdWatch(ctx context.Context) {
-	r, store := openRunner()
+	_, store := open()
 	fmt.Println("watching the store. Ctrl+C to stop; nothing stops downloading.")
+
+	// Redraw when something CHANGES, not on a timer.
+	//
+	// This used to reprint every two seconds and clear the screen with an ANSI
+	// escape first. In a terminal that does not act on that escape the lines
+	// simply accumulate, so a stalled download printed an identical row forever
+	// and looked like several jobs. Worse, it was reprinting when nothing had
+	// happened at all — the collection already knows the difference, so ask it.
+	sub := job.Watch(store, download.Kind)
+	defer sub.Close()
+
 	for {
-		if r.Delegators != nil {
-			r.ReconcileAll(ctx)
-		}
-		all, _ := store.List()
+		all := sub.Records()
 		fmt.Print("\033[H\033[2J")
 		live := 0
 		for _, rec := range all {
@@ -313,7 +335,7 @@ func cmdWatch(ctx context.Context) {
 				continue
 			}
 			spec, _ := download.SpecOf(rec)
-			_, final := spec.Sink.Resolve(store.Root())
+			_, final := download.LocalSink(store, spec.Sink)
 			fmt.Printf("%s %s\n", statusLine(store, rec), filepath.Base(final))
 			live++
 		}
@@ -324,35 +346,9 @@ func cmdWatch(ctx context.Context) {
 		case <-ctx.Done():
 			fmt.Println("\nstopped watching. Anything in flight is still going.")
 			return
-		case <-time.After(2 * time.Second):
+		case <-sub.Changes():
 		}
 	}
-}
-
-func isDir(p string) bool {
-	if strings.HasSuffix(p, "/") || strings.HasSuffix(p, `\`) || p == "." {
-		return true
-	}
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
-}
-
-func nameFromURL(u string) string {
-	if i := strings.Index(u, "?"); i >= 0 {
-		u = u[:i]
-	}
-	name := path.Base(u)
-	if name == "" || name == "/" || name == "." {
-		return "download.bin"
-	}
-	return name
-}
-
-func schemeOf(u string) string {
-	if i := strings.Index(u, "://"); i > 0 {
-		return u[:i]
-	}
-	return "https"
 }
 
 func human(n int64) string {

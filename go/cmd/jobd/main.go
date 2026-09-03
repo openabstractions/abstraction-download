@@ -58,13 +58,22 @@ import (
 )
 
 func main() {
+	// Bare `jobd` answers the question somebody typing it is actually asking —
+	// is anything running, and what is it doing — rather than printing usage at
+	// them. Usage is still one keystroke away as `jobd help`.
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		cmdStatus()
+		return
 	}
 	switch os.Args[1] {
 	case "run":
 		cmdRun(os.Args[2:])
+	case "start":
+		cmdStart(os.Args[2:])
+	case "stop":
+		cmdStop()
+	case "-h", "--help", "help":
+		usage()
 	case "once":
 		cmdOnce(os.Args[2:])
 	case "install":
@@ -84,7 +93,10 @@ func main() {
 func usage() {
 	fmt.Println(`jobd — finishes transfers nobody is watching
 
-  jobd run [--interval 30s]    supervise until stopped
+  jobd                         is one running, and what is it doing
+  jobd start [--without nas]   replace any running supervisor with a detached one
+  jobd stop                    stop the one watching this store
+  jobd run [--interval 30s]    supervise in the foreground until stopped
   jobd once                    one pass, then exit (what a scheduled task runs)
   jobd install [--at-logon]    register a scheduled task, no elevation needed
   jobd uninstall               remove it
@@ -134,12 +146,20 @@ func storeRoot() string {
 // jobd is just another caller of Discover: on a NAS that finds nothing — no
 // BITS, no further NAS to pass work to — and the supervisor does the transfers
 // itself, which is exactly what it is there for.
-func openRunner() (*download.Runner, *job.FileStore, string) {
+func openRunner(without ...string) (*download.Runner, job.Store, string) {
 	store, err := job.NewFileStore(storeRoot())
 	if err != nil {
 		fatal(err)
 	}
 	r := download.DiscoverIn(store)
+	// An operator may run this supervisor one tier lower than the machine would
+	// choose, to see what the next one down actually does. Applications get no
+	// such control and should not: they do not know what a tier is.
+	for _, w := range without {
+		if w != "" {
+			r.Delegators = r.Delegators.Without(w)
+		}
+	}
 	return r, store, r.Tier()
 }
 
@@ -189,9 +209,10 @@ func cmdOnce(args []string) {
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
+	without := fs.String("without", "", `ignore a delegation system, e.g. --without nas`)
 	fs.Parse(args)
 
-	r, store, tier := openRunner()
+	r, store, tier := openRunner(*without)
 	fmt.Printf("jobd: watching %s (delegates to: %s)\n", storeRoot(), tier)
 
 	// Announce, so applications on this machine stop downloading things
@@ -256,7 +277,26 @@ func cmdStatus() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("store: %s\ndelegates to: %s\n\n", storeRoot(), tier)
+	fmt.Printf("store: %s\n", storeRoot())
+	// Whether a supervisor is ALIVE is the first thing anyone typing this wants
+	// to know, and it was the one thing missing: the old output described what
+	// tier this process would use if it ran, which reads as a running service
+	// when nothing is running at all.
+	if sup, live := download.SupervisorOf(store); live {
+		where := sup.Tier
+		if where == "" {
+			where = "here"
+		}
+		fmt.Printf("supervisor: %s, running, delegates to: %s\n\n", sup.Owner, where)
+	} else if sup.Owner != "" {
+		fmt.Printf("supervisor: none (%s last seen %s, treated as gone)\n", sup.Owner, sup.Seen.Format(time.RFC3339))
+		fmt.Printf("            nothing is finishing these; `jobd start` fixes that\n")
+		fmt.Printf("if started here it would delegate to: %s\n\n", tier)
+	} else {
+		fmt.Printf("supervisor: none — downloads only run while an application is open\n")
+		fmt.Printf("            `jobd start` changes that\n")
+		fmt.Printf("if started here it would delegate to: %s\n\n", tier)
+	}
 	n := 0
 	for _, rec := range all {
 		if rec.Kind != download.Kind {

@@ -67,7 +67,7 @@ type Delegator struct {
 	// stopped being the generic tier.
 	Dir string
 
-	store *job.FileStore
+	store job.Store
 }
 
 // New returns a delegator for a store on a shared filesystem.
@@ -108,7 +108,17 @@ func (d *Delegator) Schemes() []string { return []string{"http", "https"} }
 // the first.
 func (d *Delegator) Capabilities() []download.Capability {
 	return []download.Capability{
-		download.CapResume,
+		// NOT CapResume. The far side resumes its OWN partials perfectly well —
+		// it runs the same runner over the same checkpoint — but that is not
+		// what this capability promises. It promises that work already proven
+		// HERE can be continued THERE, and it cannot: Start submits a fresh
+		// record to the remote store, and the bytes this machine proved are on
+		// this machine's disk, where the NAS cannot reach them. Copying them
+		// across would cost roughly what re-fetching costs.
+		//
+		// Claiming it anyway meant a locally interrupted download was silently
+		// restarted from zero on the NAS. Declining it means such a job stays
+		// here and finishes here.
 		download.CapSurvivesProcessExit,
 		download.CapVerifies,
 		download.CapDelegates,
@@ -199,7 +209,7 @@ func (d *Delegator) Finalize(ctx context.Context, externalID, dest string) error
 	if err != nil {
 		return err
 	}
-	_, src := spec.Sink.Resolve(d.store.Root())
+	_, src := download.LocalSink(d.store, spec.Sink)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("nas: the far side reported success but %s is not there: %w", src, err)
 	}

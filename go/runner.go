@@ -25,7 +25,7 @@ import (
 // the final rename. That is what lets a transfer begun by one implementation be
 // finished by a different one, which is the entire premise of the job layer.
 type Runner struct {
-	Store    *job.FileStore
+	Store    job.Store
 	Fetchers *Registry
 	// Delegators are the implementations that do the work elsewhere — a system
 	// service, a NAS daemon. Empty by default: nothing is delegated to unless
@@ -62,7 +62,7 @@ type Runner struct {
 	PersistInterval time.Duration
 }
 
-func NewRunner(store *job.FileStore, owner string) *Runner {
+func NewRunner(store job.Store, owner string) *Runner {
 	return &Runner{
 		Store:        store,
 		Fetchers:     DefaultRegistry(),
@@ -106,6 +106,19 @@ func (r *Runner) Run(ctx context.Context, id string) error {
 }
 
 func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
+	// Somebody may ask this job to stop while it is running, from a process that
+	// holds no lease and never will. Honouring that is not optional: the job
+	// layer's contract says an owner observes intent at least as often as it
+	// checkpoints and moves toward it, and an owner that reads a record and
+	// ignores the field is not an implementation of the abstraction.
+	//
+	// The check therefore lives at the checkpoint, where the record is being
+	// written anyway — no extra reads, and the interval a person waits is the
+	// interval they already accepted for progress.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	var asked job.Want
+
 	spec, err := SpecOf(rec)
 	if err != nil {
 		return err
@@ -119,7 +132,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// same record be worked on by this machine or by a NAS that mounts the store
 	// somewhere else entirely. Resolve once, here, and everything below deals in
 	// paths that are real on this machine.
-	partial, final := spec.Sink.Resolve(r.Store.Root())
+	partial, final := LocalSink(r.Store, spec.Sink)
 
 	// Resume position: the smaller of what the checkpoint says was proven and
 	// what is actually on disk. They differ after a crash — the checkpoint is
@@ -166,7 +179,17 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		return err
 	}
 
-	total, err := r.fetch(ctx, rec, spec, epoch, f, h, from)
+	total, err := r.fetch(ctx, rec, spec, epoch, f, h, from, func(w job.Want) { asked = w; stop() })
+	if asked != "" {
+		// Stopping because somebody asked is not a failure, and must not be
+		// recorded as one — the cancelled context surfaces here as an error, and
+		// letting it through would write "context canceled" into a record a
+		// person is looking at to see that their own button worked.
+		//
+		// Nothing is lost: the callback that noticed the intent had just synced
+		// and checkpointed, so the proven prefix is durable to the byte.
+		return r.honour(asked, rec.ID, epoch)
+	}
 	if err != nil {
 		return err
 	}
@@ -219,9 +242,36 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	return err
 }
 
+// honour carries out what somebody asked for, once the transfer has stopped.
+//
+// This is the half of the contract that makes Intent a contract rather than a
+// field: the job layer says an owner must converge on what was asked, and this
+// is where an owner does it.
+func (r *Runner) honour(want job.Want, id string, epoch int64) error {
+	switch want {
+	case job.WantCancel:
+		_, err := r.Store.Update(id, epoch, func(rr *job.Record) error {
+			rr.State = job.StateCancelled
+			rr.Error = ""
+			return nil
+		})
+		return err
+	case job.WantPause:
+		// Release rather than hold. Paused means nobody is working on it, and a
+		// held lease tells every reader the opposite — including the status line
+		// a person is watching to see whether their pause took effect.
+		//
+		// Releasing is safe precisely because Orphans excludes paused jobs, so
+		// letting go does not invite the next sweep to start it again. Those two
+		// decisions only work as a pair.
+		return r.Store.Release(id, epoch)
+	}
+	return nil
+}
+
 // fetch tries the sources in priority order and returns the total size of the
 // partial file when one of them succeeds.
-func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, from int64) (int64, error) {
+func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, from int64, onIntent func(job.Want)) (int64, error) {
 	sources := append([]Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Priority < sources[j].Priority })
 
@@ -251,7 +301,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 			From:    from,
 			Out:     w,
 			Headers: headers,
-			Report: func(written int64) {
+			Report: func(written, total int64) {
 				at := from + written
 				// Bytes OR time, whichever comes first. The byte threshold
 				// keeps a fast link from writing the record constantly; the
@@ -269,11 +319,29 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				if err := f.Sync(); err != nil {
 					return
 				}
-				if _, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+				updated, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 					rr.Progress.Done = at
+					// Only ever fill an unknown size in. A caller that supplied
+					// one at submission — modelget resolves it from the registry
+					// before any byte moves — has better information than a
+					// response header, and a source that lies about its length
+					// must not be able to overwrite the number the digest was
+					// chosen against.
+					if rr.Progress.Total == 0 && total > 0 {
+						rr.Progress.Total = total
+					}
 					rr.Progress.UpdatedAt = job.At(time.Now())
 					return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: at})
-				}); err != nil {
+				})
+				if err != nil {
+					return
+				}
+				// The record was just read and written, so what somebody wants
+				// is in hand at no extra cost. Stopping here rather than at the
+				// end of the transfer is the difference between a pause button
+				// that works and one that takes effect in forty minutes.
+				if w := updated.Wants(); w != job.WantRun {
+					onIntent(w)
 					return
 				}
 				r.Store.Renew(rec.ID, epoch, r.LeaseTTL)

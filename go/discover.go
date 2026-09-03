@@ -27,7 +27,7 @@ func Discover() (*Runner, error) {
 }
 
 // DiscoverIn is Discover against a store the caller already has open.
-func DiscoverIn(store *job.FileStore) *Runner {
+func DiscoverIn(store job.Store) *Runner {
 	cfg := config.Load()
 	r := NewRunner(store, Owner())
 	r.Delegators = NewDelegators(available(cfg)...)
