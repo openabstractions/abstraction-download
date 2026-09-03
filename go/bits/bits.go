@@ -387,9 +387,10 @@ func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Statu
 	}
 
 	st := download.Status{
-		State: stateOf(pr.State),
-		Done:  bytesOf(pr.Done),
-		Total: bytesOf(pr.Total),
+		State:     stateOf(pr.State),
+		Done:      bytesOf(pr.Done),
+		Total:     bytesOf(pr.Total),
+		Suspended: strings.EqualFold(strings.TrimSpace(pr.State), "suspended"),
 	}
 	if st.State == download.DelegateFailed {
 		st.Err = failureText(pr)
@@ -667,3 +668,58 @@ func isGUID(s string) bool {
 	_, ok := normalizeGUID(s)
 	return ok
 }
+
+// Suspend and Resume make BITS an implementation of download.Suspendable.
+//
+// This is the capability the pause button needs on Windows, and BITS has had it
+// all along: Start already creates every job suspended and resumes it as a
+// separate step, so nothing new is being asked of it. What was missing was
+// anything above connecting a person's request to it — the job layer honoured
+// intent only on transfers this process was performing itself, which on Windows
+// is the tier that runs when BITS is unavailable.
+//
+// A handle that no longer resolves is not an error here. BITS reaps jobs, queue
+// databases are replaced, machines get rebuilt; a job that is gone is already
+// as suspended as it will ever be, and failing would turn a normal outcome into
+// an alarm.
+func (d *Delegator) Suspend(ctx context.Context, externalID string) error {
+	return d.setPaused(ctx, externalID, true)
+}
+
+func (d *Delegator) Resume(ctx context.Context, externalID string) error {
+	return d.setPaused(ctx, externalID, false)
+}
+
+func (d *Delegator) setPaused(ctx context.Context, externalID string, paused bool) error {
+	if err := d.Available(); err != nil {
+		return err
+	}
+	id, ok := normalizeGUID(externalID)
+	if !ok {
+		return nil
+	}
+	verb := "Resume-BitsTransfer -BitsJob $job -Asynchronous"
+	what := "resuming"
+	if paused {
+		verb = "Suspend-BitsTransfer -BitsJob $job"
+		what = "suspending"
+	}
+	script := `try {
+    $job = Get-BitsTransfer -JobId $env:ABSTRACTION_BITS_JOBID -ErrorAction Stop
+} catch {
+    if ($_.FullyQualifiedErrorId -like 'GetBitsTransferInvalidIdError*') {
+        [Console]::Out.Write('gone')
+        exit 0
+    }
+    throw
+}
+` + verb + ` -ErrorAction Stop | Out-Null
+[Console]::Out.Write('ok')`
+	if _, err := d.run(ctx, script, map[string]string{"ABSTRACTION_BITS_JOBID": id}); err != nil {
+		return fmt.Errorf("bits: %s %s: %w", what, id, err)
+	}
+	return nil
+}
+
+// Compile-time proof that the pause button has somewhere to land on Windows.
+var _ download.Suspendable = (*Delegator)(nil)

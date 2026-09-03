@@ -97,6 +97,17 @@ type Status struct {
 	Done  int64
 	Total int64
 	Err   string
+	// Suspended distinguishes "stopped because somebody asked" from "running",
+	// which State deliberately does not: to a supervisor deciding whether to
+	// take work back, a suspended job is not failed and not finished, so it maps
+	// to Running and always did.
+	//
+	// It is here rather than on the record because it is an observation, not a
+	// decision. What somebody WANTS lives in Intent; this is what the delegate
+	// happens to be doing about it, and adding it to the record would have meant
+	// a schema change across three languages to carry a fact that is re-read on
+	// every poll anyway.
+	Suspended bool
 }
 
 var (
@@ -156,6 +167,9 @@ func (d *Delegators) For(src Source, requires []string) (Delegator, bool) {
 // BySystem finds the delegator that can interpret a recorded handle. Without
 // this, a job delegated by yesterday's process is unreachable today.
 func (d *Delegators) BySystem(system string) (Delegator, bool) {
+	if d == nil {
+		return nil, false
+	}
 	for _, x := range d.all {
 		if x.System() == system {
 			return x, true
@@ -293,6 +307,22 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	if rec.State.Terminal() {
 		return nil
 	}
+
+	// What somebody wants, before asking the delegate how it is getting on.
+	//
+	// This was missing entirely, and the gap was the worst possible shape: the
+	// in-process runner honoured intent at every checkpoint, so pause and cancel
+	// worked — on the tier that is used when nothing better is available. Every
+	// job that went to BITS or a NAS ignored both. On Windows that is the normal
+	// path, so the pause button worked exactly where it did not matter and did
+	// nothing where it did.
+	//
+	// Found by asking whether any of this transfers to a real application, which
+	// is not a question the unit tests were ever going to answer.
+	if want := rec.Wants(); want != job.WantRun {
+		return r.honourDelegated(ctx, rec, want)
+	}
+
 	// Already delivered. Polling again would ask about a job the delegate
 	// destroyed on Finalize — BITS removes it from the queue — which reads back
 	// as Gone, and Gone means "take the work back", so a second sweep would
@@ -312,6 +342,27 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	st, err := d.Poll(ctx, rec.Delegation.ExternalID)
 	if err != nil {
 		return err
+	}
+
+	// The other half of pausing, and it was missing: something has to start it
+	// again. The intent above says run, so if the delegate is still stopped
+	// because it was asked to stop, ask it to carry on.
+	//
+	// This is why Status carries Suspended. To a supervisor deciding whether to
+	// take work back, a suspended job is neither failed nor finished, so it maps
+	// to Running and must — which leaves nothing to distinguish "paused" from
+	// "going", and a resumed job sat still forever with every check passing.
+	if st.Suspended {
+		s, ok := d.(Suspendable)
+		if !ok {
+			return fmt.Errorf("%w: %s left a transfer suspended and cannot resume it",
+				ErrNoDelegator, d.System())
+		}
+		if err := s.Resume(ctx, rec.Delegation.ExternalID); err != nil {
+			return err
+		}
+		// Nothing else to do this sweep. The next poll sees it moving.
+		return nil
 	}
 
 	// Claim only now: polling needs no lease, and taking one before we know
@@ -454,4 +505,82 @@ func (r *Runner) DelegateAll(ctx context.Context) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// Suspendable is an OPTIONAL capability of a Delegator: work it can stop and
+// take up again without losing what it has.
+//
+// Optional because it is genuinely not universal. BITS has it natively — it
+// already creates every job suspended and resumes it as a separate step. A
+// delegate that cannot suspend has only one honest answer, and it is not to
+// carry on quietly.
+type Suspendable interface {
+	Suspend(ctx context.Context, externalID string) error
+	Resume(ctx context.Context, externalID string) error
+}
+
+// honourDelegated carries out what somebody asked for, on work this process is
+// not performing.
+//
+// The rules are the job layer's, not this layer's invention: cancel must be
+// honoured by everything, because stopping is universal; pause must be honoured
+// only by implementations that advertise it, and one that cannot must fail the
+// job with a stated reason rather than continue as though nobody had asked.
+func (r *Runner) honourDelegated(ctx context.Context, rec *job.Record, want job.Want) error {
+	d, ok := r.Delegators.BySystem(rec.Delegation.System)
+	if !ok {
+		// Nothing here understands that delegate's handle, so nothing here can
+		// act on it. Some other machine's supervisor will.
+		return nil
+	}
+	claimed, err := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	if err != nil {
+		return err
+	}
+	epoch := claimed.Lease.Epoch
+
+	switch want {
+	case job.WantCancel:
+		// Abandon first, then record it. The other order can leave an external
+		// transfer running with nothing pointing at it — BITS would keep the job
+		// in its queue for 90 days, downloading a file nobody is waiting for.
+		if err := d.Abandon(ctx, rec.Delegation.ExternalID); err != nil {
+			return err
+		}
+		_, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+			rr.State = job.StateCancelled
+			rr.Delegation = nil
+			rr.Error = ""
+			return nil
+		})
+		return err
+
+	case job.WantPause:
+		s, canSuspend := d.(Suspendable)
+		if !canSuspend {
+			// The contract says say so rather than pretend. A pause that
+			// silently does nothing is worse than a refusal, because a person
+			// watching a progress bar keep moving has no way to tell which of
+			// the two happened.
+			_, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+				rr.Error = fmt.Sprintf("%s cannot pause a transfer it has taken over", d.System())
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			r.Store.Release(rec.ID, epoch)
+			return nil
+		}
+		if err := s.Suspend(ctx, rec.Delegation.ExternalID); err != nil {
+			return err
+		}
+		// Let the lease go: paused means nobody is working on it, and Orphans
+		// already excludes paused jobs so releasing does not invite a sweep to
+		// start it again.
+		r.Store.Release(rec.ID, epoch)
+		return nil
+	}
+	r.Store.Release(rec.ID, epoch)
+	return nil
 }
