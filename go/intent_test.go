@@ -208,3 +208,81 @@ func waitFor(t *testing.T, s job.Store, id string, ok func(*job.Record) bool) {
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func readFile(p string) ([]byte, error) { return os.ReadFile(p) }
+
+// Repeating the command right after a kill must actually resume, and this is
+// the case that hung.
+//
+// A killed process does not release its lease — that is the design. So the
+// second command arrives INSIDE the dead owner's lease window and its claim is
+// refused. Before the retry, that refusal went nowhere: the goroutine returned,
+// nothing ran, and the command waited forever for a transfer nobody had started.
+func TestRepeatingTheCommandInsideADeadOwnersLeaseStillResumes(t *testing.T) {
+	payload := make([]byte, 2<<20)
+	rand.New(rand.NewSource(11)).Read(payload)
+	want := sha256.Sum256(payload)
+	srv := trickle(t, payload)
+	defer srv.Close()
+
+	store, err := job.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRunner(store, "second-run@host:2")
+	// Short, so the test waits seconds rather than half a minute — but the
+	// behaviour under test is the same at any TTL.
+	r.LeaseTTL = 3 * time.Second
+	r.PersistInterval = 200 * time.Millisecond
+	r.PersistEvery = 64 << 10
+	svc := NewService(r)
+
+	dest := t.TempDir() + "/out.bin"
+	spec := Spec{
+		Sources: []Source{{Scheme: "http", Locator: srv.URL + "/p.bin"}},
+		Sink:    Sink{Final: dest},
+	}
+
+	// A first owner that dies without releasing anything, exactly as a kill
+	// leaves it: the lease is written and never given back.
+	id, err := Submit(store, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Claim(id, "killed@host:1", r.LeaseTTL); err != nil {
+		t.Fatal(err)
+	}
+
+	// The person runs the same command again.
+	h, err := svc.Submit(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ID() != id {
+		t.Fatalf("started a new job %s instead of resuming %s", h.ID(), id)
+	}
+
+	deadline := time.After(60 * time.Second)
+	for {
+		rec, err := store.Load(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.State == job.StateTransferred || rec.State == job.StateComplete {
+			break
+		}
+		if rec.State.Terminal() {
+			t.Fatalf("ended %s: %s", rec.State, rec.Error)
+		}
+		select {
+		case <-deadline:
+			t.Fatal("it never resumed — the dead owner's lease was never waited out")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	got, err := readFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256.Sum256(got) != want {
+		t.Fatal("digest mismatch after resuming")
+	}
+}

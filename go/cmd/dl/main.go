@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,12 +64,18 @@ func usage() {
 	fmt.Println(`dl — download a URL, and see where it actually happens
 
   dl <url> [-o <dir|file>]   download it
+           [--digest sha256:<hex>]
   dl list                    what is in the store, and who is doing it
   dl watch                   follow everything, live
   dl tiers                   what this machine can delegate to, and why
 
 Where a download runs is a property of this machine, not of the command. Set it
-up once with:  jobd setup --nas-store //nas/share/store`)
+up once with:  jobd setup --nas-store //nas/share/store
+
+--digest is an identity, not just a check. Given one, this looks for those exact
+bytes in the content-addressed stores already on your machine — Ollama's,
+HuggingFace's — and copies rather than downloads when it finds them. The digest
+is verified either way, because those stores do not verify their own.`)
 }
 
 func fatal(err error) {
@@ -131,9 +138,13 @@ func cmdGet(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	out := "."
+	digest := ""
 	for i := 1; i < len(args)-1; i++ {
-		if args[i] == "-o" {
+		switch args[i] {
+		case "-o":
 			out = args[i+1]
+		case "--digest":
+			digest = args[i+1]
 		}
 	}
 
@@ -141,7 +152,13 @@ func cmdGet(ctx context.Context, args []string) {
 	// One call. Where the destination name comes from, whether a supervisor
 	// exists, and who ends up moving the bytes are all settled below this line —
 	// dl no longer asks and no longer branches.
-	h, err := svc.Get(url, out)
+	//
+	// A digest changes what is possible rather than merely adding a check. It is
+	// an identity, so the layer below can ask whether these exact bytes are
+	// already on this machine — in somebody else's cache, under somebody else's
+	// name — and turn the download into a local copy. Without one there is
+	// nothing to match against and the network is the only answer.
+	h, err := getWith(svc, url, out, digest)
 	if err != nil {
 		fatal(err)
 	}
@@ -362,4 +379,54 @@ func human(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// getWith is Get, plus an identity when the caller has one.
+//
+// Get takes a URL and a place to put it, which is all most callers have. When a
+// digest is known it goes through Submit instead, because that is the path that
+// can look the artifact up before fetching it.
+func getWith(svc download.Service, url, out, digest string) (job.Job, error) {
+	if digest == "" {
+		return svc.Get(url, out)
+	}
+	dest := out
+	if isDir(dest) {
+		dest = filepath.Join(dest, nameFromURL(url))
+	}
+	abs, err := filepath.Abs(dest)
+	if err != nil {
+		return nil, err
+	}
+	return svc.Submit(download.Spec{
+		Artifact: download.Artifact{Digest: digest},
+		Sources:  []download.Source{{Scheme: schemeOf(url), Locator: url}},
+		Sink:     download.Sink{Final: abs},
+	})
+}
+
+func isDir(p string) bool {
+	if strings.HasSuffix(p, "/") || strings.HasSuffix(p, `\`) || p == "." {
+		return true
+	}
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func nameFromURL(u string) string {
+	if i := strings.Index(u, "?"); i >= 0 {
+		u = u[:i]
+	}
+	name := path.Base(u)
+	if name == "" || name == "/" || name == "." {
+		return "download.bin"
+	}
+	return name
+}
+
+func schemeOf(u string) string {
+	if i := strings.Index(u, "://"); i > 0 {
+		return u[:i]
+	}
+	return "https"
 }

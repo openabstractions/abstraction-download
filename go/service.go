@@ -2,11 +2,13 @@ package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	job "github.com/ReinisLusis/abstraction-job"
 	storage "github.com/ReinisLusis/abstraction-storage"
@@ -228,7 +230,44 @@ func (s *service) begin(id string) {
 		Nudge(s.runner.Store)
 		return
 	}
-	go s.runner.Run(context.Background(), id)
+	go s.runHere(id)
+}
+
+// runHere works the job in this process, waiting out a dead owner's lease.
+//
+// The waiting is the point. A process killed mid-transfer does not release its
+// lease — that is the whole design, and it is why a successor cannot simply
+// barge in. But it means the obvious way to resume, running the same command
+// again, arrives INSIDE the previous owner's lease window and is refused.
+//
+// Before this, that refusal went nowhere: begin launched a goroutine, the claim
+// failed, the goroutine returned, and the command sat waiting for a transfer
+// that nobody had started. It looked exactly like a hang, and it is the first
+// thing a person does after killing a download.
+//
+// So: retry until the lease lapses. It will, within LeaseTTL, because the owner
+// is gone. Anything else — the job finishing, someone else adopting it, a real
+// error — stops the loop, and the record is where the outcome lives either way.
+func (s *service) runHere(id string) {
+	ctx := context.Background()
+	deadline := time.Now().Add(2*s.runner.LeaseTTL + 5*time.Second)
+	for {
+		err := s.runner.Run(ctx, id)
+		if err == nil || !errors.Is(err, job.ErrLeaseHeld) {
+			return
+		}
+		if time.Now().After(deadline) {
+			// Somebody else genuinely holds it and is renewing. That is not a
+			// failure: they are doing the work, and this process was only ever
+			// offering to.
+			return
+		}
+		rec, err := s.runner.Store.Load(id)
+		if err != nil || rec.State.Terminal() || rec.State == job.StateTransferred {
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func isDirectory(p string) bool {
