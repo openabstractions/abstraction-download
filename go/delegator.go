@@ -305,6 +305,22 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: %s", ErrNotDelegated, id)
 	}
 	if rec.State.Terminal() {
+		// A terminal job that still holds a delegation handle has work running
+		// somewhere else that nobody will ever collect.
+		//
+		// This returned nil, and the cost was measured rather than imagined: a
+		// pause that reached the record as a cancel left a NAS fetching 3.1 GB
+		// for a job the local side had already given up on. It ran to
+		// completion, and the finished file sat on the share as a transferred
+		// job with no requester. The delegate was never told, because the only
+		// code that would have told it stopped one line above.
+		//
+		// The interface has always had Abandon for exactly this — "a job left
+		// unacknowledged sits in the BITS queue for 90 days" — and nothing
+		// called it on this path.
+		if rec.Delegated() && !rec.Delegation.Delivered {
+			return r.abandonDelegated(ctx, rec)
+		}
 		return nil
 	}
 
@@ -381,6 +397,17 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 				rr.Progress.Total = st.Total
 			}
 			rr.Progress.UpdatedAt = job.At(time.Now())
+			// The FIRST phase, which is the long one and was the one still
+			// missing: steps were being set for the copy back and the verify,
+			// so a job spent its whole download saying nothing and only started
+			// reporting phases once the bytes were already fetched.
+			rr.Progress.Step = &job.Step{
+				Name:    "fetching on " + rec.Delegation.System,
+				Ordinal: 1,
+				Of:      3,
+				Done:    st.Done,
+				Total:   st.Total,
+			}
 			return nil
 		})
 		r.Store.Release(id, epoch)
@@ -486,7 +513,16 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, rec := range all {
-		if rec.Kind != Kind || !rec.Delegated() || rec.State.Terminal() {
+		if rec.Kind != Kind || !rec.Delegated() {
+			continue
+		}
+		// A terminal job is NOT skipped when it still holds a delegation handle.
+		// That filter is what made the abandon-on-terminal path unreachable: the
+		// inner function knew to tell the delegate, and this one never called
+		// it, so a cancelled job left a NAS fetching 3.1 GB to completion for
+		// nobody. Terminal here means "this side is finished with it", which is
+		// exactly when the other side needs telling.
+		if rec.State.Terminal() && rec.Delegation.Delivered {
 			continue
 		}
 		// Nothing to catch up on, and asking would undo it — see Reconcile.
@@ -652,4 +688,35 @@ func (r *Runner) step(id string, epoch int64, st *job.Step) {
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		return nil
 	})
+}
+
+// abandonDelegated tells a delegate to stop work the local record has already
+// given up on.
+//
+// Once a record is terminal it cannot be claimed, and so it cannot be updated to
+// record that this was done — which is correct, because finished work is history
+// and history does not change. The consequence is that this would run on every
+// sweep forever, so a process remembers what it has abandoned. Forgetting across
+// a restart is harmless: Abandon on a handle the delegate has already dropped is
+// a no-op by contract.
+func (r *Runner) abandonDelegated(ctx context.Context, rec *job.Record) error {
+	if rec.Delegation == nil {
+		return nil
+	}
+	handle := rec.Delegation.System + "\x00" + rec.Delegation.ExternalID
+	if _, done := r.abandoned.Load(handle); done {
+		return nil
+	}
+	d, ok := r.Delegators.BySystem(rec.Delegation.System)
+	if !ok {
+		// The tier is not linked into this process. Someone else's business,
+		// and remembering would be a lie: a build that HAS that tier should
+		// still get to abandon it.
+		return nil
+	}
+	if err := d.Abandon(ctx, rec.Delegation.ExternalID); err != nil {
+		return fmt.Errorf("download: abandoning %s on %s: %w", rec.ID, rec.Delegation.System, err)
+	}
+	r.abandoned.Store(handle, true)
+	return nil
 }

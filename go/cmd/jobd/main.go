@@ -352,6 +352,13 @@ func cmdStatus() {
 		switch {
 		case rec.State == job.StateTransferred:
 			note = "  (done, waiting to be taken delivery of)"
+		case rec.Delegated() && !rec.Delegation.Delivered && !rec.State.Terminal():
+			// A delegated job holds no lease HERE and never will, because the
+			// work is happening somewhere else — so "claimable" says yes and
+			// means nothing. Calling that stalled told a person their download
+			// had died while a NAS was actively fetching it, which is the most
+			// alarming possible way to be wrong.
+			note = "  (" + rec.Delegation.System + " is working on it)"
 		case store.Claimable(rec) && !rec.State.Terminal():
 			note = "  (stalled — nobody is working on it)"
 		}

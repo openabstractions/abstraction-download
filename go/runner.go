@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	job "github.com/ReinisLusis/abstraction-job"
@@ -25,6 +26,12 @@ import (
 // the final rename. That is what lets a transfer begun by one implementation be
 // finished by a different one, which is the entire premise of the job layer.
 type Runner struct {
+	// abandoned remembers delegate handles this process has already told to
+	// stop. A terminal record cannot be claimed, so there is nowhere durable to
+	// write that fact -- and without it, every sweep would abandon the same job
+	// again forever.
+	abandoned sync.Map
+
 	Store    job.Store
 	Fetchers *Registry
 	// Delegators are the implementations that do the work elsewhere — a system

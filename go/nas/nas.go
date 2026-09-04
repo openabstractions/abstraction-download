@@ -182,6 +182,13 @@ func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Statu
 		return download.Status{State: download.DelegateGone}, nil
 	}
 	st := download.Status{Done: rec.Progress.Done, Total: rec.Progress.Total, Err: rec.Error}
+	// Whether the far side has been asked to stop, which State deliberately
+	// does not say: to a supervisor deciding whether to take work back, a
+	// suspended job is neither failed nor finished, so it maps to Running.
+	// Without this a paused transfer polls as an ordinary running one, and the
+	// local side has no way to tell "stopped because somebody asked" from
+	// "still going" — which is how a pause button lies.
+	st.Suspended = rec.Paused()
 	switch rec.State {
 	case job.StateTransferred, job.StateComplete:
 		st.State = download.DelegateTransferred
@@ -255,11 +262,49 @@ func (d *Delegator) acknowledge(id string) error {
 // it is. BITS's Cancel deletes completed files along with partial ones, which
 // surprised everybody who met it; this does not copy that.
 func (d *Delegator) Abandon(ctx context.Context, externalID string) error {
-	rec, err := d.store.Claim(externalID, owner(), 30*time.Second)
+	// Read before claiming, because a job that is already cancelled cannot be
+	// claimed and its bytes still have to go. Abandon is called again on a
+	// retry, and it has to finish the job it started.
+	rec, err := d.store.Load(externalID)
+	if err != nil {
+		return nil // a handle nobody knows is already abandoned
+	}
+
+	// The bytes, not just the bookkeeping.
+	//
+	// This cancelled the record and left the file, and the contract on the
+	// Delegator interface says the opposite in as many words: "Abandon cancels
+	// the work and cleans up after it. Note that BITS's Cancel deletes completed
+	// files as well as partial ones." So the same operation meant two different
+	// things depending on which tier answered — which is the one thing a facade
+	// may never allow.
+	//
+	// Measured, not theorised: a pause that reached the record as a cancel left
+	// a complete 3.1 GB model sitting on a share as a transferred job with no
+	// requester, and nothing was ever going to remove it.
+	if spec, serr := download.SpecOf(rec); serr == nil {
+		partial, final := download.LocalSink(d.store, spec.Sink)
+		for _, p := range []string{partial, final} {
+			if p == "" {
+				continue
+			}
+			if rerr := os.Remove(p); rerr != nil && !os.IsNotExist(rerr) {
+				// Worth saying, not worth failing on: the record must still be
+				// cancelled, or the far side keeps working.
+				fmt.Fprintf(os.Stderr, "nas: abandoning %s: could not remove %s: %v\n",
+					externalID, filepath.Base(p), rerr)
+			}
+		}
+	}
+
+	if rec.State.Terminal() {
+		return nil // already cancelled; the bytes above are the part that was left
+	}
+	claimed, err := d.store.Claim(externalID, owner(), 30*time.Second)
 	if err != nil {
 		return nil
 	}
-	_, err = d.store.Update(externalID, rec.Lease.Epoch, func(r *job.Record) error {
+	_, err = d.store.Update(externalID, claimed.Lease.Epoch, func(r *job.Record) error {
 		r.State = job.StateCancelled
 		return nil
 	})
@@ -351,4 +396,37 @@ func (x *reporting) Read(p []byte) (int, error) {
 		x.report(x.done, x.total)
 	}
 	return n, err
+}
+
+// Suspend and Resume make pause mean something on this tier.
+//
+// The delegate here is not a black box: it is another supervisor watching a
+// store both machines can see, running the same code, honouring intent at every
+// checkpoint. So pausing it is not a new mechanism — it is the mechanism this
+// project already built, used across a share.
+//
+// SetIntent is the one write that needs no lease, and this is exactly the case
+// it was designed for: the far side holds the lease and is moving the bytes,
+// and somebody here wants it to stop. Requiring a lease would mean stealing the
+// job in order to pause it, which is the single thing the lease prevents.
+//
+// Without this the NAS was the one tier that could not pause. That is allowed —
+// honourDelegated fails the job with a reason rather than pretending — but "in
+// process can pause, BITS can pause, the NAS cannot" is a facade whose semantics
+// depend on which tier happened to be chosen, and that is the thing this project
+// exists to stop.
+func (d *Delegator) Suspend(ctx context.Context, externalID string) error {
+	_, err := d.store.SetIntent(externalID, job.WantPause, owner())
+	if err != nil {
+		return fmt.Errorf("nas: pausing %s: %w", externalID, err)
+	}
+	return nil
+}
+
+func (d *Delegator) Resume(ctx context.Context, externalID string) error {
+	_, err := d.store.SetIntent(externalID, job.WantRun, owner())
+	if err != nil {
+		return fmt.Errorf("nas: resuming %s: %w", externalID, err)
+	}
+	return nil
 }
