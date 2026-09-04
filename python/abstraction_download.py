@@ -44,7 +44,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from datetime import datetime, timezone
+
 from abstraction_job import Record, Scratch, Store, RUNNING, TRANSFERRED, COMPLETE
+# The heartbeat is written by whichever implementation is supervising, so its
+# timestamps are the job layer's format and are parsed by the job layer's reader
+# rather than by a second one that could drift from it.
+from abstraction_job import _parse_time
 
 # KIND is the job.Record.kind this module understands. A process that finds a job
 # of an unknown kind leaves it alone rather than guessing at its spec.
@@ -345,6 +351,77 @@ def store_root() -> str:
     return os.path.join(home, ".abstraction")
 
 
+@dataclass
+class Supervisor:
+    """A process that watches this store and finishes work nobody is doing.
+
+    Presence is the configuration. An application does not choose a downloader:
+    it asks whether anything is watching, and if something is, it submits the
+    work and stops caring who moves the bytes.
+    """
+
+    owner: str = ""
+    host: str = ""
+    pid: int = 0
+    seen: Optional[datetime] = None
+    every: str = ""
+    tier: str = ""
+
+
+def supervisor_of(store) -> Tuple[Supervisor, bool]:
+    """The live supervisor for this store, if there is one.
+
+    "Live" means the heartbeat is younger than three of its own intervals --
+    enough to survive a slow sweep or a jittery clock, short enough that a killed
+    supervisor stops attracting work within a minute or two rather than forever.
+    A supervisor that was killed leaves a stale file behind, and an application
+    that trusted it would submit work into a store nobody is watching, which
+    looks exactly like a download that started and never progressed.
+
+    A store whose binding is not a filesystem has no heartbeat to read, and
+    answers no rather than pretending.
+    """
+    root = local_root(store)
+    if not root:
+        return Supervisor(), False
+    try:
+        with open(os.path.join(root, "supervisor.json"), "rb") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return Supervisor(), False
+
+    s = Supervisor(
+        owner=d.get("owner", ""),
+        host=d.get("host", ""),
+        pid=int(d.get("pid", 0) or 0),
+        every=d.get("every", ""),
+        tier=d.get("tier", "") or "",
+    )
+    try:
+        s.seen = _parse_time(d["seen"])
+    except Exception:
+        return s, False
+
+    every = _parse_go_duration(s.every)
+    if every <= 0:
+        every = 30.0
+    age = (datetime.now(timezone.utc) - s.seen).total_seconds()
+    return s, age <= 3 * every
+
+
+def _parse_go_duration(text: str) -> float:
+    """Go writes "30s", "1m30s", "2h45m0s". Parsed here because the heartbeat is
+    written by whichever implementation happens to be supervising, and this one
+    must read what that one wrote."""
+    if not text:
+        return 0.0
+    units = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+    total = 0.0
+    for value, unit in re.findall(r"([0-9]*\.?[0-9]+)(ns|us|ms|s|m|h)", text):
+        total += float(value) * units[unit]
+    return total
+
+
 def owner(program: Optional[str] = None) -> str:
     """program@host:pid.
 
@@ -542,7 +619,36 @@ class Runner:
                     f"download: asked for bytes from {start}, server answered "
                     f"{resp.status} with the whole file"
                 )
-            return self._drain(rec, resp, epoch, partial, h, start)
+
+            # Worked out BEFORE the copy. Content-Length on a 200 is the whole
+            # artifact; on a 206 it is what remains, so the offset has to be
+            # added back.
+            declared = 0
+            try:
+                length = int(resp.headers.get("Content-Length") or 0)
+                if length > 0:
+                    declared = start + length
+            except ValueError:
+                declared = 0
+
+            total = self._drain(rec, resp, epoch, partial, h, start)
+
+            # The transport's own promise, checked even when the spec makes
+            # none. A spec without a size or a digest is the normal case for a
+            # bare URL out of a model list, and without this there was NOTHING
+            # to catch a truncated transfer: the partial was delivered under the
+            # final name and presented to the application as a finished
+            # download. That is precisely the failure this layer exists to
+            # refuse, reproduced by the layer itself.
+            #
+            # Go gets this for free -- its HTTP client errors on a body shorter
+            # than Content-Length -- and urllib does not, which is why this
+            # cannot be left to the language underneath.
+            if declared and total != declared:
+                raise ShortTransfer(
+                    f"download: got {total} bytes, the server said {declared}"
+                )
+            return total
 
     def _fetch_file(
         self, rec: Record, src: Source, epoch: int, partial: str, h, start: int
@@ -557,27 +663,48 @@ class Runner:
         last_persist = time.monotonic()
         with open(partial, "r+b" if os.path.exists(partial) else "w+b") as out:
             out.seek(start)
-            while True:
-                chunk = reader.read(256 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
-                h.update(chunk)
-                total += len(chunk)
-                since_persist += len(chunk)
+            try:
+                while True:
+                    chunk = reader.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    h.update(chunk)
+                    total += len(chunk)
+                    since_persist += len(chunk)
 
-                now = time.monotonic()
-                if (
-                    since_persist >= self.persist_every
-                    or now - last_persist >= self.persist_interval
-                ):
-                    out.flush()
-                    os.fsync(out.fileno())
-                    self._persist(rec.id, epoch, total)
-                    since_persist = 0
-                    last_persist = now
-            out.flush()
-            os.fsync(out.fileno())
+                    now = time.monotonic()
+                    if (
+                        since_persist >= self.persist_every
+                        or now - last_persist >= self.persist_interval
+                    ):
+                        out.flush()
+                        os.fsync(out.fileno())
+                        self._persist(rec.id, epoch, total)
+                        since_persist = 0
+                        last_persist = now
+            finally:
+                # However this ends. Every byte counted here was written AND
+                # hashed, so it is proven whether the transfer went on to
+                # succeed, fail, or be killed -- and recording it is the whole
+                # difference between resuming and starting over.
+                #
+                # Periodic checkpointing alone is not enough, and the gap is
+                # worst exactly where it is least expected: a transfer that dies
+                # before the FIRST checkpoint has proven nothing, so the resume
+                # point is min(0, what is on disk) = 0, and a partial file
+                # sitting right there is fetched again from zero. On a fast link
+                # that is every download under 8 MiB; on a slow one it is the
+                # first five seconds of a 40 GB model.
+                out.flush()
+                os.fsync(out.fileno())
+                if total > start:
+                    try:
+                        self._persist(rec.id, epoch, total)
+                    except Exception:
+                        # A store that will not take the checkpoint must not
+                        # replace the real error with its own.
+                        pass
         return total
 
     def _persist(self, job_id: str, epoch: int, done: int) -> None:
