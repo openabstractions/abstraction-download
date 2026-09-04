@@ -284,16 +284,24 @@ func (d *Delegator) Abandon(ctx context.Context, externalID string) error {
 	// requester, and nothing was ever going to remove it.
 	if spec, serr := download.SpecOf(rec); serr == nil {
 		partial, final := download.LocalSink(d.store, spec.Sink)
-		for _, p := range []string{partial, final} {
-			if p == "" {
-				continue
-			}
-			if rerr := os.Remove(p); rerr != nil && !os.IsNotExist(rerr) {
-				// Worth saying, not worth failing on: the record must still be
-				// cancelled, or the far side keeps working.
-				fmt.Fprintf(os.Stderr, "nas: abandoning %s: could not remove %s: %v\n",
-					externalID, filepath.Base(p), rerr)
-			}
+
+		// The partial is named after this job's id, so it belongs to this job
+		// and nothing else can want it.
+		remove(externalID, partial)
+
+		// The FINAL is not. Two runs fetching the same artifact name the same
+		// file -- that is the identity rule this whole layer is built on -- so a
+		// finished job and an abandoned one routinely point at one path.
+		//
+		// Deleting it unconditionally destroyed a completed download: an old
+		// cancelled job was abandoned, took the 3.1 GB the CURRENT job had just
+		// finished fetching, and did it again on every sweep, so the transfer
+		// could never be finalised. The file was gone before anyone could
+		// collect it.
+		//
+		// So the bytes go only when nobody else is still counting on them.
+		if !claimedByAnother(d.store, rec.ID, spec.Sink.Final) {
+			remove(externalID, final)
 		}
 	}
 
@@ -429,4 +437,53 @@ func (d *Delegator) Resume(ctx context.Context, externalID string) error {
 		return fmt.Errorf("nas: resuming %s: %w", externalID, err)
 	}
 	return nil
+}
+
+// remove deletes one of a job's own files, best-effort. Failing to tidy up must
+// never stop the record being cancelled, or the far side keeps working.
+func remove(externalID, path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "nas: abandoning %s: could not remove %s: %v\n",
+			externalID, filepath.Base(path), err)
+	}
+}
+
+// claimedByAnother reports whether some OTHER job that is not finished with this
+// artifact still names the same destination.
+//
+// Terminal records are ignored deliberately, with one exception: TRANSFERRED is
+// not terminal and is exactly the state that means "the bytes are here and
+// nobody has collected them yet", which is the strongest possible claim on a
+// file. COMPLETE is terminal but still counts, because a completed job's bytes
+// are the result somebody asked for.
+//
+// Erring toward keeping the file. The cost of a stale blob on a share is disk;
+// the cost of deleting one another job is waiting for is the whole download.
+func claimedByAnother(store job.Store, self, final string) bool {
+	if final == "" {
+		return false
+	}
+	all, err := store.List()
+	if err != nil {
+		return true // cannot tell, so do not delete
+	}
+	for _, other := range all {
+		if other.ID == self || other.Kind != download.Kind {
+			continue
+		}
+		if other.State.Terminal() && other.State != job.StateComplete {
+			continue // failed or cancelled: it is not waiting for anything
+		}
+		spec, serr := download.SpecOf(other)
+		if serr != nil {
+			continue
+		}
+		if spec.Sink.Final == final {
+			return true
+		}
+	}
+	return false
 }

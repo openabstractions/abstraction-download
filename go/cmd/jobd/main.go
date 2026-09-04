@@ -352,6 +352,17 @@ func cmdStatus() {
 		switch {
 		case rec.State == job.StateTransferred:
 			note = "  (done, waiting to be taken delivery of)"
+		case rec.Paused():
+			// Before every other reading, because a paused job is delegated,
+			// claimable and not terminal all at once — so every other branch
+			// here would describe it as something it is not. Saying "nas is
+			// working on it" about a transfer somebody just stopped is the same
+			// class of lie as calling a finished one paused.
+			by := ""
+			if rec.Intent != nil && rec.Intent.By != "" {
+				by = " by " + rec.Intent.By
+			}
+			note = "  (paused" + by + ")"
 		case rec.Delegated() && !rec.Delegation.Delivered && !rec.State.Terminal():
 			// A delegated job holds no lease HERE and never will, because the
 			// work is happening somewhere else — so "claimable" says yes and
