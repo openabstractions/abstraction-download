@@ -92,30 +92,6 @@ func available(cfg config.Config) []Delegator {
 	return out
 }
 
-// StoreRoot is where jobs live on this machine.
-//
-// Configuration first, then the default. An existing ~/.modelget keeps being the
-// store, because moving the default on upgrade would strand whatever is in
-// flight — the store is a directory of real work, not a cache.
-func StoreRoot() (string, error) {
-	if v := config.Load().Store; v != "" {
-		return v, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if legacy := filepath.Join(home, ".modelget"); exists(legacy) {
-		return legacy, nil
-	}
-	return filepath.Join(home, "."+config.Name), nil
-}
-
-func exists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
-
 // Owner identifies this process in a lease: program, host and pid.
 //
 // All three are needed. A lease held by a process on another machine cannot be
@@ -151,8 +127,13 @@ func Program() string {
 }
 
 // storeFor opens the store, for Discover.
+//
+// The one place in this package that turns a configured location into a store.
+// Where jobs live is config's answer, not download's — this layer used to
+// export it, which invited every other program to ask the download package a
+// question about jobs.
 func storeFor() (job.Store, error) {
-	root, err := StoreRoot()
+	root, err := config.JobStore()
 	if err != nil {
 		return nil, err
 	}

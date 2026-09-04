@@ -80,7 +80,8 @@ func cmdStop() {
 func cmdStart(args []string) {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
-	without := fs.String("without", "", `run one tier lower by ignoring a system, e.g. --without nas`)
+	var without systems
+	fs.Var(&without, "without", `run one tier lower by ignoring a system; repeatable, e.g. --without nas --without bits`)
 	fs.Parse(args)
 
 	_, store, _ := openRunner()
@@ -96,8 +97,8 @@ func cmdStart(args []string) {
 		fatal(err)
 	}
 	childArgs := []string{"run", "--interval", interval.String()}
-	if *without != "" {
-		childArgs = append(childArgs, "--without", *without)
+	for _, w := range without {
+		childArgs = append(childArgs, "--without", w)
 	}
 
 	logPath := filepath.Join(storeRoot(), "jobd.log")

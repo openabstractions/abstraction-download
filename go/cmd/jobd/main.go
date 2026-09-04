@@ -37,9 +37,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	config "github.com/ReinisLusis/abstraction-config"
 	"github.com/ReinisLusis/abstraction-download"
 	_ "github.com/ReinisLusis/abstraction-download/all"
 	job "github.com/ReinisLusis/abstraction-job"
@@ -132,7 +134,7 @@ func storeRoot() string {
 	if v := os.Getenv("MODELGET_STORE"); v != "" {
 		return v
 	}
-	root, err := download.StoreRoot()
+	root, err := config.JobStore()
 	if err != nil {
 		fatal(err)
 	}
@@ -216,10 +218,11 @@ func cmdOnce(args []string) {
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
-	without := fs.String("without", "", `ignore a delegation system, e.g. --without nas`)
+	var without systems
+	fs.Var(&without, "without", `ignore a delegation system; repeatable, e.g. --without nas --without bits`)
 	fs.Parse(args)
 
-	r, store, tier := openRunner(*without)
+	r, store, tier := openRunner(without...)
 	fmt.Printf("jobd: watching %s (delegates to: %s)\n", storeRoot(), tier)
 
 	// Announce, so applications on this machine stop downloading things
@@ -255,15 +258,37 @@ func cmdRun(args []string) {
 		fmt.Fprintf(os.Stderr, "jobd: not listening for nudges (%v); sweeping on the timer only\n", err)
 	}
 
+	// Announce on a clock of its own, because the thing that starves a heartbeat
+	// is the work it is reporting on.
+	//
+	// This used to beat once per sweep, refreshed before the work rather than
+	// after it, which is as far as one thread can get. It is not far enough: a
+	// pass that fetches a 40 GB file IS a single sweep, so nothing was written
+	// for as long as that took, the heartbeat aged past stale, and every
+	// application on the machine was told nothing was watching — while this
+	// process was in the middle of doing the work for them. Observed on a 1.5 GB
+	// download: `jobd status` said "treated as gone" about a supervisor that was
+	// busy on its behalf.
+	//
+	// Nothing is synchronised. The heartbeat is written by atomic rename, and it
+	// reports liveness rather than progress, so a beat that lands mid-sweep says
+	// exactly what it should: this process is still here.
+	go func() {
+		beat := time.NewTicker(*interval)
+		defer beat.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-beat.C:
+				download.Heartbeat(store, owner, tier, *interval)
+			}
+		}
+	}()
+
 	t := time.NewTicker(*interval)
 	defer t.Stop()
 	for {
-		// Refresh before working, not after. A sweep can take a long time when it
-		// is doing a 40 GB download itself, and a heartbeat that went stale
-		// meanwhile would send every application back to downloading in-process
-		// while this one is busy.
-		download.Heartbeat(store, owner, tier, *interval)
-
 		if rec, del, ad, dlv := pass(ctx, r); rec > 0 || del > 0 || ad > 0 || dlv > 0 {
 			fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delivered=%d\n",
 				time.Now().Format(time.RFC3339), rec, del, ad, dlv)
@@ -381,3 +406,25 @@ func cmdUninstall() {
 }
 
 func quote(s string) string { return `"` + s + `"` }
+
+// systems collects a flag that may be given more than once.
+//
+// It was a plain string, and openRunner has always taken a variadic list, so
+// `--without nas --without bits` parsed without complaint and silently kept
+// only the last one. A documented escape hatch that quietly ignores half of
+// what it is told is worse than one that refuses: the operator watches the
+// supervisor keep using the tier they just excluded.
+type systems []string
+
+func (s *systems) String() string { return strings.Join(*s, ",") }
+
+func (s *systems) Set(v string) error {
+	// Comma-separated too, because an operator typing this once should not have
+	// to know which of the two spellings this program happens to accept.
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*s = append(*s, part)
+		}
+	}
+	return nil
+}
