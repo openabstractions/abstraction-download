@@ -211,3 +211,29 @@ func Portable(p string) string {
 	}
 	return filepath.ToSlash(p)
 }
+
+// sameDigest compares two sha256 digests written by different implementations.
+//
+// The record says "sha256:<hex>" and Validate enforces it at submission, but an
+// application writing records through its own implementation of the store never
+// reaches that check — and the job layer will not look inside a spec to enforce
+// it, deliberately. So a reader has to be liberal about a label it can infer,
+// while staying exact about the part that carries the meaning.
+func sameDigest(a, b string) bool {
+	return bareHex(a) != "" && bareHex(a) == bareHex(b)
+}
+
+func bareHex(d string) string {
+	s := strings.ToLower(strings.TrimSpace(d))
+	s = strings.TrimPrefix(s, "sha256:")
+	s = strings.TrimPrefix(s, "sha256-") // how Ollama names its blobs
+	if len(s) != 64 {
+		return ""
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return s
+}

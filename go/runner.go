@@ -214,7 +214,22 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 
 	if want := spec.Artifact.Digest; want != "" {
 		got := "sha256:" + hex.EncodeToString(h.Sum(nil))
-		if !strings.EqualFold(got, want) {
+		// Compare the hex, not the label.
+		//
+		// A real 1.5 GB download of CORRECT bytes was rejected here because
+		// Lemonade wrote the digest bare and this side builds "sha256:<hex>":
+		// the error read "got sha256:1fc70f… want 1fc70f…", the same digest
+		// twice. Spec.Validate refuses a bare digest at submission, but an
+		// application that writes records through its own implementation never
+		// passes through it — and the job layer must not parse a spec to check,
+		// because that opacity is what lets download evolve without a schema
+		// change in three languages.
+		//
+		// So the writer is wrong and is being fixed, and this is liberal anyway.
+		// Throwing away bytes that match, over a prefix, is the worst possible
+		// trade: the check exists to refuse wrong bytes, and refusing right ones
+		// costs exactly what it was built to save.
+		if !sameDigest(got, want) {
 			// Do not keep bytes that failed. Leaving them would mean the next
 			// runner resumes onto a prefix already known to be wrong.
 			os.Remove(partial)
@@ -505,4 +520,93 @@ func (r *Runner) TakeDelivery(id string) error {
 	})
 	r.Store.Release(id, epoch)
 	return err
+}
+
+// TakeDeliveryAll closes out finished work whose bytes are demonstrably present.
+//
+// # Why this has to exist
+//
+// TRANSFERRED means the bytes arrived and were proven, and COMPLETE means
+// somebody said "I have them". The two-phase ending is not bureaucracy: it is
+// the only way to express "the service finished this while your application was
+// closed", and BITS enforces the same shape by refusing to release a file until
+// Complete is called.
+//
+// But nothing was performing the second half. Every other state survives its
+// owner dying, because the lease lapses and a supervisor adopts the job.
+// TRANSFERRED is deliberately excluded from that sweep — adopting it would
+// re-download a finished file, which once cost a NAS 313 MB on a loop — and the
+// exclusion that prevents the loop is the same one that strands the record.
+//
+// The result was visible in a real download manager: three rows sitting at 100%
+// labelled "paused", for files that were complete on disk. A person seeing that
+// reasonably clicks resume, and resume does nothing, because there is nothing
+// left to fetch.
+//
+// # What it will and will not close
+//
+// Only jobs whose destination is actually there, at the size that was proven.
+// A transferred job whose file is MISSING is a real pending transition — the
+// bytes may be on a NAS and still have to cross — and that is the one case a
+// person should ever see, because it is the only one where something still has
+// to happen.
+//
+// It does not re-hash. The digest was checked when those bytes were proven, and
+// rehashing gigabytes on every sweep would spend real time re-answering a
+// question already answered.
+func (r *Runner) TakeDeliveryAll(ctx context.Context) (int, error) {
+	all, err := r.Store.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, rec := range all {
+		if rec.Kind != Kind || rec.State != job.StateTransferred {
+			continue
+		}
+		spec, err := SpecOf(rec)
+		if err != nil {
+			continue
+		}
+		_, final := LocalSink(r.Store, spec.Sink)
+		st, err := os.Stat(final)
+		switch {
+		case err == nil && !st.IsDir():
+			// The bytes are where they were asked to go. Size is the cheap half
+			// of the proof and the half that catches a truncated or replaced
+			// file; zero total means the source never said, in which case the
+			// file being present is all there is to go on.
+			if want := rec.Progress.Total; want > 0 && st.Size() != want {
+				continue
+			}
+
+		case rec.Delegated() && !rec.Delegation.Delivered:
+			// A delegate still holds these bytes and they have yet to cross.
+			// That is a real pending transition and the one case a person
+			// should see, because something still has to happen.
+			continue
+
+		default:
+			// Delivered, and since moved or consumed by whoever wanted it.
+			//
+			// TRANSFERRED is only ever set AFTER the bytes reach their final
+			// path — the in-process runner delivers before marking it, and the
+			// delegated path finalises first. So a missing file here does not
+			// mean the delivery failed; it means it succeeded and something
+			// then used the result. Lemonade downloads a backend zip to %TEMP%,
+			// extracts it, and deletes the zip: correct behaviour that left a
+			// record no file-existence test could ever satisfy, sitting in a
+			// download manager as a finished-looking row labelled "paused",
+			// forever.
+			//
+			// Requiring the file to still be there confused "did this arrive"
+			// with "is it still where it landed", and only the first is this
+			// layer's business.
+		}
+		if err := r.TakeDelivery(rec.ID); err != nil {
+			continue
+		}
+		n++
+	}
+	return n, nil
 }

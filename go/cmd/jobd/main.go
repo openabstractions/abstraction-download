@@ -168,7 +168,7 @@ func openRunner(without ...string) (*download.Runner, job.Store, string) {
 // Reconcile first: a delegated job that has finished needs finalising and
 // verifying, and doing that before adopting means the orphan pass does not pick
 // up work the delegate has in fact already completed.
-func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopted int) {
+func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopted, delivered int) {
 	if r.Delegators != nil {
 		if n, err := r.ReconcileAll(ctx); err == nil {
 			reconciled = n
@@ -182,11 +182,18 @@ func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopt
 			delegated = n
 		}
 	}
-	// Last: whatever nobody else wanted is still ours to finish.
+	// Whatever nobody else wanted is still ours to finish.
 	if n, err := r.Adopt(ctx); err == nil {
 		adopted = n
 	}
-	return reconciled, delegated, adopted
+	// And close out work that is demonstrably done. Without this a finished
+	// download waits forever for an acknowledgement from a process that may
+	// never come back, and shows up in a download manager as a row stuck at
+	// 100% labelled "paused" — for a file that is complete on disk.
+	if n, err := r.TakeDeliveryAll(ctx); err == nil {
+		delivered = n
+	}
+	return reconciled, delegated, adopted, delivered
 }
 
 func cmdOnce(args []string) {
@@ -198,12 +205,12 @@ func cmdOnce(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
-	rec, del, ad := pass(ctx, r)
-	if *quiet && rec == 0 && del == 0 && ad == 0 {
+	rec, del, ad, dlv := pass(ctx, r)
+	if *quiet && rec == 0 && del == 0 && ad == 0 && dlv == 0 {
 		return
 	}
-	fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delegates-to=%s\n",
-		time.Now().Format(time.RFC3339), rec, del, ad, tier)
+	fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delivered=%d delegates-to=%s\n",
+		time.Now().Format(time.RFC3339), rec, del, ad, dlv, tier)
 }
 
 func cmdRun(args []string) {
@@ -257,9 +264,9 @@ func cmdRun(args []string) {
 		// while this one is busy.
 		download.Heartbeat(store, owner, tier, *interval)
 
-		if rec, del, ad := pass(ctx, r); rec > 0 || del > 0 || ad > 0 {
-			fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d\n",
-				time.Now().Format(time.RFC3339), rec, del, ad)
+		if rec, del, ad, dlv := pass(ctx, r); rec > 0 || del > 0 || ad > 0 || dlv > 0 {
+			fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delivered=%d\n",
+				time.Now().Format(time.RFC3339), rec, del, ad, dlv)
 		}
 		select {
 		case <-ctx.Done():
