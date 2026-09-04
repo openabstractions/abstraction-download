@@ -44,7 +44,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from abstraction_job import FileStore, Record, RUNNING, TRANSFERRED, COMPLETE
+from abstraction_job import Record, Scratch, Store, RUNNING, TRANSFERRED, COMPLETE
 
 # KIND is the job.Record.kind this module understands. A process that finds a job
 # of an unknown kind leaves it alone rather than guessing at its spec.
@@ -133,6 +133,27 @@ class Sink:
         that mounts the same directory as /store.
         """
         return _resolve_under(root, self.partial), _resolve_under(root, self.final)
+
+
+def local_root(store) -> str:
+    """The store's own directory, or "" when its binding is not a filesystem.
+
+    Asking is the point. ``store.root`` used to be an attribute, so this layer
+    -- which is not supposed to know what a file is -- could read a directory off
+    any store without admitting it needed one, and would have handed a service
+    binding's absence straight to os.path.join.
+    """
+    return store.root() if isinstance(store, Scratch) else ""
+
+
+def local_sink(store, sink: "Sink") -> Tuple[str, str]:
+    """Resolve a sink's relative paths into paths on THIS machine.
+
+    A relative path in a record means "under the store's own area", so a record
+    written by a PC and adopted by a NAS names one directory rather than one
+    machine's view of it. Absolute paths are left exactly as written.
+    """
+    return sink.resolve(local_root(store))
 
 
 @dataclass
@@ -248,7 +269,7 @@ def portable(p: str) -> str:
 # -------------------------------------------------------------- submitting ---
 
 
-def submit(store: FileStore, spec: Spec, requires: Optional[List[str]] = None) -> str:
+def submit(store: Store, spec: Spec, requires: Optional[List[str]] = None) -> str:
     """Create a download job."""
     spec.validate()
     spec.sink.partial = portable(spec.sink.partial)
@@ -351,7 +372,7 @@ class Runner:
 
     def __init__(
         self,
-        store: FileStore,
+        store: Store,
         owner_name: Optional[str] = None,
         lease_ttl: float = 30.0,
         persist_every: int = 8 << 20,
@@ -393,7 +414,7 @@ class Runner:
     def _run(self, rec: Record, epoch: int) -> None:
         spec = spec_of(rec)
         cp = checkpoint_of(rec)
-        partial, final = spec.sink.resolve(self.store.root)
+        partial, final = local_sink(self.store, spec.sink)
 
         os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
 

@@ -83,7 +83,7 @@ class DownloadTest(unittest.TestCase):
         error was ignored, and two resume tests passed while testing nothing.
         """
         rec = self.store.load(job_id)
-        partial, _ = dl.spec_of(rec).sink.resolve(self.store.root)
+        partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
         os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
         with open(partial, "wb") as f:
             f.write(on_disk)
@@ -112,7 +112,7 @@ class DownloadTest(unittest.TestCase):
 
         rec = self.store.load(jid)
         self.assertEqual(rec.state, TRANSFERRED)
-        _, final = dl.spec_of(rec).sink.resolve(self.store.root)
+        _, final = dl.local_sink(self.store, dl.spec_of(rec).sink)
         with open(final, "rb") as f:
             self.assertEqual(f.read(), body)
 
@@ -128,7 +128,7 @@ class DownloadTest(unittest.TestCase):
             dl.Runner(self.store).run(jid)
 
         rec = self.store.load(jid)
-        partial, _ = dl.spec_of(rec).sink.resolve(self.store.root)
+        partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
         self.assertFalse(
             os.path.exists(partial),
             "bytes known to be wrong were left for a successor to resume onto",
@@ -163,7 +163,7 @@ class DownloadTest(unittest.TestCase):
         self.stage(jid, body[:20000] + b"\x00" * 10000, 20000)
 
         dl.Runner(self.store).run(jid)
-        _, final = dl.spec_of(self.store.load(jid)).sink.resolve(self.store.root)
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(jid)).sink)
         with open(final, "rb") as f:
             self.assertEqual(f.read(), body, "the unproven tail was kept")
 
