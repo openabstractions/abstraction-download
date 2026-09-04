@@ -201,6 +201,18 @@ func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Statu
 // than moved — a rename across a mount is not atomic and frequently not even
 // possible, and the far side's copy is worth keeping until ours is verified.
 func (d *Delegator) Finalize(ctx context.Context, externalID, dest string) error {
+	return d.FinalizeReporting(ctx, externalID, dest, nil)
+}
+
+// FinalizeReporting is Finalize with progress, because on this delegate
+// finalising is not a formality.
+//
+// BITS was told where to put the file when the job started and has been holding
+// it there, so its Finalize is a call into the service. Here the bytes are on
+// the far side of a share and every one of them has to cross, which for a large
+// model is minutes of real transfer that the record used to describe as "done".
+func (d *Delegator) FinalizeReporting(ctx context.Context, externalID, dest string,
+	report func(done, total int64)) error {
 	rec, err := d.store.Load(externalID)
 	if err != nil {
 		return fmt.Errorf("nas: %w", err)
@@ -214,7 +226,7 @@ func (d *Delegator) Finalize(ctx context.Context, externalID, dest string) error
 		return fmt.Errorf("nas: the far side reported success but %s is not there: %w", src, err)
 	}
 	if dest != "" && !sameFile(src, dest) {
-		if err := copyFile(src, dest); err != nil {
+		if err := copyFile(src, dest, report); err != nil {
 			return fmt.Errorf("nas: bringing %s across: %w", filepath.Base(src), err)
 		}
 	}
@@ -276,7 +288,7 @@ func sameFile(a, b string) bool {
 
 // copyFile writes through a .partial and renames, so an interrupted copy never
 // leaves a short file sitting at the destination looking finished.
-func copyFile(src, dest string) error {
+func copyFile(src, dest string, report func(done, total int64)) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -286,14 +298,23 @@ func copyFile(src, dest string) error {
 	}
 	defer in.Close()
 
+	total := int64(0)
+	if st, serr := in.Stat(); serr == nil {
+		total = st.Size()
+	}
+
 	tmp := dest + ".partial"
 	out, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, &reporting{r: in, total: total, report: report}); err != nil {
 		out.Close()
-		os.Remove(tmp)
+		// The partial is NOT removed. Deleting it threw away every byte that had
+		// crossed and made the next attempt start from zero — on a 40 GB model
+		// over SMB that is the difference between a retry and an afternoon. It
+		// is replaced wholesale by the next attempt, so keeping it costs one
+		// file and risks nothing.
 		return err
 	}
 	if err := out.Sync(); err != nil {
@@ -306,4 +327,28 @@ func copyFile(src, dest string) error {
 		return err
 	}
 	return os.Rename(tmp, dest)
+}
+
+// reporting counts bytes as they are read, so a copy across a share can say how
+// far it has got. The same shape the Fetcher interface already uses for a
+// download, because it is the same question asked about a second transfer.
+type reporting struct {
+	r      io.Reader
+	total  int64
+	done   int64
+	report func(done, total int64)
+	// Reported at most every 8 MiB. A share copy moves fast enough that
+	// reporting every read would write the record thousands of times to say
+	// something a person cannot see change.
+	lastAt int64
+}
+
+func (x *reporting) Read(p []byte) (int, error) {
+	n, err := x.r.Read(p)
+	x.done += int64(n)
+	if x.report != nil && (x.done-x.lastAt >= 8<<20 || err != nil) {
+		x.lastAt = x.done
+		x.report(x.done, x.total)
+	}
+	return n, err
 }

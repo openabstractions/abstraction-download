@@ -410,12 +410,40 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			return err
 		}
 		_, final := LocalSink(r.Store, spec.Sink)
-		if err := d.Finalize(ctx, rec.Delegation.ExternalID, final); err != nil {
+
+		// A delegated download is not one transfer, it is three phases, and only
+		// the first was ever visible. Saying which one is happening is the
+		// difference between "this finished ten minutes ago and is doing
+		// nothing" and "this is copying 40 GB back across a share".
+		const phases = 3
+		r.step(id, epoch, &job.Step{
+			Name:    "copying from " + rec.Delegation.System,
+			Ordinal: 2,
+			Of:      phases,
+		})
+		if rf, ok := d.(ReportingFinalizer); ok {
+			err = rf.FinalizeReporting(ctx, rec.Delegation.ExternalID, final,
+				func(done, total int64) {
+					r.step(id, epoch, &job.Step{
+						Name:    "copying from " + rec.Delegation.System,
+						Ordinal: 2,
+						Of:      phases,
+						Done:    done,
+						Total:   total,
+					})
+				})
+		} else {
+			err = d.Finalize(ctx, rec.Delegation.ExternalID, final)
+		}
+		if err != nil {
 			return err
 		}
+
 		// Now the file is ours, and now we check it — because the delegate
 		// mostly did not, and even the one that did sent the bytes over a second
-		// network to get here.
+		// network to get here. Re-hashing gigabytes is not instant either, and
+		// it was the second half of the silence.
+		r.step(id, epoch, &job.Step{Name: "verifying", Ordinal: 3, Of: phases})
 		total, digest, err := hashFile(final)
 		if err != nil {
 			return err
@@ -435,6 +463,10 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		_, err = r.Store.Update(id, epoch, func(rr *job.Record) error {
 			rr.Progress.Done = total
 			rr.Progress.UpdatedAt = job.At(time.Now())
+			// Finished work is not on a step. Leaving the last one set would
+			// leave a completed download reading "verifying" forever, which is
+			// the same class of lie as a finished one reading "paused".
+			rr.Progress.Step = nil
 			rr.State = job.StateTransferred
 			rr.Error = ""
 			rr.Delegation.Delivered = true
@@ -519,6 +551,30 @@ type Suspendable interface {
 	Resume(ctx context.Context, externalID string) error
 }
 
+// ReportingFinalizer is an OPTIONAL capability: a delegate whose Finalize does
+// real work can say how that work is going.
+//
+// Most delegates finish instantly. BITS was told where to put the file when the
+// job started and has been holding it there, so its Finalize is a call into the
+// service and nothing more. A NAS is the opposite: the bytes are on the far side
+// of a share and Finalize copies every one of them across, which for a 40 GB
+// model is minutes of real transfer.
+//
+// Without this the record showed the delegate's numbers throughout that copy, so
+// a person watched a download that said 100% and did nothing, twice over --
+// once for the copy and again for the re-hash. The second transfer was real and
+// entirely invisible.
+//
+// Optional rather than part of Delegator for the reason every capability here
+// is: a delegate that finishes instantly has nothing to report and should not be
+// made to implement a callback it would call once with the same number.
+type ReportingFinalizer interface {
+	// FinalizeReporting is Finalize, with progress. report may be called from
+	// any goroutine and must be cheap; done and total are bytes, and total is 0
+	// when the delegate cannot say.
+	FinalizeReporting(ctx context.Context, externalID, dest string, report func(done, total int64)) error
+}
+
 // honourDelegated carries out what somebody asked for, on work this process is
 // not performing.
 //
@@ -583,4 +639,17 @@ func (r *Runner) honourDelegated(ctx context.Context, rec *job.Record, want job.
 	}
 	r.Store.Release(rec.ID, epoch)
 	return nil
+}
+
+// step records which phase this job is in, best-effort.
+//
+// Best-effort on purpose: a step is advisory, and failing to write one must
+// never fail the transfer it is describing. The lease is already held by the
+// caller, so this is one small write on a record it owns.
+func (r *Runner) step(id string, epoch int64, st *job.Step) {
+	_, _ = r.Store.Update(id, epoch, func(rr *job.Record) error {
+		rr.Progress.Step = st
+		rr.Progress.UpdatedAt = job.At(time.Now())
+		return nil
+	})
 }

@@ -357,6 +357,21 @@ func cmdStatus() {
 		}
 		claimable := note
 		fmt.Printf("%-12s %-5s %-10s %s%s\n", rec.State, pct, who, filepath.Base(spec.Sink.Final), claimable)
+		// Which phase, when the work has more than one. This is what a delegated
+		// download was missing: the far side finishes, and then the bytes still
+		// have to cross a share and be re-hashed, which used to show as a job
+		// sitting at 100% doing nothing for minutes.
+		if st := rec.Progress.Step; st != nil {
+			where := ""
+			if st.Total > 0 {
+				where = fmt.Sprintf(" %3.0f%%", 100*float64(st.Done)/float64(st.Total))
+			}
+			if st.Of > 0 {
+				fmt.Printf("             step %d/%d %s%s\n", st.Ordinal, st.Of, st.Name, where)
+			} else {
+				fmt.Printf("             %s%s\n", st.Name, where)
+			}
+		}
 		if rec.Error != "" {
 			fmt.Printf("             %s\n", rec.Error)
 		}
