@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,6 +37,8 @@ import (
 
 	download "github.com/ReinisLusis/abstraction-download"
 	job "github.com/ReinisLusis/abstraction-job"
+	"net/url"
+	"strings"
 )
 
 // System is the name recorded in job.Delegation.System.
@@ -484,6 +487,67 @@ func claimedByAnother(store job.Store, self, final string) bool {
 		if spec.Sink.Final == final {
 			return true
 		}
+	}
+	return false
+}
+
+// CanServe refuses a job whose source only THIS machine can reach.
+//
+// A delegate on another box cannot resolve "localhost". Without this the NAS
+// accepted such jobs on the strength of the scheme alone — it serves https, and
+// http://127.0.0.1/... is https-shaped — and then could never fetch them. The
+// record sat running forever while every sweep dutifully reported reconciling
+// it, and the work was stranded with no error anywhere.
+//
+// Deliberately narrow. This refuses only what is PROVABLY unreachable from
+// anywhere else: loopback, and the "this host" address. It does not try to guess
+// about private ranges or VPNs — a NAS on the same LAN reaches 192.168.x quite
+// happily, and a delegate that refused work it could actually do would be a
+// worse bug than the one being fixed.
+func (d *Delegator) CanServe(spec download.Spec) bool {
+	// Only when the far side is genuinely another machine.
+	//
+	// This delegator is also how a single machine talks to a store in a local
+	// directory -- that is exactly how it is tested -- and there "localhost" is
+	// this host for both sides, so refusing would reject work that would have
+	// succeeded. A delegate that turns down jobs it could do is a worse bug
+	// than the one being fixed here.
+	if !d.acrossTheNetwork() {
+		return true
+	}
+	for _, src := range spec.Sources {
+		if isLoopback(src.Locator) {
+			return false
+		}
+	}
+	return true
+}
+
+// acrossTheNetwork reports whether the store lives on another machine.
+//
+// A UNC path says so unambiguously, and it is the configured form in practice.
+// A mapped drive letter pointing at a share does not, and is treated as local:
+// this errs toward accepting work, which restores the previous behaviour rather
+// than inventing a new way to refuse.
+func (d *Delegator) acrossTheNetwork() bool {
+	r := filepath.ToSlash(d.Root)
+	return strings.HasPrefix(r, "//")
+}
+
+func isLoopback(locator string) bool {
+	u, err := url.Parse(locator)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
 	}
 	return false
 }

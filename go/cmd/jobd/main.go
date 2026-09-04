@@ -170,32 +170,48 @@ func openRunner(without ...string) (*download.Runner, job.Store, string) {
 // Reconcile first: a delegated job that has finished needs finalising and
 // verifying, and doing that before adopting means the orphan pass does not pick
 // up work the delegate has in fact already completed.
-func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopted, delivered int) {
-	if r.Delegators != nil {
-		if n, err := r.ReconcileAll(ctx); err == nil {
-			reconciled = n
+// The counts, and what went wrong. Both matter: a sweep that reports only what
+// it managed describes a store where nothing needs attention exactly as it
+// describes one where a job fails on every single pass.
+//
+// That is not hypothetical. `reconciled=2` printed every five seconds for two
+// hours while one transfer could not progress at all — its error thrown away
+// here, by taking the count only when err was nil.
+func pass(ctx context.Context, r *download.Runner) (reconciled, delegated, adopted, delivered int, problems []error) {
+	note := func(stage string, err error) {
+		if err != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", stage, err))
 		}
+	}
+
+	if r.Delegators != nil {
+		n, err := r.ReconcileAll(ctx)
+		reconciled, _ = n, err
+		note("reconcile", err)
+
 		// Then offer anything unclaimed to a better tier. This is the second hop
 		// of the chain, and it was missing: applications handed work to this
 		// supervisor, and the supervisor downloaded everything itself because
 		// nothing ever asked "should this go somewhere better?". A configured,
 		// reachable, registered NAS was never used.
-		if n, err := r.DelegateAll(ctx); err == nil {
-			delegated = n
-		}
+		n, err = r.DelegateAll(ctx)
+		delegated = n
+		note("delegate", err)
 	}
 	// Whatever nobody else wanted is still ours to finish.
-	if n, err := r.Adopt(ctx); err == nil {
-		adopted = n
-	}
+	n, err := r.Adopt(ctx)
+	adopted = n
+	note("adopt", err)
+
 	// And close out work that is demonstrably done. Without this a finished
 	// download waits forever for an acknowledgement from a process that may
 	// never come back, and shows up in a download manager as a row stuck at
 	// 100% labelled "paused" — for a file that is complete on disk.
-	if n, err := r.TakeDeliveryAll(ctx); err == nil {
-		delivered = n
-	}
-	return reconciled, delegated, adopted, delivered
+	n, err = r.TakeDeliveryAll(ctx)
+	delivered = n
+	note("deliver", err)
+
+	return reconciled, delegated, adopted, delivered, problems
 }
 
 func cmdOnce(args []string) {
@@ -207,8 +223,13 @@ func cmdOnce(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
-	rec, del, ad, dlv := pass(ctx, r)
-	if *quiet && rec == 0 && del == 0 && ad == 0 && dlv == 0 {
+	rec, del, ad, dlv, problems := pass(ctx, r)
+	// Problems are never quiet. --quiet means "say nothing when there was
+	// nothing to do", not "hide work that failed".
+	for _, p := range problems {
+		fmt.Fprintf(os.Stderr, "jobd: %v\n", p)
+	}
+	if *quiet && rec == 0 && del == 0 && ad == 0 && dlv == 0 && len(problems) == 0 {
 		return
 	}
 	fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delivered=%d delegates-to=%s\n",
@@ -288,10 +309,24 @@ func cmdRun(args []string) {
 
 	t := time.NewTicker(*interval)
 	defer t.Stop()
+	// What has already been complained about, so a persistent failure is
+	// reported when it starts rather than on every sweep forever.
+	said := map[string]bool{}
 	for {
-		if rec, del, ad, dlv := pass(ctx, r); rec > 0 || del > 0 || ad > 0 || dlv > 0 {
+		rec, del, ad, dlv, problems := pass(ctx, r)
+		if rec > 0 || del > 0 || ad > 0 || dlv > 0 {
 			fmt.Printf("%s  reconciled=%d delegated=%d adopted=%d delivered=%d\n",
 				time.Now().Format(time.RFC3339), rec, del, ad, dlv)
+		}
+		// Once per distinct problem, not once per sweep. A stuck job fails
+		// identically every time, and a supervisor polling every five seconds
+		// would write the same line 17,000 times a day and bury everything else
+		// in its own log.
+		for _, p := range problems {
+			if msg := p.Error(); !said[msg] {
+				said[msg] = true
+				fmt.Fprintf(os.Stderr, "jobd: %s\n", msg)
+			}
 		}
 		select {
 		case <-ctx.Done():

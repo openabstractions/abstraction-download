@@ -400,6 +400,7 @@ func (r *Runner) Adopt(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var failed []error
 	for _, o := range orphans {
 		// Someone else's kind of job is none of our business.
 		if o.Kind != Kind {
@@ -415,11 +416,16 @@ func (r *Runner) Adopt(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := r.Run(ctx, o.ID); err != nil {
-			continue // one bad job must not stop the rest being rescued
+			// One bad job must not stop the rest being rescued -- and must not
+			// disappear either. A bare `continue` here meant a job that failed
+			// every single sweep was indistinguishable from one nobody needed
+			// to touch.
+			failed = append(failed, fmt.Errorf("%s: %w", o.ID, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(failed...)
 }
 
 // hashFile reads a whole file and returns its size and digest. Used after a

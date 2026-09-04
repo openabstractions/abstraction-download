@@ -152,14 +152,51 @@ func (d *Delegators) Without(system string) *Delegators {
 	return &Delegators{all: kept}
 }
 
+// Selective is an OPTIONAL capability: a delegate that can tell, from the job
+// itself, that it could never do this one.
+//
+// Scheme and capabilities are not enough, and the gap strands work silently. A
+// NAS serves "https" and promises to survive process exit, so it was handed a
+// job whose source was http://127.0.0.1 -- an address that means THIS machine,
+// and is unreachable from any other. The far side could never fetch it, the
+// record sat running forever, and every sweep reported reconciling it.
+//
+// Only the delegate can answer this, which is the same argument this project
+// already makes about intent: "asking for something the current owner cannot do
+// is not an error here, because only the owner knows what it can do".
+//
+// Optional, so a delegate with nothing to refuse implements nothing.
+type Selective interface {
+	// CanServe reports whether this delegate could perform this job at all.
+	// It is about POSSIBILITY, not preference or load: answering false means
+	// the work would be impossible here, not merely inconvenient.
+	CanServe(spec Spec) bool
+}
+
 func (d *Delegators) For(src Source, requires []string) (Delegator, bool) {
+	return d.forSpec(Spec{Sources: []Source{src}}, src, requires)
+}
+
+// ForSpec picks a delegate for a whole job, so one that can refuse gets to see
+// what it is being offered.
+func (d *Delegators) ForSpec(spec Spec, src Source, requires []string) (Delegator, bool) {
+	return d.forSpec(spec, src, requires)
+}
+
+func (d *Delegators) forSpec(spec Spec, src Source, requires []string) (Delegator, bool) {
 	for _, x := range d.all {
 		if !hasScheme(x.Schemes(), src.Scheme) {
 			continue
 		}
-		if hasAllCaps(x.Capabilities(), requires) {
-			return x, true
+		if !hasAllCaps(x.Capabilities(), requires) {
+			continue
 		}
+		// The delegate's own veto, last, because it is the most specific thing
+		// anybody knows about the job.
+		if sel, ok := x.(Selective); ok && !sel.CanServe(spec) {
+			continue
+		}
+		return x, true
 	}
 	return nil, false
 }
@@ -244,12 +281,14 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 	}
 
 	for _, src := range spec.Sources {
-		d, ok := r.Delegators.For(src, requires)
+		one := spec
+		one.Sources = []Source{src}
+		// The whole job, not just the scheme, so a delegate that can tell it
+		// could never do this one gets to say so before it is handed the work.
+		d, ok := r.Delegators.ForSpec(one, src, requires)
 		if !ok {
 			continue
 		}
-		one := spec
-		one.Sources = []Source{src}
 		// A delegate is a different process, sometimes a different account, and
 		// it has no idea where our store lives. Hand it paths that are already
 		// real on the machine it runs on.
@@ -512,6 +551,7 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var failed []error
 	for _, rec := range all {
 		if rec.Kind != Kind || !rec.Delegated() {
 			continue
@@ -530,11 +570,21 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := r.Reconcile(ctx, rec.ID); err != nil {
-			continue // one unreachable delegate must not stop the others
+			// One unreachable delegate must not stop the others -- but it must
+			// not vanish either. This was a bare `continue`, and the silence
+			// cost real time: a job that could not progress looked exactly like
+			// a job nobody had to touch, so a supervisor printed a healthy
+			// `reconciled=2` every five seconds while one transfer was stuck
+			// and another was destroying its own bytes.
+			failed = append(failed, fmt.Errorf("%s: %w", rec.ID, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	// The count AND what went wrong. A caller that only reads the count learns
+	// nothing about the jobs that could not be reconciled, which is the state
+	// worth knowing about.
+	return n, errors.Join(failed...)
 }
 
 // DelegateAll offers every unclaimed job to the tiers this process has, and it
