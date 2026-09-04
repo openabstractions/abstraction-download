@@ -237,3 +237,19 @@ func bareHex(d string) string {
 	}
 	return s
 }
+
+// NormalDigest is a digest reduced to the thing that carries the meaning.
+//
+// Exported because conformance across implementations is about meaning, not
+// spelling: one may write "sha256:<hex>" and another the bare hex, and the
+// contract is that they name the same artifact. Comparing the spelling instead
+// is what deleted a correct 1.5 GB download.
+//
+// An unrecognised digest returns empty rather than itself, so a comparison
+// cannot accidentally succeed on two things neither implementation understood.
+func NormalDigest(d string) string {
+	if h := bareHex(d); h != "" {
+		return "sha256:" + h
+	}
+	return ""
+}
