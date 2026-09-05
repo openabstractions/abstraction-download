@@ -33,9 +33,8 @@ vocabulary it uses throughout.
 
 ## Install
 
-The Go module lives in the `go/` subdirectory, so its path ends in `/go` and is **not** the
-repository URL. `go get` also fetches `abstraction-job/go`, `abstraction-config/go` and
-`abstraction-storage/go`, all `github.com/openabstractions/…` at `v0.1.0`.
+The Go module lives in `go/`, so its path ends in `/go`, not the repository URL. `go get` also
+fetches `abstraction-job/go`, `abstraction-config/go` and `abstraction-storage/go` at `v0.1.0`.
 
 ```
 go get github.com/openabstractions/abstraction-download/go@v0.1.0
@@ -52,8 +51,7 @@ export PYTHONPATH="$PWD/abstraction-download/python:$PWD/abstraction-job/python"
 
 ## A minimal example
 
-Each program copies a local file through the library, checks it against its digest and prints
-what was delivered. Neither needs a network; both write into the current directory.
+Each copies a local file through the library, checks its digest, and prints what was delivered.
 
 ```go
 package main
@@ -118,7 +116,7 @@ with open("store/out/hello.bin", "rb") as f:
 
 **Go, package `download`.** Describing work: `Kind`, `Spec`, `Artifact`, `Source`, `Sink`,
 `Checkpoint`, `Spec.Validate`, `Submit`, `SpecOf`, `CheckpointOf`, `Sink.Resolve`, `Portable`,
-`NormalDigest`. Doing work: `NewRunner`, and on `*Runner` — `Run`, `Adopt`, `TakeDelivery`,
+`NormalDigest`. Doing work: `NewRunner`; on `*Runner`: `Run`, `Adopt`, `TakeDelivery`,
 `TakeDeliveryAll`, `Delegate`, `DelegateAll`, `Reconcile`, `ReconcileAll`, `Tier`, `Handoff`.
 Transports: `Fetcher`, `Capability` (`CapResume`, `CapSurvivesProcessExit`, `CapVerifies`,
 `CapDelegates`), `Registry`, `NewRegistry`, `DefaultRegistry`, `HTTP`, `File`, `Delegator`,
@@ -126,8 +124,10 @@ Transports: `Fetcher`, `Capability` (`CapResume`, `CapSurvivesProcessExit`, `Cap
 `ReportingFinalizer`. Wiring: `Discover`, `DiscoverIn`, `Tier`, `RegisterTier`,
 `RegisteredTiers`, `Owner`, `Program`, `Service`, `NewService`, `Open`, `WithStorage`,
 `Credentials`, `EnvCredentials`, `CredentialAttr`, `Supervisor`, `Heartbeat`, `StopHeartbeat`,
-`SupervisorOf`, `Nudge`, `ListenForNudges`, `LocalSink`. Subpackages: `go/bits` (Windows BITS),
-`go/nas` (a supervisor reachable over a share), `go/all` (blank-import both).
+`SupervisorOf`, `Nudge`, `ListenForNudges`, `LocalSink`. Resuming: `Resume`, `ResumeOrSubmit`,
+`ResumeOrGet`, `Continuation`, `Disposition` (`Submitted`, `Resumed`, `Delivered`, `Busy`,
+`Paused`). Subpackages: `go/bits` (Windows BITS), `go/nas` (a supervisor over a share), `go/all`
+(blank-import both).
 
 **Python, module `abstraction_download`:** `KIND`, `Spec`, `Artifact`, `Source`, `Sink`,
 `Checkpoint`, `submit`, `spec_of`, `checkpoint_of`, `portable`, `local_root`, `local_sink`,
@@ -135,7 +135,7 @@ Transports: `Fetcher`, `Capability` (`CapResume`, `CapSurvivesProcessExit`, `Cap
 `take_delivery`), and the errors `DownloadError`, `DigestMismatch`, `ShortTransfer`,
 `RangeIgnored`, `NoSource`.
 
-Unusual semantics, in both languages:
+Unusual semantics, in both languages unless said otherwise:
 
 - A `Source` is a `{Scheme, Locator}` pair, not a URL; `file` and `smb` locators are filesystem
   paths. Relative sink paths resolve against the store root on each machine, and a path
@@ -146,15 +146,16 @@ Unusual semantics, in both languages:
 - Resuming starts at the smaller of the checkpoint and the size of the partial file; anything
   past that is discarded and the hash rebuilt over what is kept. A `200` answer to a `Range`
   request is an error, not a restart, and a digest mismatch deletes the partial file and
-  records the reason in the job.
+  records the reason in the job. In Go only, `ResumeOrSubmit` and `ResumeOrGet` key work on the
+  destination, not a job id: one record per path, continued, a `complete` one reused only while
+  its file is there, no lease taken from another owner, and `Continuation` says which.
 
-**Commands**, built from `go/`. `go build ./cmd/dl` gives `dl <url>`, plus `dl list`, `dl
-watch` and `dl tiers`. `go build ./cmd/jobd` gives the supervisor: `jobd once` makes one pass,
-`jobd run` supervises in the foreground, `jobd status` reports, and `jobd install` prints
-`schtasks` commands without running them. `go run ./cmd/specread <spec.json>` prints how this
-implementation reads a spec. `ABSTRACTION_STORE` selects the job store (default
-`~/.abstraction`), `MODELGET_STORE` is a legacy alias, and `ABSTRACTION_NAS_STORE` names one on
-a share that a supervisor elsewhere watches.
+**Commands**, built from `go/`. `go build ./cmd/dl` gives `dl <url>`, plus `dl list`, `dl watch`
+and `dl tiers`. `go build ./cmd/jobd` gives the supervisor: `jobd once` makes one pass, `jobd
+run` supervises in the foreground, `jobd status` reports, and `jobd install` prints `schtasks`
+commands without running them. `go run ./cmd/specread <spec.json>` prints how this reads a spec.
+`ABSTRACTION_STORE` selects the job store (default `~/.abstraction`), `MODELGET_STORE` is a
+legacy alias, and `ABSTRACTION_NAS_STORE` names one on a share a supervisor elsewhere watches.
 
 ## The `cpp/` directory
 
@@ -171,9 +172,9 @@ Experimental, at `v0.1.0`. Interfaces and the on-disk spec may change.
 - **Go** is the complete implementation: the runner, the HTTP and file/SMB fetchers,
   delegation, the BITS and NAS delegators, and `jobd`.
 - **Python** is partial. Its `Runner` runs, adopts and takes delivery over `http`, `https`,
-  `file` and `smb`, but there is no delegation, reconcile, supervisor loop or tier registry,
-  and `adopt` skips delegated jobs. A Python process can neither hand work to BITS or a NAS nor
-  recover work handed there. **C++** reads specs only, as above.
+  `file` and `smb`, but there is no delegation, reconcile, supervisor loop, tier registry or
+  `ResumeOrSubmit`, and `adopt` skips delegated jobs. A Python process can neither hand work to
+  BITS or a NAS nor recover work handed there. **C++** reads specs only, as above.
 - The `bits` binding runs `powershell.exe` with the `BitsTransfer` module, so it works on
   Windows only; its tests skip when BITS cannot be driven, and the `nas` tests that reach a
   real NAS skip unless `ABSTRACTION_LIVE=1` and `ABSTRACTION_NAS_STORE` are set. Untested
@@ -186,13 +187,12 @@ cd go && go build ./... && go test ./...
 cd ../python && python -m unittest discover
 ```
 
-66 Go test functions across 16 files (the `bits` package takes about a minute) and 10 Python
+76 Go test functions across 17 files (the `bits` package takes about a minute) and 32 Python
 tests, which find the job layer through `PYTHONPATH` or a sibling `abstraction-job` checkout.
 
 ## Requirements
 
-Go 1.26.0 or newer. The Python code is standard library only, and the tests are run against
-Python 3.12. It builds on Windows, Linux and macOS; `bits` needs Windows at run time.
+Go 1.26.0 or newer; Python 3.12, no dependencies. Windows, Linux, macOS; `bits` needs Windows.
 
 ## Licence
 

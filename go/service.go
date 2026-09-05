@@ -48,6 +48,11 @@ type Service interface {
 	// several sources, capabilities an implementation must have to qualify.
 	Submit(spec Spec, requires ...string) (job.Job, error)
 
+	// Resume is downloading identified by destination rather than by job id,
+	// for a program that is run again from a shell and has no id to remember.
+	// See resume.go.
+	Resume
+
 	// Jobs is a live collection of every download on this machine — including
 	// ones that were in flight before this process started, and ones some other
 	// program submitted. Bind a UI to it.
@@ -129,8 +134,18 @@ func (s *service) Where() string {
 }
 
 func (s *service) Get(source, destination string) (job.Job, error) {
+	spec, err := specFor(source, destination)
+	if err != nil {
+		return nil, err
+	}
+	return s.Submit(spec)
+}
+
+// specFor turns a URL and a path into a spec, which is what Get is minus the
+// submission. ResumeOrGet needs the same translation.
+func specFor(source, destination string) (Spec, error) {
 	if strings.TrimSpace(source) == "" {
-		return nil, fmt.Errorf("download: no source")
+		return Spec{}, fmt.Errorf("download: no source")
 	}
 	dest := destination
 	if dest == "" {
@@ -143,12 +158,12 @@ func (s *service) Get(source, destination string) (job.Job, error) {
 	// different working directory, a different user, or be on another machine.
 	abs, err := filepath.Abs(dest)
 	if err != nil {
-		return nil, err
+		return Spec{}, err
 	}
-	return s.Submit(Spec{
+	return Spec{
 		Sources: []Source{{Scheme: schemeFrom(source), Locator: source}},
 		Sink:    Sink{Final: abs},
-	})
+	}, nil
 }
 
 func (s *service) Submit(spec Spec, requires ...string) (job.Job, error) {

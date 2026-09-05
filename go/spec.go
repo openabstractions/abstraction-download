@@ -105,10 +105,19 @@ func (s Spec) Validate() error {
 // own work directory when the caller does not choose one, so a successor can
 // find what a predecessor left without either of them agreeing on a convention.
 func Submit(store job.Store, spec Spec, requires ...string) (string, error) {
+	return submitAs(store, job.NewID(), spec, requires...)
+}
+
+// submitAs is Submit with the id chosen by the caller rather than invented here.
+//
+// The id is the store's only exclusion primitive: both bindings refuse a second
+// Submit of an id that already exists, so a caller that can compute an id from
+// the work itself gets create-or-find without a lock. ResumeOrSubmit is the one
+// caller that needs it; see resume.go.
+func submitAs(store job.Store, id string, spec Spec, requires ...string) (string, error) {
 	if err := spec.Validate(); err != nil {
 		return "", err
 	}
-	id := job.NewID()
 	// Slashes, always, for the paths that are relative. filepath.Join on Windows
 	// produces `models\x.gguf`, and on Linux that is not a directory and a file
 	// — it is ONE file whose name contains a backslash. The job would "succeed"
