@@ -240,5 +240,267 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(self.store.load(jid).state, TRANSFERRED)
 
 
+class RecordingRangeServer(RangeServer):
+    """RangeServer that remembers every Range header it was sent, so a test can
+    assert on the wire rather than infer from how many bytes arrived."""
+
+    seen = None
+
+    def do_GET(self):
+        self.seen.append(self.headers.get("Range") or "")
+        RangeServer.do_GET(self)
+
+
+def recording_serve(body):
+    seen = []
+    handler = type("H", (RecordingRangeServer,), {"body": body, "seen": seen})
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/blob.bin" % srv.server_port, seen
+
+
+class ResumeTest(unittest.TestCase):
+    """resume_or_submit: the job for a destination, continued.
+
+    These mirror the Go tests of the same names. Two implementations agreeing on
+    which record a destination has -- down to the id -- is what stops a file
+    fetched by one and continued by the other from becoming two downloads.
+    """
+
+    OWNER = "test-owner@host:1"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileStore(self.dir.name)
+        self.out = os.path.join(self.dir.name, "out")
+
+    def spec(self, url, name, digest="", size=0):
+        return dl.Spec(
+            artifact=dl.Artifact(digest=digest, size=size),
+            sources=[dl.Source(scheme="http", locator=url)],
+            sink=dl.Sink(final=os.path.join(self.out, name)),
+        )
+
+    def call(self, spec, owner_name=None):
+        return dl.resume_or_submit(
+            self.store, spec, owner_name=owner_name or self.OWNER
+        )
+
+    def stage(self, job_id, body, on_disk, proven):
+        """What a killed download leaves: bytes on disk, and a record saying how
+        many of them were proven."""
+        rec = self.store.load(job_id)
+        partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
+        if on_disk is not None:
+            os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
+            with open(partial, "wb") as f:
+                f.write(body[:on_disk])
+        held = self.store.claim(job_id, "stager", 30)
+
+        def mutate(r):
+            r.checkpoint = {"verified_prefix": proven}
+
+        self.store.update(job_id, held.lease.epoch, mutate)
+        self.store.release(job_id, held.lease.epoch)
+        self.assertEqual(
+            dl.checkpoint_of(self.store.load(job_id)).verified_prefix,
+            proven,
+            "staging did not take, so this test would prove nothing",
+        )
+        return partial
+
+    def finish(self, job_id, state):
+        held = self.store.claim(job_id, "test-finisher", 30)
+
+        def mutate(r):
+            r.state = state
+
+        self.store.update(job_id, held.lease.epoch, mutate)
+
+    # A one-shot command has no job id to remember. Asked a second time for the
+    # same destination, it must be handed the record it made the first time.
+    def test_a_second_call_finds_the_first_record(self):
+        spec = self.spec("http://example.invalid/a.bin", "a.bin")
+        first, c1 = self.call(spec)
+        self.assertEqual(c1.disposition, dl.SUBMITTED)
+        second, c2 = self.call(spec)
+        self.assertEqual(c2.disposition, dl.RESUMED)
+        self.assertEqual(first, second, "two ids for one destination")
+        self.assertEqual(len(self.store.list()), 1)
+
+    # The whole point: the second attempt asks the server for the rest of the
+    # file and not for all of it.
+    def test_the_second_attempt_sends_a_range_request(self):
+        body, digest = payload(64 * 1024)
+        have = 12 * 1024
+        srv, url, ranges = recording_serve(body)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        spec = self.spec(url, "b.bin", digest, len(body))
+        first, _ = self.call(spec)
+        self.stage(first, body, have, have)
+
+        second, c = self.call(spec)
+        self.assertEqual(second, first, "the second call started a new job")
+        self.assertEqual(c.disposition, dl.RESUMED)
+        self.assertEqual(c.resume_from, have)
+
+        dl.Runner(self.store).run(second)
+        self.assertTrue(ranges, "the server was never asked for anything")
+        self.assertEqual(
+            ranges[-1],
+            "bytes=12288-",
+            "the second attempt did not resume",
+        )
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(second)).sink)
+        with open(final, "rb") as f:
+            self.assertEqual(f.read(), body)
+
+    # Two shells, one destination, at the same instant. The store's refusal to
+    # create one id twice is what makes this one record rather than two racing
+    # transfers to the same path.
+    def test_concurrent_callers_produce_one_record(self):
+        spec = self.spec("http://example.invalid/c.bin", "c.bin")
+        callers = 8
+        ids = [None] * callers
+        errs = [None] * callers
+        start = threading.Barrier(callers)
+
+        def caller(i):
+            try:
+                start.wait()
+                ids[i], _ = self.call(spec)
+            except Exception as e:  # recorded, not raised out of a thread
+                errs[i] = e
+
+        threads = [threading.Thread(target=caller, args=(i,)) for i in range(callers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual([e for e in errs if e is not None], [])
+        self.assertEqual(set(ids), {ids[0]}, "one destination produced several ids")
+        self.assertEqual(len(self.store.list()), 1)
+
+    # A checkpoint is a claim about a file. When the file disagrees, the file
+    # wins: resuming from a byte that is not there produces the right length and
+    # the wrong contents, which no later check would catch without a digest.
+    def test_a_vanished_partial_is_not_trusted(self):
+        body, digest = payload(32 * 1024)
+        srv, url, ranges = recording_serve(body)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        spec = self.spec(url, "d.bin", digest, len(body))
+        first, _ = self.call(spec)
+        partial = self.stage(first, body, None, 20 * 1024)
+        self.assertFalse(
+            os.path.exists(partial), "this test needs the partial to be absent"
+        )
+
+        _, c = self.call(spec)
+        self.assertEqual(
+            c.resume_from, 0, "the checkpoint was believed over the filesystem"
+        )
+        dl.Runner(self.store).run(first)
+        self.assertEqual(
+            [r for r in ranges if r],
+            [],
+            "a Range header was sent for a file with no bytes on disk",
+        )
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(first)).sink)
+        with open(final, "rb") as f:
+            self.assertEqual(f.read(), body)
+
+    # The same, one step less obvious: the file is there but shorter than the
+    # checkpoint says.
+    def test_a_short_partial_resumes_from_the_file(self):
+        body, _ = payload(32 * 1024)
+        spec = self.spec("http://example.invalid/e.bin", "e.bin")
+        first, _ = self.call(spec)
+        self.stage(first, body, 1024, 20 * 1024)
+
+        _, c = self.call(spec)
+        self.assertEqual(c.resume_from, 1024)
+
+    # A URL is not the identity; the destination is. Continuing anyway is a
+    # choice, so the caller is told which source the job it was handed fetches.
+    def test_a_different_source_is_continued_and_reported(self):
+        first, _ = self.call(self.spec("http://origin.invalid/f.bin", "f.bin"))
+        second, c = self.call(self.spec("http://mirror.invalid/f.bin", "f.bin"))
+        self.assertEqual(first, second, "a mirror became a second job")
+        self.assertTrue(
+            c.source_changed, "the caller was not told the job fetches elsewhere"
+        )
+        self.assertEqual(c.source, "http://origin.invalid/f.bin")
+
+    # Complete means the file is there. Checked, not believed.
+    def test_a_completed_download_is_not_fetched_again(self):
+        spec = self.spec("http://example.invalid/g.bin", "g.bin")
+        first, _ = self.call(spec)
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(first)).sink)
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        with open(final, "wb") as f:
+            f.write(b"done")
+        self.finish(first, COMPLETE)
+
+        second, c = self.call(spec)
+        self.assertEqual(c.disposition, dl.DELIVERED)
+        self.assertEqual(second, first, "a finished download was fetched again")
+
+        # And when the file is gone, the completed record is history rather than
+        # a claim on the path.
+        os.remove(final)
+        third, c = self.call(spec)
+        self.assertNotEqual(
+            third, first, "a completed record was reused although its file had gone"
+        )
+        self.assertEqual(c.disposition, dl.SUBMITTED)
+
+    # Somebody else is downloading to this path. Their lease is theirs.
+    def test_another_owners_lease_is_not_taken(self):
+        spec = self.spec("http://example.invalid/h.bin", "h.bin")
+        first, _ = self.call(spec)
+        held = self.store.claim(first, "somebody-else@host:99", 60)
+
+        second, c = self.call(spec)
+        self.assertEqual(second, first, "a job somebody else is doing was duplicated")
+        self.assertEqual(c.disposition, dl.BUSY)
+        after = self.store.load(first)
+        self.assertEqual(after.lease.owner, "somebody-else@host:99")
+        self.assertEqual(after.lease.epoch, held.lease.epoch, "the lease was taken")
+
+    # Two spellings of one path are one destination.
+    def test_two_spellings_of_one_destination_are_one_record(self):
+        url = "http://example.invalid/i.bin"
+        src = [dl.Source(scheme="http", locator=url)]
+        plain = os.path.join(self.out, "i.bin")
+        roundabout = self.out + "/./sub/../i.bin"
+
+        first, _ = self.call(dl.Spec(sources=src, sink=dl.Sink(final=plain)))
+        second, _ = self.call(dl.Spec(sources=src, sink=dl.Sink(final=roundabout)))
+        self.assertEqual(first, second, "two spellings became two jobs")
+        self.assertEqual(len(self.store.list()), 1)
+
+    # resume_or_get is the shape a command-line tool has: a URL and a path.
+    def test_resume_or_get_is_keyed_on_the_same_path(self):
+        dest = os.path.join(self.out, "j.bin")
+        first, _ = dl.resume_or_get(self.store, "http://example.invalid/j.bin", dest)
+        second, c = dl.resume_or_get(self.store, "http://example.invalid/j.bin", dest)
+        self.assertEqual(first, second, "running the command twice made two jobs")
+        self.assertEqual(c.disposition, dl.RESUMED)
+        self.assertEqual(len(self.store.list()), 1)
+
+    # The id is the cross-language part of this contract. If Go and Python
+    # derived it differently, a download begun by one and re-run through the
+    # other would be two records for one file -- the very failure being fixed.
+    # The Go test of the same name pins the same string.
+    def test_the_id_for_a_destination_is_pinned(self):
+        self.assertEqual(dl._destination_id("/models/x.gguf"), "dest-01ec6db371a234af")
+
+
 if __name__ == "__main__":
     unittest.main()

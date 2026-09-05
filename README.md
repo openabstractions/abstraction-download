@@ -8,22 +8,19 @@ digest, and saves enough progress that another process can finish a transfer thi
 An application that downloads a large file usually keeps the transfer inside its own process.
 When the process exits the transfer is gone, and the partial file left behind carries no record
 of how many of its bytes were ever checked, so resuming means starting again or appending onto
-bytes nobody verified. This library keeps the file's identity, the progress made and who may
-work on it in a record on disk, apart from whatever moves the bytes, so a transfer interrupted
-by a crash, a sleep or a reboot can be finished by another process or machine.
+bytes nobody verified. This library keeps the file's identity, its progress and who may work on
+it in a record on disk, so another process or machine can finish what a crash interrupted.
 
 ## Terms
 
-A layer on top of [abstraction-job](https://github.com/openabstractions/abstraction-job), whose
-vocabulary it uses throughout.
+From [abstraction-job](https://github.com/openabstractions/abstraction-job), the layer below.
 
 | term | meaning |
 |---|---|
 | **job** | a record on disk describing one unit of work: an id, a state, a `kind`. This library handles jobs of kind `download` and ignores the rest |
 | **store** | the directory those records live in. Any process that can read the directory can read the jobs |
 | **spec** | the body of a job, which the job layer does not interpret. A download spec is an `Artifact` (a **digest**, written `sha256:<hex>`, and a size), a list of `Source`s, and a `Sink`. The digest comes from the caller, and bytes that do not match it are refused |
-| **lease** | the time-limited right to work on a job. One holder at a time |
-| **epoch** | a counter on the lease, raised at each claim. Every write presents the epoch it holds, so a process whose lease expired while it was asleep has its later writes refused |
+| **lease** | the time-limited right to work on a job, one holder at a time. Each claim raises the lease's **epoch**, and every write presents the epoch it holds, so a process whose lease expired while it was asleep has its later writes refused |
 | **checkpoint** | the resume point: how many leading bytes of the partial file are known to be the artifact's real bytes |
 | **orphan** | a job whose lease expired with the work unfinished, because the process holding it died |
 | **delegation** | handing a job to a system that keeps working after this process exits, recorded in the job as `{system, external_id}` |
@@ -126,14 +123,14 @@ Transports: `Fetcher`, `Capability` (`CapResume`, `CapSurvivesProcessExit`, `Cap
 `Credentials`, `EnvCredentials`, `CredentialAttr`, `Supervisor`, `Heartbeat`, `StopHeartbeat`,
 `SupervisorOf`, `Nudge`, `ListenForNudges`, `LocalSink`. Resuming: `Resume`, `ResumeOrSubmit`,
 `ResumeOrGet`, `Continuation`, `Disposition` (`Submitted`, `Resumed`, `Delivered`, `Busy`,
-`Paused`). Subpackages: `go/bits` (Windows BITS), `go/nas` (a supervisor over a share), `go/all`
-(blank-import both).
+`Paused`). Subpackages `go/bits` (Windows BITS), `go/nas` (a share supervisor), `go/all` (both).
 
-**Python, module `abstraction_download`:** `KIND`, `Spec`, `Artifact`, `Source`, `Sink`,
-`Checkpoint`, `submit`, `spec_of`, `checkpoint_of`, `portable`, `local_root`, `local_sink`,
-`store_root`, `owner`, `credentials`, `Supervisor`, `supervisor_of`, `Runner` (`run`, `adopt`,
-`take_delivery`), and the errors `DownloadError`, `DigestMismatch`, `ShortTransfer`,
-`RangeIgnored`, `NoSource`.
+**Python, `abstraction_download`:** `KIND`, `Spec`, `Artifact`, `Source`, `Sink`, `Checkpoint`,
+`submit`, `spec_of`, `checkpoint_of`, `portable`, `local_root`, `local_sink`, `store_root`,
+`owner`, `credentials`, `Supervisor`, `supervisor_of`, `Runner` (`run`, `adopt`, `take_delivery`).
+Resuming: `resume_or_submit`, `resume_or_get`, `Continuation`, `SUBMITTED`, `RESUMED`, `DELIVERED`,
+`BUSY`, `PAUSED`. Errors: `DownloadError`, `DigestMismatch`, `ShortTransfer`, `RangeIgnored`,
+`NoSource`.
 
 Unusual semantics, in both languages unless said otherwise:
 
@@ -146,39 +143,42 @@ Unusual semantics, in both languages unless said otherwise:
 - Resuming starts at the smaller of the checkpoint and the size of the partial file; anything
   past that is discarded and the hash rebuilt over what is kept. A `200` answer to a `Range`
   request is an error, not a restart, and a digest mismatch deletes the partial file and
-  records the reason in the job. In Go only, `ResumeOrSubmit` and `ResumeOrGet` key work on the
-  destination, not a job id: one record per path, continued, a `complete` one reused only while
-  its file is there, no lease taken from another owner, and `Continuation` says which.
+  records the reason in the job.
+- `ResumeOrSubmit` and `ResumeOrGet` (`resume_or_submit`, `resume_or_get` in Python) key work
+  on the destination rather than on a job id, for a command re-run from a shell that has no id
+  to remember: one record per destination whatever source is asked for, a `complete` one reused
+  only while its file is still there, `failed` and `cancelled` history, another owner's lease
+  untouched, the resume point measured from the partial file, and concurrent callers given one
+  record. `Continuation` reports which of those happened and whether the source differs. A
+  destination is a path made absolute, cleaned and symlink-resolved, and no further: hardlinks,
+  two mounts of one filesystem and case-insensitive volumes off Windows defeat it.
 
 **Commands**, built from `go/`. `go build ./cmd/dl` gives `dl <url>`, plus `dl list`, `dl watch`
-and `dl tiers`. `go build ./cmd/jobd` gives the supervisor: `jobd once` makes one pass, `jobd
-run` supervises in the foreground, `jobd status` reports, and `jobd install` prints `schtasks`
-commands without running them. `go run ./cmd/specread <spec.json>` prints how this reads a spec.
-`ABSTRACTION_STORE` selects the job store (default `~/.abstraction`), `MODELGET_STORE` is a
-legacy alias, and `ABSTRACTION_NAS_STORE` names one on a share a supervisor elsewhere watches.
+and `dl tiers`. `go build ./cmd/jobd` gives the supervisor: `jobd once` makes one pass, `jobd run`
+supervises in the foreground, `jobd status` reports, `jobd install` prints `schtasks` commands
+without running them. `go run ./cmd/specread <spec.json>` prints how this reads a spec.
+`ABSTRACTION_STORE` selects the job store (default `~/.abstraction`), `MODELGET_STORE` is a legacy
+alias, and `ABSTRACTION_NAS_STORE` names one on a share a supervisor elsewhere watches.
 
 ## The `cpp/` directory
 
-`cpp/specread.cpp` parses a download spec and prints what it read. **There is no C++
-implementation of this library** — no fetcher, runner, delegator or supervisor. It exists so
-the Go, Python and C++ readings of one spec can be compared, using the samples in
-`testdata/specs/`. No build file for it ships here; it includes `abstraction/job/record.h`, so
-it needs the job repository's `cpp/include` and `nlohmann/json` on the include path.
+`cpp/specread.cpp` parses a download spec and prints what it read, so the Go, Python and C++
+readings of one spec can be compared against the samples in `testdata/specs/`. **There is no C++
+implementation of this library** — no fetcher, runner, delegator or supervisor. No build file
+ships; it needs the job repository's `cpp/include` and `nlohmann/json` on the include path.
 
 ## Status
 
 Experimental, at `v0.1.0`. Interfaces and the on-disk spec may change.
 
-- **Go** is the complete implementation: the runner, the HTTP and file/SMB fetchers,
-  delegation, the BITS and NAS delegators, and `jobd`.
+- **Go** is complete: the runner, HTTP and file/SMB fetchers, delegation, BITS, NAS and `jobd`.
 - **Python** is partial. Its `Runner` runs, adopts and takes delivery over `http`, `https`,
-  `file` and `smb`, but there is no delegation, reconcile, supervisor loop, tier registry or
-  `ResumeOrSubmit`, and `adopt` skips delegated jobs. A Python process can neither hand work to
-  BITS or a NAS nor recover work handed there. **C++** reads specs only, as above.
-- The `bits` binding runs `powershell.exe` with the `BitsTransfer` module, so it works on
-  Windows only; its tests skip when BITS cannot be driven, and the `nas` tests that reach a
-  real NAS skip unless `ABSTRACTION_LIVE=1` and `ABSTRACTION_NAS_STORE` are set. Untested
-  altogether: interrupting a real multi-gigabyte transfer, and anything at NAS or BITS scale.
+  `file` and `smb`, and `resume_or_submit` keys work on the destination as Go's does, but there
+  is no delegation, reconcile, supervisor loop or tier registry, `adopt` skips delegated jobs,
+  and it can neither use BITS or a NAS nor recover work handed there. **C++** reads specs only.
+- The `bits` binding drives `powershell.exe`, so it is Windows only, and its tests skip where
+  BITS cannot be driven; `nas` tests reaching a real NAS skip unless `ABSTRACTION_LIVE=1` and
+  `ABSTRACTION_NAS_STORE` are set. Untested: anything at real NAS or multi-gigabyte scale.
 
 ## Tests
 
@@ -187,8 +187,8 @@ cd go && go build ./... && go test ./...
 cd ../python && python -m unittest discover
 ```
 
-76 Go test functions across 17 files (the `bits` package takes about a minute) and 32 Python
-tests, which find the job layer through `PYTHONPATH` or a sibling `abstraction-job` checkout.
+77 Go test functions across 17 files (`bits` takes about a minute) and 43 Python tests, which find
+the job layer on `PYTHONPATH` or beside this checkout. Both pin the id a destination gets.
 
 ## Requirements
 

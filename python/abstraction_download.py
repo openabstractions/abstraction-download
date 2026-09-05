@@ -38,6 +38,7 @@ import os
 import posixpath
 import re
 import socket
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -307,6 +308,415 @@ def spec_of(rec: Record) -> Spec:
 def checkpoint_of(rec: Record) -> Checkpoint:
     cp = rec.checkpoint or {}
     return Checkpoint(verified_prefix=int(cp.get("verified_prefix", 0) or 0))
+
+
+# ------------------------------------------- resuming, keyed on destination ---
+#
+# submit answers "start this work and give me its id". That is the right question
+# for a program that keeps the id -- a UI, a service, a queue. It is the wrong
+# question for a program run again from a shell, which has no id to keep: it has
+# a URL and a path, and what it means by "resume" is "the file at this path is
+# half here, carry on with it". Such a caller submits a fresh record on every
+# invocation, with a verified prefix of zero, and never sends a Range request.
+#
+# Both existing adopters wrote this on top of the library rather than getting it
+# from it: the ComfyUI node's _resume_or_submit, and the same loop in C++ in the
+# Lemonade fork.
+
+#: Nothing in the store was working on this destination, so a new record was
+#: created. The only disposition meaning no bytes survive from an earlier try.
+SUBMITTED = "submitted"
+#: An unfinished record for this destination was adopted. Continuation.resume_from
+#: says how many of its bytes survive.
+RESUMED = "resumed"
+#: The artifact is already at the destination and no bytes need to move. The
+#: returned job may still be waiting for take_delivery.
+DELIVERED = "delivered"
+#: An unfinished record was adopted and another owner holds its lease right now.
+#: The lease was not taken. Watch the job; if the owner is dead its lease lapses
+#: within the runner's lease TTL and the ordinary reclamation path picks it up.
+BUSY = "busy"
+#: An unfinished record was adopted and somebody asked it to stop. Clear the
+#: intent through the job layer before expecting bytes to move.
+PAUSED = "paused"
+
+
+@dataclass
+class Continuation:
+    """What resume_or_submit decided, in a form a caller can print.
+
+    Nothing here is a branch a caller must take: the returned job id is correct
+    whatever this says. It exists because every decision below is one a person
+    running a command is entitled to see rather than have made silently.
+    """
+
+    #: Which of SUBMITTED, RESUMED, DELIVERED, BUSY, PAUSED applied.
+    disposition: str = SUBMITTED
+    #: The byte the next attempt will actually start at, measured against the
+    #: filesystem and not against the record. A record claiming a verified prefix
+    #: of 900 whose partial holds 100 bytes -- or none -- yields 100, or 0.
+    resume_from: int = 0
+    #: The locator the adopted job will fetch from, which is not necessarily the
+    #: one just passed in. See source_changed.
+    source: str = ""
+    #: An existing record was adopted whose first source differs from the
+    #: caller's.
+    #:
+    #: The destination is the identity, so this is the same work: a URL changes
+    #: when a mirror is configured (HF_ENDPOINT does exactly this), when a signed
+    #: link is reissued, or when a redirect resolves differently, and none of
+    #: those are a different file. The adopted record keeps its OWN sources, so
+    #: the partial on disk stays consistent with what wrote it -- a caller that
+    #: meant a genuinely different artifact should cancel this job and submit to
+    #: a different path rather than have its bytes appended to another prefix.
+    source_changed: bool = False
+    #: One line of display text saying the same thing. Never parse it.
+    note: str = ""
+
+
+def resume_or_submit(
+    store: Store,
+    spec: Spec,
+    requires: Optional[List[str]] = None,
+    owner_name: Optional[str] = None,
+) -> Tuple[str, Continuation]:
+    """The job for spec's destination, continuing the existing one if there is
+    one. Returns ``(job_id, Continuation)``.
+
+    Call it instead of submit whenever the caller identifies work by where the
+    bytes land. Unlike the Go binding, which hands the job to a supervisor or
+    starts it in the background, this returns and leaves running to the caller:
+    ``Runner(store).run(job_id)``, exactly as after submit. Python has no
+    Service, so there is nowhere here for that decision to live.
+
+    The rules, in the order they are applied:
+
+      - A destination is required. Identity IS the destination, so there is no
+        meaning to this call without one.
+
+      - Two spellings of one destination are one record. The path is made
+        absolute, normalised, and its parent directory resolved through
+        symlinks; on Windows it is also case-folded. What that cannot see: a
+        file reached through two mounts of one filesystem, a hardlink, a drive
+        letter mapped to a UNC share, an 8.3 short name, and -- on a
+        case-insensitive macOS or Linux volume -- two spellings differing only
+        in case. Each of those yields two records for one file, which is the
+        failure this call exists to remove, so a caller that can hand over one
+        spelling should.
+
+      - An unfinished record for that destination is continued, whatever its
+        source. See Continuation.source_changed.
+
+      - COMPLETE means the file is there, and that is checked rather than
+        believed: a complete record whose file has been moved or deleted is
+        history, and a new job is created. FAILED and CANCELLED are history too
+        -- running a command again is a new request, not an appeal against the
+        last one -- and neither carries bytes forward, because nothing proved
+        them.
+
+      - A lease held by another owner is left alone: nothing is claimed here,
+        and the record comes back with disposition BUSY. The work is offered to
+        this process only once that lease lapses of its own accord, which is
+        what recovers a download whose owner was killed rather than stopped.
+
+      - The resume point is the smaller of the checkpoint and the size of the
+        partial file, so a vanished or truncated partial cannot make a runner
+        ask a server to continue from bytes that are not there.
+
+      - Two callers racing for one destination produce one record, because the
+        record id is derived from the destination and the store refuses to
+        create an id twice. The loser of the race loads the winner's record and
+        continues it. No lock is introduced here; the store's own exclusion is
+        the whole mechanism.
+    """
+    spec.validate()
+    dest = _destination_of(store, spec.sink)
+    if not dest:
+        raise DownloadError("download: resume_or_submit needs a destination")
+    me = owner_name or owner()
+
+    live, delivered = _records_for(store, dest)
+    if live is not None:
+        return live.id, _continuation(store, live, spec, me)
+    if delivered is not None:
+        return delivered.id, Continuation(
+            disposition=DELIVERED,
+            source=_first_locator(delivered),
+            note="already downloaded",
+        )
+
+    job_id, created = _claim_destination(store, dest, spec, requires)
+    if not created:
+        # Somebody won the race between the scan above and the create. Their
+        # record is the one record for this destination, so continue it.
+        return job_id, _continuation(store, store.load(job_id), spec, me)
+    return job_id, Continuation(
+        disposition=SUBMITTED,
+        source=spec.sources[0].locator,
+        note="starting a new download",
+    )
+
+
+def resume_or_get(
+    store: Store,
+    source: str,
+    destination: str,
+    requires: Optional[List[str]] = None,
+    owner_name: Optional[str] = None,
+) -> Tuple[str, Continuation]:
+    """resume_or_submit for a caller holding a URL and a path, which is the shape
+    a command-line tool has. A destination naming a directory takes its filename
+    from the source."""
+    return resume_or_submit(
+        store, _spec_for(source, destination), requires=requires, owner_name=owner_name
+    )
+
+
+def _spec_for(source: str, destination: str) -> Spec:
+    """A URL and a path as a spec, with no digest, because a caller holding only
+    those two does not have one."""
+    if not source or not source.strip():
+        raise DownloadError("download: no source")
+    dest = destination or "."
+    if dest.endswith("/") or dest.endswith("\\") or dest == "." or os.path.isdir(dest):
+        dest = os.path.join(dest, _name_from(source))
+    # Absolute, because the process that finally moves these bytes may have a
+    # different working directory, a different user, or be on another machine.
+    return Spec(
+        sources=[Source(scheme=_scheme_from(source), locator=source)],
+        sink=Sink(final=os.path.abspath(dest)),
+    )
+
+
+def _name_from(locator: str) -> str:
+    locator = locator.split("?", 1)[0]
+    name = posixpath.basename(locator)
+    if not name or name in ("/", "."):
+        return "download.bin"
+    return name
+
+
+def _scheme_from(locator: str) -> str:
+    i = locator.find("://")
+    return locator[:i] if i > 0 else "https"
+
+
+def _continuation(store, rec: Record, want: Spec, me: str) -> Continuation:
+    """What an existing unfinished record means for this call."""
+    c = Continuation(disposition=RESUMED, source=_first_locator(rec))
+    c.source_changed = bool(want.sources) and bool(c.source) and (
+        c.source != want.sources[0].locator
+    )
+
+    if rec.state == TRANSFERRED and _destination_exists(store, rec):
+        c.disposition = DELIVERED
+        c.note = "already downloaded, waiting to be taken delivery of"
+        return c
+
+    c.resume_from = _resume_from(store, rec)
+    if rec.paused():
+        c.disposition = PAUSED
+        c.note = "an existing download to this path is paused"
+    elif not store.claimable(rec) and rec.lease.owner != me:
+        c.disposition = BUSY
+        c.note = f"{rec.lease.owner} is already downloading to this path"
+    elif c.resume_from > 0:
+        c.note = f"continuing an existing download from byte {c.resume_from}"
+    else:
+        c.note = "continuing an existing download from the beginning"
+    if c.source_changed:
+        c.note += "; it fetches from " + c.source
+    return c
+
+
+def _resume_from(store, rec: Record) -> int:
+    """What survives on disk, never what the record claims.
+
+    A checkpoint is written periodically, so a partial file is normally AHEAD of
+    it -- but it can also be behind it, or gone: a temp cleaner, a half-finished
+    copy onto a full disk, a user tidying up. Believing the record in that case
+    makes a runner send "Range: bytes=900-" for a file holding a hundred bytes,
+    and the answer is appended to those hundred. The file then has the right
+    length and the wrong contents, which is the one outcome worth more than a
+    re-download.
+    """
+    try:
+        spec = spec_of(rec)
+    except DownloadError:
+        return 0
+    proven = checkpoint_of(rec).verified_prefix
+    if proven <= 0:
+        return 0
+    partial, _ = local_sink(store, spec.sink)
+    try:
+        st = os.stat(partial)
+    except OSError:
+        return 0
+    if stat.S_ISDIR(st.st_mode):
+        return 0
+    return min(st.st_size, proven)
+
+
+def _destination_exists(store, rec: Record) -> bool:
+    """Whether the record's final path holds a file."""
+    try:
+        spec = spec_of(rec)
+    except DownloadError:
+        return False
+    _, final = local_sink(store, spec.sink)
+    return os.path.isfile(final)
+
+
+def _records_for(store, dest: str) -> Tuple[Optional[Record], Optional[Record]]:
+    """This destination's records: work to continue, and a COMPLETE one.
+
+    Two, because the two are treated differently: an unfinished record is work to
+    continue, and a COMPLETE one is only evidence that the file might already be
+    there. The scan is over every record rather than over ids this module would
+    have chosen, so a job submitted by an older version, by the CLI, or by the Go
+    implementation is still found.
+    """
+    live = delivered = None
+    try:
+        records = store.list()
+    except Exception:
+        return None, None
+    for rec in records:
+        if rec.kind != KIND:
+            continue
+        try:
+            spec = spec_of(rec)
+        except Exception:
+            continue
+        if _destination_of(store, spec.sink) != dest:
+            continue
+        if not rec.terminal():
+            live = rec
+        elif rec.state == COMPLETE and _destination_exists(store, rec):
+            delivered = rec
+    return live, delivered
+
+
+def _claim_destination(
+    store, dest: str, spec: Spec, requires: Optional[List[str]]
+) -> Tuple[str, bool]:
+    """Create the one record for this destination, or return the id of the record
+    somebody else created first.
+
+    The exclusion is the store's, not this module's: submit refuses an id that
+    already exists -- O_EXCL in the file binding, a dict check in the memory one
+    -- so deriving the id from the destination turns two concurrent creates into
+    one winner and one loser that can read what the winner wrote.
+
+    The generation suffix is what keeps that compatible with "download it again":
+    a destination whose first record ended failed, cancelled, or complete with no
+    file needs a second record, and it cannot have the same id as the first.
+    """
+    base = _destination_id(dest)
+    for generation in range(1, 513):
+        job_id = base if generation == 1 else f"{base}-{generation}"
+        try:
+            return _submit_as(store, job_id, spec, requires), True
+        except Exception as taken:
+            refusal = taken
+        # Either somebody just created it, in which case it is the record for
+        # this destination and the caller continues it, or it is spent history
+        # from an earlier run and the next generation is free.
+        try:
+            rec = store.load(job_id)
+        except Exception:
+            raise refusal
+        if not rec.terminal():
+            return job_id, False
+    raise DownloadError(
+        f"download: {dest} has too many spent records to start another"
+    )
+
+
+def _submit_as(
+    store: Store, job_id: str, spec: Spec, requires: Optional[List[str]] = None
+) -> str:
+    """submit with the id chosen by the caller rather than by the store.
+
+    The id is the store's only exclusion primitive, so a caller that can compute
+    an id from the work itself gets create-or-find without a lock.
+    """
+    spec.validate()
+    # A copy: the caller's spec is theirs, and a partial path filled in here must
+    # not appear in it.
+    spec = Spec.from_dict(spec.to_dict())
+    spec.sink.partial = portable(spec.sink.partial)
+    spec.sink.final = portable(spec.sink.final)
+    if not spec.sink.partial:
+        # Relative, deliberately. The store knows where its work directory is on
+        # whichever machine is asking.
+        spec.sink.partial = "work/" + job_id
+    rec = Record(id=job_id, kind=KIND, spec=spec.to_dict(), requires=list(requires or []))
+    rec.progress.total = spec.artifact.size
+    return store.submit(rec)
+
+
+def _destination_id(dest: str) -> str:
+    """The record id for a destination: stable, identical in Go and Python, and
+    shaped so that it cannot collide with the timestamped ids the job layer
+    invents.
+
+    It sorts after those ids rather than among them, so a listing ordered by id
+    puts records made this way at the end. Anything wanting creation order has
+    Record.created_at.
+    """
+    return "dest-" + hashlib.sha256(dest.encode("utf-8")).hexdigest()[:16]
+
+
+def _destination_of(store, sink: Sink) -> str:
+    """A sink reduced to the one string that identifies its file.
+
+    A relative sink means "under the store's own area", so it is resolved the
+    same way the runner will resolve it -- otherwise a record written as
+    "out/x.bin" and a call naming the absolute path of that same file would be
+    two records.
+    """
+    _, final = local_sink(store, sink)
+    return _canonical_path(final)
+
+
+def _canonical_path(p: str) -> str:
+    """This module's answer to "are these two strings the same file", and its
+    limits are listed on resume_or_submit.
+
+    The parent directory is resolved through symlinks rather than the file
+    itself, because the file is usually not there yet -- that is the whole
+    situation. A directory that cannot be resolved is used as written, which is
+    right for a destination whose directory has still to be created, and is what
+    the Go implementation does; resolving it partially instead would give the two
+    implementations different ids for one path.
+    """
+    if not p or not p.strip():
+        return ""
+    if os.sep != "/":
+        p = p.replace("/", os.sep)
+    p = os.path.abspath(p)
+    directory, base = os.path.split(p)
+    try:
+        directory = os.path.realpath(directory, strict=True)
+    except OSError:
+        pass
+    p = os.path.join(directory, base)
+    if os.name == "nt":
+        # Windows filenames are case-insensitive, so folding here merges two
+        # spellings of one file. Not done elsewhere: a case-sensitive Linux
+        # volume holds "X.bin" and "x.bin" as two files, and folding them
+        # together would point two downloads at one record.
+        p = p.lower()
+    return p
+
+
+def _first_locator(rec: Record) -> str:
+    try:
+        spec = spec_of(rec)
+    except DownloadError:
+        return ""
+    return spec.sources[0].locator if spec.sources else ""
 
 
 # ------------------------------------------------------------- credentials ---

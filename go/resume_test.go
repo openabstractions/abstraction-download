@@ -448,6 +448,17 @@ func TestResumeOrGetIsKeyedOnTheSamePath(t *testing.T) {
 	}
 }
 
+// The id is the cross-language part of this contract. If Go and Python derived
+// it differently, a download begun by one and re-run through the other would be
+// two records for one file — the very failure this operation removes. The Python
+// test of the same name pins the same string.
+func TestTheIDForADestinationIsPinned(t *testing.T) {
+	const want = "dest-01ec6db371a234af"
+	if got := destinationID("/models/x.gguf"); got != want {
+		t.Fatalf("destinationID = %q, want %q — Go and Python no longer agree", got, want)
+	}
+}
+
 // complete marks a job finished the way a delivered one is.
 func complete(t *testing.T, store job.Store, id string) {
 	t.Helper()
