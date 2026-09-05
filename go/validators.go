@@ -124,3 +124,33 @@ func contentRangeStart(s string) (int64, error) {
 	}
 	return n, nil
 }
+
+// contentRangeTotal reads the artifact's full length out of a `Content-Range` —
+// `bytes 1000-1999/40960` gives 40960 — and 0 when the server wrote `*` for it,
+// which it is entitled to do, or when the header is not one this code
+// understands.
+//
+// It exists because a BOUNDED range request broke the only other way of
+// learning the size. Content-Length on a 206 is the length of what was sent, so
+// adding the start offset back gives the whole artifact for an open range and
+// the end of the gap for a bounded one — and the second number would go
+// straight into Progress.Total and be shown to a person as the size of their
+// download. The total after the slash is the one that is right either way.
+//
+// Never an error: a missing or unparseable total is a server declining to say,
+// which is exactly what 0 already means everywhere else in this layer.
+func contentRangeTotal(s string) int64 {
+	_, rest, ok := strings.Cut(strings.TrimSpace(s), " ")
+	if !ok {
+		return 0
+	}
+	_, total, ok := strings.Cut(strings.TrimSpace(rest), "/")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(total), 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}

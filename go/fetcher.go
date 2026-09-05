@@ -47,10 +47,26 @@ type Request struct {
 	// Source is where to get it. Not a URL — see Source.
 	Source Source
 
-	// From is the offset to begin at. Bytes before it are already on disk AND
-	// already proven; the runner has truncated the partial to exactly this
-	// length before calling, so a Fetcher can append without checking.
+	// From is the offset to begin at. The runner has positioned Out there and
+	// nothing before it is this request's business.
+	//
+	// It used to also mean "the partial is exactly this long, so you may
+	// append". It does not any more: the bytes already on disk need not be a
+	// prefix, so the file may be longer than From and hold proven bytes past
+	// the end of this request. A Fetcher writes to Out and does not reason
+	// about the file.
 	From int64
+
+	// To is the offset to stop before, exclusive. Zero means "to the end of
+	// whatever the source holds", which is what a transfer that runs to the end
+	// of the artifact asks for, and the only thing a transfer whose length
+	// nobody knows CAN ask for.
+	//
+	// A Fetcher that ignores this is wrong but not dangerous — it writes the
+	// artifact's own bytes over the artifact's own bytes — and it is wrong in
+	// the expensive direction: it fetches everything after the gap a second
+	// time, which is precisely what having a bounded request was for.
+	To int64
 
 	// Validators identify the version of the artifact the bytes already on disk
 	// came from, when a previous attempt recorded any. A Fetcher that can ask a

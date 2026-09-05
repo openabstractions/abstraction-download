@@ -69,8 +69,20 @@ func (h HTTP) get(ctx context.Context, req Request) (*http.Response, error) {
 	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
 	}
-	if req.From > 0 {
-		hreq.Header.Set("Range", "bytes="+strconv.FormatInt(req.From, 10)+"-")
+	if req.From > 0 || req.To > 0 {
+		// Bounded when there are proven bytes on the far side of this gap,
+		// open-ended when there are not. `bytes=N-` is the request a
+		// single-stream resume has always sent and still sends, byte for byte;
+		// `bytes=N-M` is the one that makes a resume skip a hole instead of
+		// re-fetching everything after it. The last byte position in HTTP is
+		// INCLUSIVE and To is exclusive, so it goes out as To-1 — an off-by-one
+		// here would fetch one byte too few and leave a one-byte hole that
+		// only a digest would ever catch.
+		span := strconv.FormatInt(req.From, 10) + "-"
+		if req.To > req.From {
+			span += strconv.FormatInt(req.To-1, 10)
+		}
+		hreq.Header.Set("Range", "bytes="+span)
 
 		// Say which version the bytes on disk came from. Without this a server
 		// whose file has changed answers the range honestly, with a valid range
@@ -108,6 +120,12 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	// response themselves and put a second one here.
 	defer func() { resp.Body.Close() }()
 
+	// A request is ranged if it asked for a range, which is no longer the same
+	// as starting past byte zero: the FIRST gap of a resumed sparse transfer
+	// begins at zero and is still bounded, and a 206 answering it has to have
+	// its Content-Range checked like any other.
+	ranged := req.From > 0 || req.To > 0
+
 	// restartWhole throws the prefix away and asks for the artifact from byte
 	// zero. Used where the answer to the ranged request cannot be written at the
 	// offset it was asked for AND is not itself a whole artifact, so a second
@@ -121,6 +139,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 			return nil, rerr
 		}
 		req.From = 0
+		req.To = 0
 		req.Validators = Validators{}
 		again, gerr := h.get(ctx, req) // no Range this time: the whole file
 		if gerr != nil {
@@ -134,7 +153,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	}
 
 	switch {
-	case req.From > 0 && resp.StatusCode == http.StatusPartialContent:
+	case ranged && resp.StatusCode == http.StatusPartialContent:
 		start, cerr := contentRangeStart(resp.Header.Get("Content-Range"))
 		if cerr != nil || start != req.From {
 			// A range that does not begin where we asked is not a partial
@@ -150,7 +169,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 			}
 		}
 
-	case req.From > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+	case ranged && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
 		// The offset is past the end of what the server holds. With an If-Range
 		// that matched, that means the artifact is the version these bytes came
 		// from and is nonetheless shorter than the prefix on disk — so the
@@ -162,7 +181,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 			return Result{}, err
 		}
 
-	case req.From > 0 && resp.StatusCode == http.StatusOK:
+	case ranged && resp.StatusCode == http.StatusOK:
 		// The server answered a ranged request with the whole file. With an
 		// If-Range on the request that is the server saying, in the only way
 		// HTTP has, "the file you have is not the file I have — here is mine".
@@ -184,6 +203,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 			return Result{}, rerr
 		}
 		req.From = 0
+		req.To = 0
 
 	case resp.StatusCode != http.StatusOK:
 		return Result{}, fmt.Errorf("download: %s: %s", req.Source.Locator, resp.Status)
@@ -198,9 +218,21 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 
 	// Worked out BEFORE the copy, not after it. Content-Length on a 200 is the
 	// whole artifact; on a 206 it is what remains, so From has to be added back.
+	//
+	// Except that "what remains" is only true of an OPEN range. A bounded one
+	// gets back the length of the gap, and From plus that is the end of the
+	// gap, not the size of the file — a number that would be written into
+	// Progress.Total and shown to a person as the size of their download. The
+	// 206 that answers a bounded request carries the real total after the slash
+	// in Content-Range, so read it there and fall back only when it is absent.
 	total := int64(0)
 	if resp.ContentLength > 0 {
 		total = req.From + resp.ContentLength
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		if n := contentRangeTotal(resp.Header.Get("Content-Range")); n > 0 {
+			total = n
+		}
 	}
 
 	rw := &reportWriter{w: req.Out, total: total, report: req.Report}
@@ -243,8 +275,17 @@ func (File) Fetch(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
+	// A bounded gap reads exactly its own bytes and stops. Without the limit a
+	// file source would read to EOF over the top of every proven range after
+	// the hole — the same bytes, so nothing would break, but the whole saving
+	// of knowing which ranges are proven would be spent copying them again.
+	var src io.Reader = f
+	if req.To > req.From {
+		src = io.LimitReader(f, req.To-req.From)
+	}
+
 	rw := &reportWriter{w: req.Out, total: st.Size(), report: req.Report}
-	written, err := copyWithContext(ctx, rw, f)
+	written, err := copyWithContext(ctx, rw, src)
 	if err != nil {
 		return Result{Written: written}, err
 	}

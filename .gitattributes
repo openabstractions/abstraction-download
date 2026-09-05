@@ -1,0 +1,6 @@
+# Fixtures compared byte for byte between the Go, Python and C++ readings must
+# arrive identical on every platform. A Windows checkout with core.autocrlf=true
+# rewrites them on the way out of git, and the comparison then fails for a reason
+# no diff shows.
+testdata/** text eol=lf
+*.json text eol=lf

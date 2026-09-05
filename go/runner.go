@@ -141,16 +141,15 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// paths that are real on this machine.
 	partial, final := LocalSink(r.Store, spec.Sink)
 
-	// Resume position: the checkpoint, measured against what is actually on
-	// disk, by the three-way test in resumeAt. The file being AHEAD of the
-	// checkpoint is ordinary and the unproven tail is discarded; the file being
-	// BEHIND it is not ordinary and is refused outright, because a file shorter
-	// than its own checkpoint is a file something else has been editing, and
-	// there is no reason to believe the part of it that is still there.
+	// What this transfer may do, given what is on disk: see planResume. The
+	// file's length is used to REFUTE the checkpoint and for nothing else — a
+	// file too short to hold the highest proven byte is a file something else
+	// has been editing, and is refused outright — while what is proven, and
+	// therefore what still has to be fetched, comes from the record.
 	if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
 		return err
 	}
-	rp, err := resumeAt(partial, cp)
+	plan, err := planResume(partial, cp, spec.Artifact.Size)
 	if err != nil {
 		if errors.Is(err, ErrFileTooShort) {
 			// Discard and start over. Nothing here is recoverable, and leaving
@@ -160,41 +159,56 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 			os.Remove(partial)
 			r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 				rr.Progress.Done = 0
-				return rr.SetCheckpoint(Checkpoint{})
+				return setCheckpoint(rr, Checkpoint{})
 			})
 		}
 		return err
 	}
-	from := rp.From
-	if err := truncate(partial, from); err != nil {
+
+	// Cut the partial back to the highest proven offset, not to the byte the
+	// next request starts at. Those were the same number while progress was a
+	// prefix and are not the same number now: cutting at the resume point would
+	// delete every proven range past the first hole, and a length check could
+	// never notice afterwards, because the finished file would still be exactly
+	// the right length.
+	if err := truncate(partial, plan.Trim); err != nil {
 		return err
 	}
 
-	// The byte stream is about to begin somewhere other than where the record
-	// says it left off — because the unproven tail was just cut off, or because
-	// there is no checkpoint at all and whatever is on disk is being overwritten.
-	// The record's received count has to come down with it, or the next reader
-	// inherits a number no file backs up.
-	if rec.Progress.Done != from {
+	// The record's received count has to agree with what is actually vouched
+	// for — because a tail was just cut off, or because there is no checkpoint
+	// at all and whatever is on disk is being overwritten. It counts PROVEN
+	// BYTES rather than an offset, which is the same number for a prefix and
+	// the only one that means anything once there are holes.
+	proven := plan.Have
+	if rec.Progress.Done != proven.Total() {
 		r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
-			rr.Progress.Done = from
-			return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: from, Validators: rp.Validators})
+			rr.Progress.Done = proven.Total()
+			return setCheckpoint(rr, Checkpoint{Verified: proven, Validators: plan.Validators})
 		})
 	}
 
-	// Rebuild the rolling hash over the prefix we are keeping. This is the cost
-	// of resuming honestly: a sequential read of what we already have, at disk
+	// Rebuild the rolling hash over what we are keeping. This is the cost of
+	// resuming honestly: a sequential read of what we already have, at disk
 	// speed, instead of re-downloading it at network speed. It is also the only
 	// way the digest check at the end covers bytes an earlier owner wrote.
 	//
-	// Rebuilt rather than inherited, so every way `from` can be zero — no
+	// Only for a plan that is one stream to the end, because sha256 is
+	// order-dependent: a plan that fills holes writes bytes out of order, and a
+	// rolling hash over that order is not the artifact's digest and never will
+	// be. That plan hashes the finished file instead, once, after the last gap
+	// lands — see below. The extra read is what a piece-digest manifest would
+	// buy back, which is why docs/incremental-delivery.md wants one.
+	//
+	// Rebuilt rather than inherited, so every way the prefix can be zero — no
 	// checkpoint, a truncate to nothing, a partial that vanished, a record whose
 	// received count did not match — gets an empty hash without anybody having
 	// to remember to reset one. The one place that cannot work that way is a
 	// stream that restarts once the file is already open; see fetch.
+	rolling := plan.oneStream()
 	h := sha256.New()
-	if from > 0 {
-		if err := hashPrefix(partial, from, h); err != nil {
+	if rolling && proven.VerifiedPrefix() > 0 {
+		if err := hashPrefix(partial, proven.VerifiedPrefix(), h); err != nil {
 			return err
 		}
 	}
@@ -209,17 +223,38 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 			f.Close()
 		}
 	}()
-	if _, err := f.Seek(from, io.SeekStart); err != nil {
-		return err
-	}
 
 	// seen follows the transfer: what the source says about the version it is
 	// serving, updated as responses arrive and cleared if the stream restarts.
 	// It is a pointer into fetch because the final checkpoint below has to
 	// record the version that was actually delivered, not the one this attempt
 	// started out believing in.
-	seen := rp.Validators
-	total, err := r.fetch(ctx, rec, spec, epoch, f, h, from, &seen, func(w job.Want) { asked = w; stop() })
+	seen := plan.Validators
+
+	// How far the artifact reaches contiguously from byte zero. Seeded from what
+	// is already proven rather than left at nought, because a plan can have no
+	// gaps at all: a transfer whose last hole was filled by an owner that died
+	// before it could deliver has everything on disk and nothing to ask for, and
+	// the loop below never runs. That download is finished and wants verifying
+	// and delivering, not declaring short.
+	total := proven.VerifiedPrefix()
+	for _, gap := range plan.Gaps {
+		var restarted bool
+		total, restarted, err = r.fetch(ctx, rec, spec, epoch, f, h, rolling, gap, &proven, &seen,
+			func(w job.Want) { asked = w; stop() })
+		if asked != "" || err != nil {
+			break
+		}
+		if restarted {
+			// A source answered with a different artifact and the file has been
+			// rewritten from byte zero by the stream that just finished. Every
+			// remaining gap was a hole in a file that no longer exists, so
+			// there is nothing left to ask for. `rolling` is untouched: the
+			// hash was reset with the file, so a plan that was hashing as it
+			// wrote still is, and one that was not still is not.
+			break
+		}
+	}
 	if asked != "" {
 		// Stopping because somebody asked is not a failure, and must not be
 		// recorded as one — the cancelled context surfaces here as an error, and
@@ -253,7 +288,18 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	}
 
 	if want := spec.Artifact.Digest; want != "" {
+		// One stream hashed itself on the way through; a plan that filled holes
+		// could not, because sha256 is order-dependent and the holes were
+		// filled out of order. Read the finished file for that one. Same
+		// answer, one extra pass at disk speed, and the only alternative would
+		// be to trust bytes nobody hashed.
 		got := "sha256:" + hex.EncodeToString(h.Sum(nil))
+		if !rolling {
+			_, got, err = hashFile(partial)
+			if err != nil {
+				return err
+			}
+		}
 		// Compare the hex, not the label.
 		//
 		// A real 1.5 GB download of CORRECT bytes was rejected here because
@@ -275,7 +321,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 			os.Remove(partial)
 			r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 				rr.Progress.Done = 0
-				return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: 0})
+				return setCheckpoint(rr, Checkpoint{})
 			})
 			return fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, got, want)
 		}
@@ -292,7 +338,11 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		rr.State = job.StateTransferred
 		rr.Error = ""
-		return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: total, Validators: seen})
+		// Prefix-shaped again, and written as a prefix: the artifact is whole,
+		// so there are no holes left to describe and the ranges model is
+		// withdrawn rather than left declaring a set that says nothing. See
+		// setCheckpoint.
+		return setCheckpoint(rr, Checkpoint{VerifiedPrefix: total, Validators: seen})
 	})
 	return err
 }
@@ -324,11 +374,32 @@ func (r *Runner) honour(want job.Want, id string, epoch int64) error {
 	return nil
 }
 
-// fetch tries the sources in priority order and returns the total size of the
-// partial file when one of them succeeds.
-func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, from int64, seen *Validators, onIntent func(job.Want)) (int64, error) {
+// fetch gets ONE gap, trying the sources in priority order.
+//
+// It returns how far the artifact now reaches contiguously from byte zero —
+// which is the verified prefix of what is proven, and in a single-stream
+// transfer is exactly the `from + written` this used to return — and whether
+// the stream restarted, which voids every other gap.
+//
+// gap.To bounds the request. A bounded gap is the whole reason this is called
+// more than once: asking open-endedly for a hole with proven bytes after it
+// would re-fetch them, which is the waste the range set exists to stop. The
+// last gap of an artifact, and the only gap of an artifact whose length nobody
+// knows, is open-ended — so a single-stream download issues the identical
+// unbounded request it always has.
+func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, rolling bool, gap fetchRange, proven *Ranges, seen *Validators, onIntent func(job.Want)) (int64, bool, error) {
 	sources := append([]Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Priority < sources[j].Priority })
+
+	from := gap.From
+	to := gap.To
+	restarted := false
+
+	// fold records what this gap has proven so far. Everything before `at` in
+	// this gap is on disk and framed by the transport, which is the same
+	// standard the prefix was held to; it is now held per range instead of to
+	// one tail.
+	fold := func(at int64) (Ranges, error) { return proven.Add(from, at) }
 
 	// restart is the one place the byte stream begins again with the file
 	// already open and a rolling hash already part-filled — every other way of
@@ -356,13 +427,16 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		}
 		h.Reset()
 		from = 0
+		to = 0
+		restarted = true
+		*proven = nil
 		*seen = Validators{}
 		lastPersist = 0
 		lastPersistAt = time.Now()
 		_, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 			rr.Progress.Done = 0
 			rr.Progress.UpdatedAt = job.At(time.Now())
-			return rr.SetCheckpoint(Checkpoint{})
+			return setCheckpoint(rr, Checkpoint{})
 		})
 		return err
 	}
@@ -373,6 +447,9 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		if !ok {
 			lastErr = fmt.Errorf("%w: scheme %q", ErrNoFetcher, src.Scheme)
 			continue
+		}
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			return proven.VerifiedPrefix(), restarted, err
 		}
 
 		// Resolve the credential now, so the secret exists only for the length
@@ -385,12 +462,18 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 
 		// Everything written goes through the hash as well as the file, so the
 		// bytes are proven as they land rather than by a second pass later.
-		w := io.MultiWriter(f, h)
+		// Except when the bytes are landing out of order — then the hash means
+		// nothing and the file is read back at the end instead. See run.
+		var w io.Writer = f
+		if rolling {
+			w = io.MultiWriter(f, h)
+		}
 		lastPersist = from
 		lastPersistAt = time.Now()
 		res, err := fetcher.Fetch(ctx, Request{
 			Source:     src,
 			From:       from,
+			To:         to,
 			Validators: *seen,
 			Out:        w,
 			Headers:    headers,
@@ -414,8 +497,17 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				if err := f.Sync(); err != nil {
 					return
 				}
+				next, ferr := fold(at)
+				if ferr != nil {
+					return
+				}
 				updated, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
-					rr.Progress.Done = at
+					// Proven bytes, not an offset. The two are the same number
+					// for a prefix and only the first means anything once a
+					// transfer has holes in it — a sparse file reaches its
+					// furthest written byte and says nothing about what is
+					// between here and there.
+					rr.Progress.Done = next.Total()
 					// Only ever fill an unknown size in. A caller that supplied
 					// one at submission — modelget resolves it from the registry
 					// before any byte moves — has better information than a
@@ -426,15 +518,16 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 						rr.Progress.Total = total
 					}
 					rr.Progress.UpdatedAt = job.At(time.Now())
-					// The validators go down with the prefix, in the same write.
-					// A checkpoint that records how far it got but not WHICH
-					// version it got that far through is the checkpoint this
-					// whole change exists to stop existing.
-					return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: at, Validators: *seen})
+					// The validators go down with the proven bytes, in the same
+					// write. A checkpoint that records how far it got but not
+					// WHICH version it got that far through is the checkpoint
+					// this whole change exists to stop existing.
+					return setCheckpoint(rr, Checkpoint{Verified: next, Validators: *seen})
 				})
 				if err != nil {
 					return
 				}
+				*proven = next
 				// The record was just read and written, so what somebody wants
 				// is in hand at no extra cost. Stopping here rather than at the
 				// end of the transfer is the difference between a pause button
@@ -446,26 +539,35 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				r.Store.Renew(rec.ID, epoch, r.LeaseTTL)
 			},
 		})
+		// Whatever landed is proven to the same standard the prefix was held to,
+		// so fold it in before answering — success or failure. On failure that
+		// is the difference between a stop that keeps its bytes and one that
+		// throws them away, and it is why the record is written here rather
+		// than only on the periodic callback.
+		if got, ferr := fold(from + res.Written); ferr == nil {
+			*proven = got
+		}
+
 		if err == nil {
-			return from + res.Written, nil
+			return proven.VerifiedPrefix(), restarted, nil
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// Cancellation is not a source failure; do not burn the other
 			// sources on it.
-			return from + res.Written, err
+			return proven.VerifiedPrefix(), restarted, err
 		}
 		lastErr = fmt.Errorf("source %s: %w", src.Scheme, err)
 
 		// A failed source may still have contributed bytes. Stop rather than
-		// letting the next source append to a prefix this one left mid-write.
+		// letting the next source write over a hole this one left mid-write.
 		if res.Written > 0 {
-			return from + res.Written, lastErr
+			return proven.VerifiedPrefix(), restarted, lastErr
 		}
 	}
 	if lastErr == nil {
 		lastErr = ErrNoFetcher
 	}
-	return from, lastErr
+	return proven.VerifiedPrefix(), restarted, lastErr
 }
 
 // Adopt runs every download nobody is working on. This is the reclamation path:

@@ -77,12 +77,26 @@ type Continuation struct {
 	// Disposition is which of the cases above applied.
 	Disposition Disposition
 
-	// ResumeFrom is the byte the next attempt will actually start at, measured
+	// ResumeFrom is the byte the next request will actually ask for, measured
 	// against the filesystem and not against the record. A record claiming a
 	// verified prefix of 900 whose partial file holds 100 bytes — or none —
 	// yields 0, because two numbers that disagree do not average into a byte
 	// anyone proved.
+	//
+	// It is the start of the first hole, which is still the verified prefix,
+	// and it is no longer the same thing as how much of the artifact is here.
+	// See Proven.
 	ResumeFrom int64
+
+	// Proven is how many bytes of the artifact are actually held, which is
+	// ResumeFrom plus anything proven beyond the first hole.
+	//
+	// The two were one number while progress was a prefix. They stop being one
+	// the moment a transfer has holes: a resume that begins at byte 0 because
+	// the first megabyte is missing may still be holding thirty-nine gigabytes.
+	// Reporting only ResumeFrom would tell that person their download had
+	// started over.
+	Proven int64
 
 	// Discarded is how many bytes on disk are being thrown away to get to
 	// ResumeFrom: the tail an owner wrote and never checkpointed, or the whole
@@ -154,11 +168,13 @@ func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation
 //     the work over only once that lease lapses of its own accord, which is what
 //     recovers a download whose owner was killed rather than stopped.
 //
-//   - The resume point is the checkpoint, checked against the partial file: a
-//     file longer than the checkpoint has its unproven tail discarded, a file
-//     shorter than it has no resume point at all and the transfer starts again
-//     from zero. A vanished or truncated partial therefore cannot make a runner
-//     ask a server to continue from bytes that are not there.
+//   - The resume point is the checkpoint's proven ranges, checked against the
+//     partial file only for whether the file is long enough to hold them: one
+//     that is not has no resume point at all and the transfer starts again from
+//     zero, and one that is has its tail above the highest proven byte
+//     discarded. A vanished or truncated partial therefore cannot make a runner
+//     ask a server to continue from bytes that are not there. The file's length
+//     is never read as progress; see planResume.
 //
 //   - Two callers racing for one destination produce one record, because the
 //     record id is derived from the destination and both store bindings refuse
@@ -229,7 +245,7 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 		return c
 	}
 
-	c.ResumeFrom, c.Discarded = s.resumeFrom(rec)
+	c.ResumeFrom, c.Proven, c.Discarded = s.resumeFrom(rec)
 	switch {
 	case rec.Paused():
 		c.Disposition = Paused
@@ -242,6 +258,13 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 	default:
 		c.Note = "continuing an existing download from the beginning"
 	}
+	if c.Proven > c.ResumeFrom && c.Disposition == Resumed {
+		// The number a person needs when their download resumes from a low
+		// offset and is nonetheless nearly finished. Without it the display
+		// says "continuing from byte 0" for a transfer holding all but its
+		// first megabyte, which reads as starting over.
+		c.Note += fmt.Sprintf("; %d bytes past that are already proven and will be skipped", c.Proven-c.ResumeFrom)
+	}
 	if c.Discarded > 0 && c.Disposition == Resumed {
 		c.Note += fmt.Sprintf("; %d bytes on disk are unproven and will be fetched again", c.Discarded)
 	}
@@ -251,38 +274,43 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 	return c
 }
 
-// resumeFrom is where the runner will actually begin, worked out the same way
-// the runner works it out — by resumeAt, so that what a person is told here and
+// resumeFrom is what the runner will actually do, worked out the same way the
+// runner works it out — by planResume, so that what a person is told here and
 // what happens next cannot drift apart.
 //
-// A checkpoint is written periodically, so a partial file is normally AHEAD of
-// it, and the unproven tail is discarded. A file BEHIND its checkpoint is a
-// different situation: a temp cleaner, a half-finished copy onto a full disk, a
-// user tidying up. The old answer was to believe the smaller of the two and
-// carry on from there, which quietly turned "these two disagree" into a lower
-// offset and a resume onto bytes nothing vouches for. Now that case has no
-// resume point at all — the partial is discarded and the transfer starts again
-// — so this reports zero.
-func (s *service) resumeFrom(rec *job.Record) (from, discarded int64) {
+// Three numbers rather than two, because the file's length stopped implying
+// progress. `from` is where the next request begins; `proven` is how much of
+// the artifact is held, which is a different number the moment there are holes
+// past the first one; `discarded` is the tail above the highest proven byte,
+// which is the only part of the file that is actually thrown away.
+//
+// A file too short to hold what its checkpoint claims is a different situation
+// again: a temp cleaner, a half-finished copy onto a full disk, a user tidying
+// up. The old answer was to believe the smaller of the two and carry on from
+// there, which quietly turned "these two disagree" into a lower offset and a
+// resume onto bytes nothing vouches for. That case has no resume point at all —
+// the partial is discarded and the transfer starts again — so this reports zero
+// proven and the whole file discarded.
+func (s *service) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
 	spec, err := SpecOf(rec)
 	if err != nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	cp, err := CheckpointOf(rec)
 	if err != nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	partial, _ := LocalSink(s.runner.Store, spec.Sink)
-	rp, err := resumeAt(partial, cp)
+	plan, err := planResume(partial, cp, spec.Artifact.Size)
 	if err != nil {
 		// No resume point. Whatever is on disk is going, and how much of it
 		// there is is exactly what a person wants to be told.
 		if st, serr := os.Stat(partial); serr == nil && !st.IsDir() {
-			return 0, st.Size()
+			return 0, 0, st.Size()
 		}
-		return 0, 0
+		return 0, 0, 0
 	}
-	return rp.From, rp.Discarded
+	return plan.From(), plan.Have.Total(), plan.Discarded
 }
 
 // destinationExists reports whether the record's final path holds a file.

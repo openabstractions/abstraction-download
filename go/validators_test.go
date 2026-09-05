@@ -376,8 +376,17 @@ func TestContentRangeStart(t *testing.T) {
 	}
 }
 
-// TestResumeAt is the three-way test on its own: ahead of the checkpoint,
-// exactly at it, behind it, and gone.
+// TestResumeAt is what used to be the three-way test, kept exactly as it was
+// asserted before ranges existed: a prefix checkpoint against a file ahead of
+// it, level with it, behind it, and gone.
+//
+// The rule underneath it is not the same rule any more — see planResume — and
+// that is why this test still has to pass unchanged. "Longer" and "equal" now
+// reach the same branch rather than two, and the number that decides is the
+// highest proven offset rather than the checkpoint's prefix. For a prefix those
+// are the same number, so every answer below has to be identical, and if one of
+// them moved then the replacement broke something the replacement was supposed
+// to preserve.
 func TestResumeAt(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, n int) string {
@@ -389,26 +398,29 @@ func TestResumeAt(t *testing.T) {
 	}
 	v := Validators{ETag: `"v1"`}
 
-	rp, err := resumeAt(write("ahead.bin", 1500), Checkpoint{VerifiedPrefix: 1000, Validators: v})
-	if err != nil || rp.From != 1000 || rp.Discarded != 500 || rp.Validators != v {
+	rp, err := planResume(write("ahead.bin", 1500), Checkpoint{VerifiedPrefix: 1000, Validators: v}, 0)
+	if err != nil || rp.From() != 1000 || rp.Discarded != 500 || rp.Validators != v {
 		t.Fatalf("ahead: %+v, %v", rp, err)
 	}
-	rp, err = resumeAt(write("equal.bin", 1000), Checkpoint{VerifiedPrefix: 1000})
-	if err != nil || rp.From != 1000 || rp.Discarded != 0 {
+	if rp.Trim != 1000 {
+		t.Fatalf("ahead: trimmed to %d, want the highest proven offset 1000", rp.Trim)
+	}
+	rp, err = planResume(write("equal.bin", 1000), Checkpoint{VerifiedPrefix: 1000}, 0)
+	if err != nil || rp.From() != 1000 || rp.Discarded != 0 {
 		t.Fatalf("equal: %+v, %v", rp, err)
 	}
-	if _, err = resumeAt(write("short.bin", 900), Checkpoint{VerifiedPrefix: 1000}); err == nil {
+	if _, err = planResume(write("short.bin", 900), Checkpoint{VerifiedPrefix: 1000}, 0); err == nil {
 		t.Fatal("a file shorter than its checkpoint was accepted as a resume point")
 	} else if !strings.Contains(err.Error(), "900") {
 		t.Fatalf("short: %v", err)
 	}
 	// Missing is not short: there is no prefix to disbelieve, so this starts
 	// over rather than failing.
-	if rp, err = resumeAt(dir+string(os.PathSeparator)+"gone.bin", Checkpoint{VerifiedPrefix: 1000}); err != nil || rp.From != 0 {
+	if rp, err = planResume(dir+string(os.PathSeparator)+"gone.bin", Checkpoint{VerifiedPrefix: 1000}, 0); err != nil || rp.From() != 0 {
 		t.Fatalf("missing file: %+v, %v", rp, err)
 	}
 	// No checkpoint, no questions: a first attempt over whatever is lying there.
-	if rp, err = resumeAt(dir+string(os.PathSeparator)+"gone.bin", Checkpoint{}); err != nil || rp.From != 0 {
+	if rp, err = planResume(dir+string(os.PathSeparator)+"gone.bin", Checkpoint{}, 0); err != nil || rp.From() != 0 {
 		t.Fatalf("empty checkpoint: %+v, %v", rp, err)
 	}
 }

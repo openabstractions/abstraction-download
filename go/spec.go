@@ -71,11 +71,18 @@ type Sink struct {
 // Checkpoint is what a successor needs in order to continue, stored in
 // job.Record.Checkpoint.
 //
-// VerifiedPrefix is how many leading bytes of Partial are known to be the
-// artifact's real bytes. A new owner may resume ONLY from there — anything past
-// it was written by an owner that has since vanished, and nothing vouches for
-// it. There is no field meaning "trust the part I did not check", so curl's
-// `-C -` mistake is not expressible.
+// Verified is every byte of Partial known to be the artifact's real bytes, as a
+// set of half-open ranges. A new owner may resume ONLY from what is in there —
+// anything outside it was written by an owner that has since vanished, and
+// nothing vouches for it. There is no field meaning "trust the part I did not
+// check", so curl's `-C -` mistake is not expressible.
+//
+// VerifiedPrefix is the same claim about the leading bytes, and it is the field
+// that was here first. It stays because it is what a reader that has never
+// heard of ranges resumes from: such a reader re-fetches the scattered parts
+// and is correct, only slower. The two are never checked against each other —
+// see Checkpoint.Proven — because each is a claim that bytes ARE proven and
+// neither is a claim that other bytes are not.
 //
 // Validators say which VERSION of the artifact those bytes came from, so a
 // successor can ask the source to continue that version rather than whatever it
@@ -86,6 +93,15 @@ type Sink struct {
 type Checkpoint struct {
 	VerifiedPrefix int64      `json:"verified_prefix"`
 	Validators     Validators `json:"validators,omitempty"`
+
+	// Not a JSON field of this struct, deliberately. The record's encoding of a
+	// range set is the job layer's — three languages compare those bytes — so
+	// it is written by job.CheckpointWithRanges and read by
+	// job.RangesFromCheckpoint, never by struct tags here. Marshalling this
+	// struct with a `verified` tag would give a second, wrong spelling of a
+	// state that is only allowed one. See ranges.go, CheckpointOf and
+	// setCheckpoint.
+	Verified Ranges `json:"-"`
 }
 
 func (s Spec) Validate() error {
@@ -163,10 +179,26 @@ func SpecOf(rec *job.Record) (Spec, error) {
 
 // CheckpointOf reads the resume point. A job that has never checkpointed
 // returns a zero Checkpoint, which correctly means "start at the beginning".
+//
+// Verified and VerifiedPrefix both come back reconciled: the record's two
+// fields are unioned, canonicalised, and the prefix is then re-derived from the
+// result. So a record written by a prefix-only writer reads as one range
+// [0, prefix), a record written by a ranges-aware writer reads as its set, and
+// a record where a prefix-only writer took over from a ranges-aware one — which
+// is not an edge case, it is what any older implementation adopting the job
+// produces — reads as everything either of them proved.
 func CheckpointOf(rec *job.Record) (Checkpoint, error) {
 	var c Checkpoint
-	err := rec.DecodeCheckpoint(&c)
-	return c, err
+	if err := rec.DecodeCheckpoint(&c); err != nil {
+		return c, err
+	}
+	rs, err := rec.CheckpointRanges()
+	if err != nil {
+		return c, err
+	}
+	c.Verified = rs
+	c.VerifiedPrefix = rs.VerifiedPrefix()
+	return c, nil
 }
 
 // Resolve turns the sink's paths into paths on THIS machine.

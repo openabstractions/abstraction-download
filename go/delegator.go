@@ -275,6 +275,14 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 	// qualifies, this returns ErrNoDelegator, the job stays unclaimed, and the
 	// supervisor's own adoption pass runs it here — where the checkpoint IS
 	// honoured. Slower than a NAS, and it keeps the bytes.
+	//
+	// The prefix, not the range set, and deliberately: a delegate takes one
+	// offset and streams from it, so what it can carry forward is the leading
+	// run and nothing else. Proven ranges past the first hole are re-fetched by
+	// it, which is a cost and not a correctness problem — it writes the same
+	// artifact's bytes over them, and Reconcile hashes the whole delivered file
+	// afterwards. Handing a delegate holes it cannot express would be the
+	// mistake; letting it re-fetch them is only slower.
 	requires := rec.Requires
 	if cp.VerifiedPrefix > 0 {
 		requires = append(append([]string{}, requires...), string(CapResume))
@@ -519,7 +527,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 				rr.Delegation = nil
 				rr.State = job.StatePending
 				rr.Error = fmt.Sprintf("%v: delegate delivered %s, want %s", ErrDigestMismatch, digest, want)
-				return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: 0})
+				return setCheckpoint(rr, Checkpoint{})
 			})
 			if uerr != nil {
 				return uerr
@@ -536,7 +544,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			rr.State = job.StateTransferred
 			rr.Error = ""
 			rr.Delegation.Delivered = true
-			return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: total})
+			return setCheckpoint(rr, Checkpoint{VerifiedPrefix: total})
 		})
 		return err
 	}
