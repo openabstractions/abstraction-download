@@ -237,8 +237,9 @@ func TestResumeDiscardsUnprovenBytes(t *testing.T) {
 }
 
 // TestPartialShorterThanRecord: the record claims more was proven than the file
-// actually holds, which is what a crash between fsync and record write leaves
-// behind. Resuming from the record's number would append to a hole.
+// actually holds. That is not a resume point at a lower offset — it is a file
+// something other than this library has been writing to — so the attempt fails,
+// the partial is thrown away, and the transfer starts again from zero.
 func TestPartialShorterThanRecord(t *testing.T) {
 	body, digest := payload(t, 64<<10)
 	srv := rangeServer(t, body)
@@ -250,12 +251,26 @@ func TestPartialShorterThanRecord(t *testing.T) {
 	}
 	stageDeadOwner(t, store, id, 50000, 50000) // a lie the file cannot back up
 
+	err := r.Run(context.Background(), id)
+	if !errors.Is(err, ErrFileTooShort) {
+		t.Fatalf("Run = %v, want ErrFileTooShort — the record was believed down to a lower offset", err)
+	}
+	if _, err := os.Stat(partialOf(t, store, id)); err == nil {
+		t.Fatal("the disagreeing partial was kept; the next runner would resume onto it")
+	}
+	rec, _ := store.Load(id)
+	cp, _ := CheckpointOf(rec)
+	if cp.VerifiedPrefix != 0 {
+		t.Fatalf("checkpoint still claims %d bytes are proven", cp.VerifiedPrefix)
+	}
+
+	// And the restart it asked for actually works.
 	if err := r.Run(context.Background(), id); err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("second Run: %v", err)
 	}
 	got, _ := os.ReadFile(finalOf(t, store, id))
 	if string(got) != string(body) {
-		t.Fatal("runner trusted the record over the file and produced a corrupt artifact")
+		t.Fatal("the restarted download does not match the source")
 	}
 }
 
@@ -286,10 +301,14 @@ func TestRefusesWrongDigest(t *testing.T) {
 	}
 }
 
-// TestRefusesServerThatIgnoresRange: asked for bytes from N, the server sends
+// TestRestartsWhenServerIgnoresRange: asked for bytes from N, the server sends
 // the whole file from zero. Appending that to what is on disk yields a file of
 // plausible length and impossible content. curl's -C - will do exactly this.
-func TestRefusesServerThatIgnoresRange(t *testing.T) {
+//
+// The answer is not to fail — the response is a complete, valid artifact — but
+// to throw the prefix away and take it from byte zero, which is what the
+// delivered content proves happened.
+func TestRestartsWhenServerIgnoresRange(t *testing.T) {
 	body, digest := payload(t, 32<<10)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // ignores Range entirely
@@ -302,12 +321,15 @@ func TestRefusesServerThatIgnoresRange(t *testing.T) {
 	os.WriteFile(partialOf(t, store, id), body[:1000], 0o644)
 	stageDeadOwner(t, store, id, 1000, 1000)
 
-	err := r.Run(context.Background(), id)
-	if err == nil {
-		t.Fatal("the runner accepted a 200 response to a ranged request and corrupted the file")
+	if err := r.Run(context.Background(), id); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(err.Error(), "whole file") {
-		t.Fatalf("error did not explain the problem: %v", err)
+	got, err := os.ReadFile(finalOf(t, store, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("delivered %d bytes that are not the artifact; the 200 was appended to the prefix", len(got))
 	}
 }
 

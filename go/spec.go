@@ -76,8 +76,16 @@ type Sink struct {
 // it was written by an owner that has since vanished, and nothing vouches for
 // it. There is no field meaning "trust the part I did not check", so curl's
 // `-C -` mistake is not expressible.
+//
+// Validators say which VERSION of the artifact those bytes came from, so a
+// successor can ask the source to continue that version rather than whatever it
+// is serving today. A reader that does not know the field resumes without one,
+// which is safe rather than merely tolerable: a source that has changed then
+// answers a ranged request with the whole new file, and that answer is handled
+// by starting again from byte zero. See validators.go and HTTP.Fetch.
 type Checkpoint struct {
-	VerifiedPrefix int64 `json:"verified_prefix"`
+	VerifiedPrefix int64      `json:"verified_prefix"`
+	Validators     Validators `json:"validators,omitempty"`
 }
 
 func (s Spec) Validate() error {

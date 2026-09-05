@@ -52,8 +52,38 @@ type Request struct {
 	// length before calling, so a Fetcher can append without checking.
 	From int64
 
-	// Out receives the bytes, in order, starting at From.
+	// Validators identify the version of the artifact the bytes already on disk
+	// came from, when a previous attempt recorded any. A Fetcher that can ask a
+	// source to continue THAT version rather than whatever it is serving now
+	// should — see Validators.IfRange. Empty when nothing was recorded, or when
+	// From is zero and there is nothing to continue.
+	Validators Validators
+
+	// Out receives the bytes, in order, starting at From — unless Restart has
+	// been called, after which they start at zero.
 	Out io.Writer
+
+	// Restart says the byte stream about to be written begins at zero rather
+	// than at From, because the source turned out to be serving a different
+	// version of the artifact than the one on disk.
+	//
+	// This is not an error and not a failure of the transfer: it is the correct
+	// outcome of asking a changed source to continue, and the transfer proceeds
+	// normally from byte zero. The runner's implementation truncates the partial
+	// away, rewinds, resets the rolling hash and forgets the recorded prefix,
+	// so everything downstream sees a download that simply started fresh.
+	//
+	// It must be called BEFORE the first byte of the new stream is written to
+	// Out, and a Fetcher that cannot honour a restart must fail rather than
+	// append. A nil Restart means the caller cannot rewind: fail in that case
+	// too.
+	Restart func() error
+
+	// Observed reports what the source said about the version it is serving,
+	// once and before any byte is written. The runner records it with the
+	// checkpoint so the NEXT attempt can send it back. A Fetcher whose sources
+	// have no notion of a version leaves this alone.
+	Observed func(Validators)
 
 	// Headers are already resolved and ready to send. A Fetcher never learns
 	// that a credential exists: the Runner turns the source's credential NAME
@@ -81,7 +111,8 @@ type Request struct {
 
 // Result is what one attempt achieved.
 type Result struct {
-	// Written is how many bytes this attempt appended.
+	// Written is how many bytes this attempt appended — or wrote from zero, if
+	// it called Request.Restart.
 	Written int64
 	// Total is the artifact's full size if the source revealed it, 0 if not.
 	// Some sources only disclose length in a response header, and some never
@@ -116,6 +147,10 @@ var (
 	ErrDigestMismatch = errors.New("download: digest mismatch")
 	// ErrShortTransfer means the source ended before the expected size.
 	ErrShortTransfer = errors.New("download: source ended early")
+	// ErrCannotRestart means a source answered a request to continue with a
+	// stream that begins at zero, and the caller offered no way to rewind. The
+	// bytes are fine; there is just nowhere to put them.
+	ErrCannotRestart = errors.New("download: the stream restarts at zero and this request cannot rewind")
 )
 
 // Registry picks a Fetcher for a source.

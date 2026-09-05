@@ -257,8 +257,10 @@ func TestAVanishedPartialIsNotTrusted(t *testing.T) {
 }
 
 // The same, one step less obvious: the file is there but shorter than the
-// checkpoint says.
-func TestAShortPartialResumesFromTheFile(t *testing.T) {
+// checkpoint says. There is no resume point in that, and there used to be one —
+// the smaller of the two numbers — which reported 1 KiB as a place to carry on
+// from for a file nothing had proven a single byte of.
+func TestAShortPartialHasNoResumePoint(t *testing.T) {
 	body, _ := payload(t, 32<<10)
 	svc, _, store, root := resumeService(t)
 	spec := Spec{
@@ -276,8 +278,14 @@ func TestAShortPartialResumesFromTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ResumeFrom != 1<<10 {
-		t.Fatalf("ResumeFrom = %d, want %d", c.ResumeFrom, 1<<10)
+	if c.ResumeFrom != 0 {
+		t.Fatalf("ResumeFrom = %d, want 0 — the smaller of two disagreeing numbers is not a resume point", c.ResumeFrom)
+	}
+	if c.Discarded != 1<<10 {
+		t.Fatalf("Discarded = %d, want %d: the bytes being thrown away are a number, not a surprise", c.Discarded, 1<<10)
+	}
+	if !strings.Contains(c.Note, "unproven") {
+		t.Fatalf("Note does not mention what is being thrown away: %q", c.Note)
 	}
 }
 

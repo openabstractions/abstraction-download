@@ -80,8 +80,18 @@ type Continuation struct {
 	// ResumeFrom is the byte the next attempt will actually start at, measured
 	// against the filesystem and not against the record. A record claiming a
 	// verified prefix of 900 whose partial file holds 100 bytes — or none —
-	// yields 100, or 0.
+	// yields 0, because two numbers that disagree do not average into a byte
+	// anyone proved.
 	ResumeFrom int64
+
+	// Discarded is how many bytes on disk are being thrown away to get to
+	// ResumeFrom: the tail an owner wrote and never checkpointed, or the whole
+	// partial when it disagreed with the record. They will be fetched again.
+	//
+	// Reported because it is the difference between a resume that saves nearly
+	// everything and one that saves nothing, and a person watching a download
+	// apparently start over is entitled to the number rather than a guess.
+	Discarded int64
 
 	// Source is the locator the adopted job will fetch from, which is not
 	// necessarily the one just passed in. See SourceChanged.
@@ -144,9 +154,11 @@ func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation
 //     the work over only once that lease lapses of its own accord, which is what
 //     recovers a download whose owner was killed rather than stopped.
 //
-//   - The resume point is the smaller of the checkpoint and the size of the
-//     partial file, so a vanished or truncated partial cannot make a runner ask
-//     a server to continue from bytes that are not there.
+//   - The resume point is the checkpoint, checked against the partial file: a
+//     file longer than the checkpoint has its unproven tail discarded, a file
+//     shorter than it has no resume point at all and the transfer starts again
+//     from zero. A vanished or truncated partial therefore cannot make a runner
+//     ask a server to continue from bytes that are not there.
 //
 //   - Two callers racing for one destination produce one record, because the
 //     record id is derived from the destination and both store bindings refuse
@@ -217,7 +229,7 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 		return c
 	}
 
-	c.ResumeFrom = s.resumeFrom(rec)
+	c.ResumeFrom, c.Discarded = s.resumeFrom(rec)
 	switch {
 	case rec.Paused():
 		c.Disposition = Paused
@@ -230,39 +242,47 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 	default:
 		c.Note = "continuing an existing download from the beginning"
 	}
+	if c.Discarded > 0 && c.Disposition == Resumed {
+		c.Note += fmt.Sprintf("; %d bytes on disk are unproven and will be fetched again", c.Discarded)
+	}
 	if c.SourceChanged {
 		c.Note += "; it fetches from " + c.Source
 	}
 	return c
 }
 
-// resumeFrom is what survives on disk, never what the record claims.
+// resumeFrom is where the runner will actually begin, worked out the same way
+// the runner works it out — by resumeAt, so that what a person is told here and
+// what happens next cannot drift apart.
 //
 // A checkpoint is written periodically, so a partial file is normally AHEAD of
-// it — but it can also be behind it, or gone: a temp cleaner, a half-finished
-// copy onto a full disk, a user tidying up. Believing the record in that case
-// makes a runner send `Range: bytes=900-` for a file holding a hundred bytes,
-// and the answer is appended to those hundred. The file then has the right
-// length and the wrong contents, which is the one outcome worth more than a
-// re-download.
-func (s *service) resumeFrom(rec *job.Record) int64 {
+// it, and the unproven tail is discarded. A file BEHIND its checkpoint is a
+// different situation: a temp cleaner, a half-finished copy onto a full disk, a
+// user tidying up. The old answer was to believe the smaller of the two and
+// carry on from there, which quietly turned "these two disagree" into a lower
+// offset and a resume onto bytes nothing vouches for. Now that case has no
+// resume point at all — the partial is discarded and the transfer starts again
+// — so this reports zero.
+func (s *service) resumeFrom(rec *job.Record) (from, discarded int64) {
 	spec, err := SpecOf(rec)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	cp, err := CheckpointOf(rec)
-	if err != nil || cp.VerifiedPrefix <= 0 {
-		return 0
+	if err != nil {
+		return 0, 0
 	}
 	partial, _ := LocalSink(s.runner.Store, spec.Sink)
-	st, err := os.Stat(partial)
-	if err != nil || st.IsDir() {
-		return 0
+	rp, err := resumeAt(partial, cp)
+	if err != nil {
+		// No resume point. Whatever is on disk is going, and how much of it
+		// there is is exactly what a person wants to be told.
+		if st, serr := os.Stat(partial); serr == nil && !st.IsDir() {
+			return 0, st.Size()
+		}
+		return 0, 0
 	}
-	if st.Size() < cp.VerifiedPrefix {
-		return st.Size()
-	}
-	return cp.VerifiedPrefix
+	return rp.From, rp.Discarded
 }
 
 // destinationExists reports whether the record's final path holds a file.

@@ -141,30 +141,57 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// paths that are real on this machine.
 	partial, final := LocalSink(r.Store, spec.Sink)
 
-	// Resume position: the smaller of what the checkpoint says was proven and
-	// what is actually on disk. They differ after a crash — the checkpoint is
-	// written periodically, so the file can be ahead of it, and a partial can
-	// also be truncated or missing entirely. Trusting either one alone is how a
-	// resumed download ends up the right length and the wrong bytes.
+	// Resume position: the checkpoint, measured against what is actually on
+	// disk, by the three-way test in resumeAt. The file being AHEAD of the
+	// checkpoint is ordinary and the unproven tail is discarded; the file being
+	// BEHIND it is not ordinary and is refused outright, because a file shorter
+	// than its own checkpoint is a file something else has been editing, and
+	// there is no reason to believe the part of it that is still there.
 	if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
 		return err
 	}
-	onDisk := int64(0)
-	if st, err := os.Stat(partial); err == nil {
-		onDisk = st.Size()
+	rp, err := resumeAt(partial, cp)
+	if err != nil {
+		if errors.Is(err, ErrFileTooShort) {
+			// Discard and start over. Nothing here is recoverable, and leaving
+			// the bytes would leave the same disagreement for the next runner
+			// to find. The next attempt sees no checkpoint and no file, which
+			// is a first download.
+			os.Remove(partial)
+			r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+				rr.Progress.Done = 0
+				return rr.SetCheckpoint(Checkpoint{})
+			})
+		}
+		return err
 	}
-	from := cp.VerifiedPrefix
-	if onDisk < from {
-		from = onDisk
-	}
+	from := rp.From
 	if err := truncate(partial, from); err != nil {
 		return err
+	}
+
+	// The byte stream is about to begin somewhere other than where the record
+	// says it left off — because the unproven tail was just cut off, or because
+	// there is no checkpoint at all and whatever is on disk is being overwritten.
+	// The record's received count has to come down with it, or the next reader
+	// inherits a number no file backs up.
+	if rec.Progress.Done != from {
+		r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+			rr.Progress.Done = from
+			return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: from, Validators: rp.Validators})
+		})
 	}
 
 	// Rebuild the rolling hash over the prefix we are keeping. This is the cost
 	// of resuming honestly: a sequential read of what we already have, at disk
 	// speed, instead of re-downloading it at network speed. It is also the only
 	// way the digest check at the end covers bytes an earlier owner wrote.
+	//
+	// Rebuilt rather than inherited, so every way `from` can be zero — no
+	// checkpoint, a truncate to nothing, a partial that vanished, a record whose
+	// received count did not match — gets an empty hash without anybody having
+	// to remember to reset one. The one place that cannot work that way is a
+	// stream that restarts once the file is already open; see fetch.
 	h := sha256.New()
 	if from > 0 {
 		if err := hashPrefix(partial, from, h); err != nil {
@@ -186,7 +213,13 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		return err
 	}
 
-	total, err := r.fetch(ctx, rec, spec, epoch, f, h, from, func(w job.Want) { asked = w; stop() })
+	// seen follows the transfer: what the source says about the version it is
+	// serving, updated as responses arrive and cleared if the stream restarts.
+	// It is a pointer into fetch because the final checkpoint below has to
+	// record the version that was actually delivered, not the one this attempt
+	// started out believing in.
+	seen := rp.Validators
+	total, err := r.fetch(ctx, rec, spec, epoch, f, h, from, &seen, func(w job.Want) { asked = w; stop() })
 	if asked != "" {
 		// Stopping because somebody asked is not a failure, and must not be
 		// recorded as one — the cancelled context surfaces here as an error, and
@@ -259,7 +292,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		rr.State = job.StateTransferred
 		rr.Error = ""
-		return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: total})
+		return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: total, Validators: seen})
 	})
 	return err
 }
@@ -293,9 +326,46 @@ func (r *Runner) honour(want job.Want, id string, epoch int64) error {
 
 // fetch tries the sources in priority order and returns the total size of the
 // partial file when one of them succeeds.
-func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, from int64, onIntent func(job.Want)) (int64, error) {
+func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, from int64, seen *Validators, onIntent func(job.Want)) (int64, error) {
 	sources := append([]Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Priority < sources[j].Priority })
+
+	// restart is the one place the byte stream begins again with the file
+	// already open and a rolling hash already part-filled — every other way of
+	// starting at zero is settled before either exists, in run.
+	//
+	// A source has told us the artifact it holds is not the one
+	// these bytes came from, so everything derived from those bytes goes: the
+	// file back to nothing, the hash back to empty, the recorded prefix and the
+	// validators that identified it back to zero. `from` goes with them, so that
+	// the offsets this function reports, the checkpoints it writes and any
+	// remaining source all agree the transfer now starts at zero.
+	//
+	// The persistence bookkeeping is reset too. It counts from the offset the
+	// attempt began at, and left alone it would hold a number the file no
+	// longer reaches — so nothing would be checkpointed until the transfer had
+	// re-covered the ground it just threw away.
+	lastPersist := from
+	lastPersistAt := time.Now()
+	restart := func() error {
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		h.Reset()
+		from = 0
+		*seen = Validators{}
+		lastPersist = 0
+		lastPersistAt = time.Now()
+		_, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+			rr.Progress.Done = 0
+			rr.Progress.UpdatedAt = job.At(time.Now())
+			return rr.SetCheckpoint(Checkpoint{})
+		})
+		return err
+	}
 
 	var lastErr error
 	for _, src := range sources {
@@ -316,13 +386,16 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		// Everything written goes through the hash as well as the file, so the
 		// bytes are proven as they land rather than by a second pass later.
 		w := io.MultiWriter(f, h)
-		lastPersist := from
-		lastPersistAt := time.Now()
+		lastPersist = from
+		lastPersistAt = time.Now()
 		res, err := fetcher.Fetch(ctx, Request{
-			Source:  src,
-			From:    from,
-			Out:     w,
-			Headers: headers,
+			Source:     src,
+			From:       from,
+			Validators: *seen,
+			Out:        w,
+			Headers:    headers,
+			Restart:    restart,
+			Observed:   func(v Validators) { *seen = v },
 			Report: func(written, total int64) {
 				at := from + written
 				// Bytes OR time, whichever comes first. The byte threshold
@@ -353,7 +426,11 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 						rr.Progress.Total = total
 					}
 					rr.Progress.UpdatedAt = job.At(time.Now())
-					return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: at})
+					// The validators go down with the prefix, in the same write.
+					// A checkpoint that records how far it got but not WHICH
+					// version it got that far through is the checkpoint this
+					// whole change exists to stop existing.
+					return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: at, Validators: *seen})
 				})
 				if err != nil {
 					return

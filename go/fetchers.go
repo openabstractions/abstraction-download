@@ -60,36 +60,140 @@ func (h HTTP) client() *http.Client {
 	return http.DefaultClient
 }
 
-func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
+// get issues the GET, ranged when there is a prefix to continue.
+func (h HTTP) get(ctx context.Context, req Request) (*http.Response, error) {
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.Source.Locator, nil)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
 	}
 	if req.From > 0 {
 		hreq.Header.Set("Range", "bytes="+strconv.FormatInt(req.From, 10)+"-")
-	}
 
-	resp, err := h.client().Do(hreq)
+		// Say which version the bytes on disk came from. Without this a server
+		// whose file has changed answers the range honestly, with a valid range
+		// of a DIFFERENT file, and nothing in the response says so. With it, the
+		// server answers 206 only if the file is unchanged and 200 — the whole
+		// new file — if it is not, which is the case Fetch handles by starting
+		// again.
+		if v := req.Validators.IfRange(); v != "" {
+			hreq.Header.Set("If-Range", v)
+		}
+
+		// Offsets on this side are counted after decoding and the server's are
+		// counted before it, so a range over a compressed body asks for a byte
+		// position that means something different at each end. Asking for the
+		// identity encoding makes the two agree.
+		hreq.Header.Set("Accept-Encoding", "identity")
+	}
+	return h.client().Do(hreq)
+}
+
+// Fetch gets the bytes, and decides what the server's answer to a ranged
+// request actually means.
+//
+// Three answers are possible and only one of them is "here is the rest of your
+// file". The other two — the whole file from zero, and a range starting
+// somewhere other than where we asked — are what a server sends when the
+// artifact it holds is no longer the artifact the bytes on disk came from.
+// Neither is a transport error, and neither may be appended.
+func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
+	resp, err := h.get(ctx, req)
 	if err != nil {
 		return Result{}, err
 	}
-	defer resp.Body.Close()
+	// The variable, not the value: the restart paths below close the first
+	// response themselves and put a second one here.
+	defer func() { resp.Body.Close() }()
+
+	// restartWhole throws the prefix away and asks for the artifact from byte
+	// zero. Used where the answer to the ranged request cannot be written at the
+	// offset it was asked for AND is not itself a whole artifact, so a second
+	// request is the only way to get one.
+	restartWhole := func(why error) (*http.Response, error) {
+		resp.Body.Close()
+		if req.Restart == nil {
+			return nil, fmt.Errorf("%w: %w", ErrCannotRestart, why)
+		}
+		if rerr := req.Restart(); rerr != nil {
+			return nil, rerr
+		}
+		req.From = 0
+		req.Validators = Validators{}
+		again, gerr := h.get(ctx, req) // no Range this time: the whole file
+		if gerr != nil {
+			return nil, gerr
+		}
+		if again.StatusCode != http.StatusOK {
+			again.Body.Close()
+			return nil, fmt.Errorf("download: %s: %s", req.Source.Locator, again.Status)
+		}
+		return again, nil
+	}
 
 	switch {
 	case req.From > 0 && resp.StatusCode == http.StatusPartialContent:
-		// The server honoured the range. Good.
+		start, cerr := contentRangeStart(resp.Header.Get("Content-Range"))
+		if cerr != nil || start != req.From {
+			// A range that does not begin where we asked is not a partial
+			// answer to this request. Its bytes belong at an offset nobody
+			// asked about, and appending them puts the artifact's own content
+			// at the wrong place in the file — invisible to a length check and
+			// invisible to a transport error. Do not trust it; start again.
+			if cerr == nil {
+				cerr = fmt.Errorf("download: asked for bytes from %d, got a range starting at %d", req.From, start)
+			}
+			if resp, err = restartWhole(cerr); err != nil {
+				return Result{}, err
+			}
+		}
+
+	case req.From > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		// The offset is past the end of what the server holds. With an If-Range
+		// that matched, that means the artifact is the version these bytes came
+		// from and is nonetheless shorter than the prefix on disk — so the
+		// prefix cannot be a prefix of it. Nothing is recoverable from that, and
+		// the checkpoint would produce the same 416 on every retry until
+		// somebody deleted the partial by hand.
+		if resp, err = restartWhole(fmt.Errorf("download: %s has fewer than %d bytes (416)",
+			req.Source.Locator, req.From)); err != nil {
+			return Result{}, err
+		}
+
 	case req.From > 0 && resp.StatusCode == http.StatusOK:
-		// It ignored the range and is sending the whole file from zero. Appending
-		// this to what is already on disk would silently produce a file that is
-		// the right length in the wrong way, which is exactly the class of
-		// corruption this project exists to refuse. Fail instead.
-		return Result{}, fmt.Errorf("download: asked for bytes from %d, server sent the whole file (200); "+
-			"resuming here would corrupt the artifact", req.From)
+		// The server answered a ranged request with the whole file. With an
+		// If-Range on the request that is the server saying, in the only way
+		// HTTP has, "the file you have is not the file I have — here is mine".
+		// Without one it is a server that does not do ranges. Either way the
+		// body is a complete artifact starting at byte zero, and either way
+		// appending it to the prefix on disk splices two files together at an
+		// arbitrary offset.
+		//
+		// So rewind and take it. This is not an error and the transfer proceeds
+		// normally; the earlier bytes are simply wasted. Chromium reaches the
+		// same conclusion in components/download/internal/common/download_utils.cc
+		// near line 349, resetting the offset and clearing the hash state rather
+		// than failing the download.
+		if req.Restart == nil {
+			return Result{}, fmt.Errorf("%w: asked %s for bytes from %d and got the whole file (200)",
+				ErrCannotRestart, req.Source.Locator, req.From)
+		}
+		if rerr := req.Restart(); rerr != nil {
+			return Result{}, rerr
+		}
+		req.From = 0
+
 	case resp.StatusCode != http.StatusOK:
 		return Result{}, fmt.Errorf("download: %s: %s", req.Source.Locator, resp.Status)
+	}
+
+	// What this response says about the version being served, recorded now so
+	// that the next attempt can ask for the same one. On a first download this
+	// is the only chance to learn it; on a resume it confirms it.
+	if req.Observed != nil {
+		req.Observed(StrongValidators(resp.Header))
 	}
 
 	// Worked out BEFORE the copy, not after it. Content-Length on a 200 is the
