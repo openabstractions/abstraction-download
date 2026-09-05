@@ -31,6 +31,7 @@ nobody tries.
 
 from __future__ import annotations
 
+import email.utils
 import hashlib
 import json
 import ntpath
@@ -84,11 +85,23 @@ class ShortTransfer(DownloadError):
     pass
 
 
-class RangeIgnored(DownloadError):
-    """The server answered a ranged request with the whole file.
+class FileTooShort(DownloadError):
+    """The partial file holds fewer bytes than the checkpoint says were proven.
 
-    Appending that to what we already have produces a file of plausible length
-    and impossible content. `curl -C -` does exactly this; this refuses.
+    A refusal, not a warning. The obvious reading of "the record and the file
+    disagree" is to believe the smaller of the two and carry on from there --
+    which is what this implementation did. That reading is wrong in a way that
+    is hard to see: a file SHORTER than its checkpoint is not a file with a
+    shorter proven prefix, it is a file something else has been editing. A temp
+    cleaner truncating it, a copy that ran out of disk, a second process writing
+    the same path: none of those leave a prefix whose first N bytes are still
+    the artifact's, and taking the smaller number silently promotes a corrupt
+    file to a valid resume point.
+
+    So the partial is discarded and the transfer starts again from zero. The
+    cost is the bytes; the alternative was a file that looked finished and was
+    not. A partial that is MISSING is not this: there is no prefix to disbelieve,
+    so that starts quietly at zero. See _resume_at.
     """
 
 
@@ -163,13 +176,251 @@ def local_sink(store, sink: "Sink") -> Tuple[str, str]:
     return sink.resolve(local_root(store))
 
 
+# ------------------------------------------------------- which version it is ---
+#
+# One question: are the bytes a server is offering now the same artifact as the
+# bytes already on disk?
+#
+# A resumed transfer asks a server to continue a file. Nothing in a bare Range
+# request says WHICH file, so a server that has since replaced the artifact
+# answers the range honestly and the answer is a valid range of something else.
+# Appended to the prefix on disk that produces a file of exactly the right length
+# holding two versions spliced at an arbitrary offset -- no transport error, no
+# short read, and nothing for a digest-less download to catch.
+#
+# The remedy is the one HTTP already has: send with the range a token identifying
+# the version the prefix came from, and let the server decide. See
+# Validators.if_range and, for what to do when the server says no, Runner.
+
+
+@dataclass
+class Validators:
+    """Which VERSION of an artifact a server served, so that a later request can
+    say which version its bytes on disk came from.
+
+    Only strong validators are ever put in here; see strong_validators. These
+    cross the boundary in the checkpoint under the same JSON names the Go
+    binding writes, so a transfer begun by one and resumed by the other asks the
+    same question of the server.
+    """
+
+    #: The entity tag exactly as the server wrote it, quotes included, and never
+    #: a weak one.
+    etag: str = ""
+    #: The Last-Modified header, used only when there is no usable ETag.
+    last_modified: str = ""
+
+    def empty(self) -> bool:
+        return not self.etag and not self.last_modified
+
+    def if_range(self) -> str:
+        """What to send as If-Range alongside a Range request, or "" when there
+        is nothing worth sending.
+
+        If-Range rather than If-Match, which is the same choice Chromium made and
+        for the same reason: a failed If-Match is a 412 with an empty body, so
+        the client learns the file changed and must then spend a second round
+        trip asking for it. A failed If-Range is the new file, in the same
+        response.
+        """
+        return self.etag or self.last_modified
+
+    def to_dict(self) -> dict:
+        d: dict = {}
+        if self.etag:
+            d["etag"] = self.etag
+        if self.last_modified:
+            d["last_modified"] = self.last_modified
+        return d
+
+    @staticmethod
+    def from_dict(d: Optional[dict]) -> "Validators":
+        d = d or {}
+        return Validators(
+            etag=str(d.get("etag") or ""),
+            last_modified=str(d.get("last_modified") or ""),
+        )
+
+
+def strong_validators(headers) -> Validators:
+    """The validators out of a response, keeping only the ones worth acting on.
+
+    A weak ETag -- ``W/"..."`` -- is dropped rather than recorded. Weak means the
+    server is asserting semantic equivalence, not byte equality: two responses
+    may share a weak tag and differ in their bytes, which is precisely the
+    distinction a resume depends on. Recording one would produce a token that
+    makes a server answer 206 for a file whose bytes moved, which is worse than
+    having no validator at all, because no validator at least leaves the 200 path
+    (and its restart) available.
+
+    Last-Modified is used only when there is no usable ETag, and only when it
+    parses as an HTTP date, so a malformed header is not echoed back to a server
+    that would then have to guess what it meant.
+    """
+    v = Validators()
+    etag = (headers.get("ETag") or "").strip()
+    if _strong_etag(etag):
+        v.etag = etag
+    if not v.etag:
+        lm = (headers.get("Last-Modified") or "").strip()
+        if _http_date(lm):
+            v.last_modified = lm
+    return v
+
+
+def _strong_etag(s: str) -> bool:
+    """Is s an entity tag this layer will act on: quoted, non-empty, and not
+    marked weak?"""
+    if not s:
+        return False
+    # Case-insensitive because RFC 7232 writes the marker as `W/` and servers
+    # have been seen to write `w/`.
+    if s[:2].lower() == "w/":
+        return False
+    return len(s) >= 2 and s.startswith('"') and s.endswith('"')
+
+
+def _http_date(s: str) -> bool:
+    """Does s parse as one of the three date formats HTTP allows?
+
+    email.utils.parsedate is the standard library's reader and, unlike
+    time.strptime, does not depend on the process locale for month and day
+    names. It is more forgiving than Go's http.ParseTime in one respect --
+    it accepts an RFC 1123 date with no timezone at all -- so the zone is
+    required here explicitly. Without that the two implementations would record
+    different validators from the same response, which is the one thing a shared
+    record cannot survive.
+    """
+    if not s:
+        return False
+    if email.utils.parsedate(s) is None:
+        return False
+    # The two comma forms end in GMT; asctime carries no zone and no comma.
+    if "," in s:
+        return s.upper().endswith("GMT")
+    return True
+
+
+def _content_range_start(s: str) -> int:
+    """The first byte position out of a Content-Range header --
+    ``bytes 1000-40959/40960`` gives 1000.
+
+    A 206 whose range does not begin where the client asked is not a partial
+    answer to this request; it is a different answer altogether, and the bytes
+    after it belong at an offset nobody asked about. Reading the header is the
+    only way to notice, because the body itself looks exactly like a correct one.
+    """
+    s = (s or "").strip()
+    if not s:
+        raise DownloadError("download: a 206 arrived with no Content-Range")
+    unit, sep, rest = s.partition(" ")
+    if not sep or unit.lower() != "bytes":
+        raise DownloadError(f"download: Content-Range {s!r} is not in bytes")
+    span, sep, _ = rest.strip().partition("/")
+    if not sep:
+        raise DownloadError(f"download: Content-Range {s!r} has no total")
+    first, sep, _ = span.partition("-")
+    if not sep:
+        raise DownloadError(f"download: Content-Range {s!r} has no range")
+    try:
+        n = int(first.strip())
+    except ValueError:
+        raise DownloadError(
+            f"download: Content-Range {s!r} does not start at a byte position"
+        ) from None
+    if n < 0:
+        raise DownloadError(
+            f"download: Content-Range {s!r} does not start at a byte position"
+        )
+    return n
+
+
 @dataclass
 class Checkpoint:
     """How many leading bytes of the partial are KNOWN to be the artifact's real
     bytes. A new owner may resume only from here. There is no field meaning
-    'trust the part I did not check', so curl's mistake is not expressible."""
+    'trust the part I did not check', so curl's mistake is not expressible.
+
+    validators say which VERSION of the artifact those bytes came from, so a
+    successor can ask the source to continue that version rather than whatever it
+    is serving today. A reader that does not know the field resumes without one,
+    which is safe rather than merely tolerable: a source that has changed then
+    answers a ranged request with the whole new file, and that answer is handled
+    by starting again from byte zero.
+    """
 
     verified_prefix: int = 0
+    validators: Validators = field(default_factory=Validators)
+
+    def to_dict(self) -> dict:
+        d: dict = {"verified_prefix": self.verified_prefix}
+        v = self.validators.to_dict()
+        if v:
+            d["validators"] = v
+        return d
+
+
+@dataclass
+class _ResumePoint:
+    """Where a resumed transfer may begin, and what it cost to get there."""
+
+    #: The first byte the next request asks for.
+    from_: int = 0
+    #: How many bytes were truncated off the tail of the partial because nothing
+    #: vouched for them. They were written by an owner that vanished before
+    #: checkpointing, so they are re-downloaded.
+    discarded: int = 0
+    #: The version the kept prefix came from, if the owner that wrote it recorded
+    #: any. Empty means the resume goes out without an If-Range, which is safe
+    #: but wastes the whole prefix if the source has changed.
+    validators: Validators = field(default_factory=Validators)
+
+
+def _resume_at(partial: str, cp: Checkpoint) -> _ResumePoint:
+    """Where this transfer may begin, given what is on disk.
+
+    A three-way test rather than a minimum, and the three answers are genuinely
+    different situations:
+
+      - The file is LONGER than the checkpoint. Normal: a checkpoint is written
+        periodically, so the file is usually ahead of it. The tail past the
+        checkpoint is unproven, so it is truncated away and counted.
+
+      - The file is exactly the checkpoint. Normal: carry on.
+
+      - The file is SHORTER than the checkpoint. Not normal, and not a resume
+        point. See FileTooShort.
+
+    A checkpoint of zero needs none of this: there is nothing to keep, so the
+    transfer starts at zero whatever is on disk. A partial that is missing
+    entirely is a fourth case and not the third one: a file that is THERE and
+    shorter than its checkpoint still has a prefix, and something other than this
+    library shortened it, so no part of that prefix can be believed. A file that
+    is not there has no prefix at all -- a temp cleaner took it, and starting from
+    zero is not a compromise, it is the correct and complete answer.
+    """
+    if cp.verified_prefix <= 0:
+        return _ResumePoint()
+
+    try:
+        st = os.stat(partial)
+    except FileNotFoundError:
+        return _ResumePoint()
+    if stat.S_ISDIR(st.st_mode):
+        raise DownloadError(f"download: {partial} is a directory, not a partial file")
+
+    size = st.st_size
+    if size < cp.verified_prefix:
+        raise FileTooShort(
+            f"download: the partial file is shorter than its checkpoint: "
+            f"{partial} holds {size} bytes, the checkpoint says "
+            f"{cp.verified_prefix} are proven"
+        )
+    return _ResumePoint(
+        from_=cp.verified_prefix,
+        discarded=size - cp.verified_prefix,
+        validators=cp.validators,
+    )
 
 
 @dataclass
@@ -307,7 +558,10 @@ def spec_of(rec: Record) -> Spec:
 
 def checkpoint_of(rec: Record) -> Checkpoint:
     cp = rec.checkpoint or {}
-    return Checkpoint(verified_prefix=int(cp.get("verified_prefix", 0) or 0))
+    return Checkpoint(
+        verified_prefix=int(cp.get("verified_prefix", 0) or 0),
+        validators=Validators.from_dict(cp.get("validators")),
+    )
 
 
 # ------------------------------------------- resuming, keyed on destination ---
@@ -354,8 +608,17 @@ class Continuation:
     disposition: str = SUBMITTED
     #: The byte the next attempt will actually start at, measured against the
     #: filesystem and not against the record. A record claiming a verified prefix
-    #: of 900 whose partial holds 100 bytes -- or none -- yields 100, or 0.
+    #: of 900 whose partial holds 100 bytes -- or none -- yields 0, because two
+    #: numbers that disagree do not average into a byte anyone proved.
     resume_from: int = 0
+    #: How many bytes on disk are being thrown away to get to resume_from: the
+    #: tail an owner wrote and never checkpointed, or the whole partial when it
+    #: disagreed with the record. They will be fetched again.
+    #:
+    #: Reported because it is the difference between a resume that saves nearly
+    #: everything and one that saves nothing, and a person watching a download
+    #: apparently start over is entitled to the number rather than a guess.
+    discarded: int = 0
     #: The locator the adopted job will fetch from, which is not necessarily the
     #: one just passed in. See source_changed.
     source: str = ""
@@ -419,9 +682,11 @@ def resume_or_submit(
         this process only once that lease lapses of its own accord, which is
         what recovers a download whose owner was killed rather than stopped.
 
-      - The resume point is the smaller of the checkpoint and the size of the
-        partial file, so a vanished or truncated partial cannot make a runner
-        ask a server to continue from bytes that are not there.
+      - The resume point is the checkpoint measured against the partial three
+        ways: longer truncates the unproven tail and counts it, equal carries
+        on, shorter has no resume point at all -- so a vanished or truncated
+        partial cannot make a runner ask a server to continue from bytes that
+        are not there. See _resume_at.
 
       - Two callers racing for one destination produce one record, because the
         record id is derived from the destination and the store refuses to
@@ -513,7 +778,7 @@ def _continuation(store, rec: Record, want: Spec, me: str) -> Continuation:
         c.note = "already downloaded, waiting to be taken delivery of"
         return c
 
-    c.resume_from = _resume_from(store, rec)
+    c.resume_from, c.discarded = _resume_from(store, rec)
     if rec.paused():
         c.disposition = PAUSED
         c.note = "an existing download to this path is paused"
@@ -524,37 +789,45 @@ def _continuation(store, rec: Record, want: Spec, me: str) -> Continuation:
         c.note = f"continuing an existing download from byte {c.resume_from}"
     else:
         c.note = "continuing an existing download from the beginning"
+    if c.discarded > 0 and c.disposition == RESUMED:
+        c.note += (
+            f"; {c.discarded} bytes on disk are unproven and will be fetched again"
+        )
     if c.source_changed:
         c.note += "; it fetches from " + c.source
     return c
 
 
-def _resume_from(store, rec: Record) -> int:
-    """What survives on disk, never what the record claims.
+def _resume_from(store, rec: Record) -> Tuple[int, int]:
+    """Where the runner will actually begin, and how much is thrown away to get
+    there -- worked out by _resume_at, the same call the runner makes, so that what
+    a person is told here and what happens next cannot drift apart.
 
     A checkpoint is written periodically, so a partial file is normally AHEAD of
-    it -- but it can also be behind it, or gone: a temp cleaner, a half-finished
-    copy onto a full disk, a user tidying up. Believing the record in that case
-    makes a runner send "Range: bytes=900-" for a file holding a hundred bytes,
-    and the answer is appended to those hundred. The file then has the right
-    length and the wrong contents, which is the one outcome worth more than a
-    re-download.
+    it, and the unproven tail is discarded. A file BEHIND its checkpoint is a
+    different situation: a temp cleaner, a half-finished copy onto a full disk, a
+    user tidying up. The old answer was to believe the smaller of the two and
+    carry on from there, which quietly turned "these two disagree" into a lower
+    offset and a resume onto bytes nothing vouches for. Now that case has no
+    resume point at all -- the partial is discarded and the transfer starts again
+    -- so this reports zero.
     """
     try:
         spec = spec_of(rec)
     except DownloadError:
-        return 0
-    proven = checkpoint_of(rec).verified_prefix
-    if proven <= 0:
-        return 0
+        return 0, 0
     partial, _ = local_sink(store, spec.sink)
     try:
-        st = os.stat(partial)
-    except OSError:
-        return 0
-    if stat.S_ISDIR(st.st_mode):
-        return 0
-    return min(st.st_size, proven)
+        rp = _resume_at(partial, checkpoint_of(rec))
+    except DownloadError:
+        # No resume point. Whatever is on disk is going, and how much of it there
+        # is is exactly what a person wants to be told.
+        try:
+            st = os.stat(partial)
+        except OSError:
+            return 0, 0
+        return (0, 0) if stat.S_ISDIR(st.st_mode) else (0, st.st_size)
+    return rp.from_, rp.discarded
 
 
 def _destination_exists(store, rec: Record) -> bool:
@@ -848,6 +1121,30 @@ def owner(program: Optional[str] = None) -> str:
     return f"{program}@{socket.gethostname()}:{os.getpid()}"
 
 
+class _Attempt:
+    """The state one transfer carries while it is running: where the byte stream
+    begins, the rolling hash over the prefix being kept, and what the source says
+    about the version it is serving.
+
+    One object rather than three arguments because restart has to move all three
+    together. A hashlib object cannot be reset, so restarting means replacing it
+    -- which is exactly why the hash cannot be a local in the caller.
+    """
+
+    def __init__(self, start: int, h, validators: "Validators"):
+        self.start = start
+        self.h = h
+        self.validators = validators
+        #: Bytes this run has appended, across every source tried.
+        self.written = 0
+
+    def restart(self) -> None:
+        self.start = 0
+        self.h = hashlib.sha256()
+        self.validators = Validators()
+        self.written = 0
+
+
 class Runner:
     """Claim a job, get the bytes, prove them, deliver them.
 
@@ -905,19 +1202,73 @@ class Runner:
 
         os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
 
-        # Resume point: the SMALLER of what the checkpoint proved and what the
-        # file actually holds. They differ after a crash, and trusting either
-        # alone is how a resumed download ends up the right length and the wrong
-        # bytes.
-        on_disk = os.path.getsize(partial) if os.path.exists(partial) else 0
-        start = min(cp.verified_prefix, on_disk)
+        # Resume point: the checkpoint, measured against what is actually on
+        # disk, by the three-way test in _resume_at. The file being AHEAD of the
+        # checkpoint is ordinary and the unproven tail is discarded; the file
+        # being BEHIND it is not ordinary and is refused outright, because a
+        # file shorter than its own checkpoint is a file something else has been
+        # editing, and there is no reason to believe the part of it that is
+        # still there.
+        try:
+            rp = _resume_at(partial, cp)
+        except FileTooShort:
+            # Discard and start over. Nothing here is recoverable, and leaving
+            # the bytes would leave the same disagreement for the next runner to
+            # find. The next attempt sees no checkpoint and no file, which is a
+            # first download.
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+
+            def clear(r: Record) -> None:
+                r.progress.done = 0
+                r.checkpoint = Checkpoint().to_dict()
+
+            try:
+                self.store.update(rec.id, epoch, clear)
+            except Exception:
+                pass
+            raise
+        start = rp.from_
         _truncate(partial, start)
 
+        # The byte stream is about to begin somewhere other than where the record
+        # says it left off -- because the unproven tail was just cut off, or
+        # because there is no checkpoint at all and whatever is on disk is being
+        # overwritten. The record's received count has to come down with it, or
+        # the next reader inherits a number no file backs up.
+        if rec.progress.done != start:
+
+            def rewind(r: Record) -> None:
+                r.progress.done = start
+                r.checkpoint = Checkpoint(
+                    verified_prefix=start, validators=rp.validators
+                ).to_dict()
+
+            try:
+                self.store.update(rec.id, epoch, rewind)
+            except Exception:
+                pass
+
+        # Rebuilt rather than inherited, so every way start can be zero -- no
+        # checkpoint, a truncate to nothing, a partial that vanished -- gets an
+        # empty hash without anybody having to remember to reset one. The one
+        # place that cannot work that way is a stream that restarts once the
+        # transfer is already under way; see _restart.
         h = hashlib.sha256()
         if start:
             _hash_prefix(partial, start, h)
 
-        total = self._fetch(rec, spec, epoch, partial, h, start)
+        # at follows the transfer: where it begins, the rolling hash over the
+        # prefix being kept, and what the source says about the version it is
+        # serving. It is one mutable object rather than three arguments because a
+        # restart has to move all three together, and the final checkpoint below
+        # has to record the version that was actually delivered rather than the
+        # one this attempt started out believing in.
+        at = _Attempt(start=start, h=h, validators=rp.validators)
+        total = self._fetch(rec, spec, epoch, partial, at)
+        h = at.h
 
         if spec.artifact.size and total != spec.artifact.size:
             raise ShortTransfer(
@@ -936,7 +1287,7 @@ class Runner:
 
                 def reset(r: Record) -> None:
                     r.progress.done = 0
-                    r.checkpoint = {"verified_prefix": 0}
+                    r.checkpoint = Checkpoint().to_dict()
 
                 self.store.update(rec.id, epoch, reset)
                 raise DigestMismatch(
@@ -951,7 +1302,11 @@ class Runner:
             r.progress.done = total
             r.state = TRANSFERRED
             r.error = ""
-            r.checkpoint = {"verified_prefix": total}
+            # The version that was actually delivered, not the one this attempt
+            # started out believing in.
+            r.checkpoint = Checkpoint(
+                verified_prefix=total, validators=at.validators
+            ).to_dict()
 
         self.store.update(rec.id, epoch, done)
 
@@ -991,44 +1346,141 @@ class Runner:
     # -- transport ---------------------------------------------------------
 
     def _fetch(
-        self, rec: Record, spec: Spec, epoch: int, partial: str, h, start: int
+        self, rec: Record, spec: Spec, epoch: int, partial: str, at: "_Attempt"
     ) -> int:
         ordered = sorted(spec.sources, key=lambda s: s.priority)
         last: Optional[Exception] = None
         for src in ordered:
+            began = at.start
             try:
-                return self._fetch_one(rec, src, epoch, partial, h, start)
+                return self._fetch_one(rec, src, epoch, partial, at)
             except Exception as e:  # try the next source; mirrors exist for this
                 last = e
+                # A failed source may still have contributed bytes, and those
+                # bytes are already in the rolling hash. Handing the next source
+                # the same offset would make it write them a second time while
+                # the hash counts them twice, so the digest fails on a transfer
+                # that was merely interrupted. Stop instead.
+                if at.start != began or at.written:
+                    raise
         raise last or NoSource("download: no source could be used")
 
     def _fetch_one(
-        self, rec: Record, src: Source, epoch: int, partial: str, h, start: int
+        self, rec: Record, src: Source, epoch: int, partial: str, at: "_Attempt"
     ) -> int:
         if src.scheme in ("http", "https"):
-            return self._fetch_http(rec, src, epoch, partial, h, start)
+            return self._fetch_http(rec, src, epoch, partial, at)
         if src.scheme in ("file", "smb"):
-            return self._fetch_file(rec, src, epoch, partial, h, start)
+            return self._fetch_file(rec, src, epoch, partial, at)
         raise NoSource(f"download: no transport for scheme {src.scheme!r}")
 
-    def _fetch_http(
-        self, rec: Record, src: Source, epoch: int, partial: str, h, start: int
-    ) -> int:
+    def _open(self, src: Source, at: "_Attempt"):
+        """The GET, ranged when there is a prefix to continue."""
         req = urllib.request.Request(src.locator)
         for k, v in credentials(src.attrs.get(CREDENTIAL_ATTR, "")).items():
             req.add_header(k, v)
-        if start:
-            req.add_header("Range", f"bytes={start}-")
+        if at.start:
+            req.add_header("Range", f"bytes={at.start}-")
 
-        with urllib.request.urlopen(req) as resp:
-            # A 200 answering a ranged request means the server sent the whole
-            # file. Appending it produces a file of plausible length and
-            # impossible content.
-            if start and resp.status != 206:
-                raise RangeIgnored(
-                    f"download: asked for bytes from {start}, server answered "
-                    f"{resp.status} with the whole file"
-                )
+            # Say which version the bytes on disk came from. Without this a
+            # server whose file has changed answers the range honestly, with a
+            # valid range of a DIFFERENT file, and nothing in the response says
+            # so. With it, the server answers 206 only if the file is unchanged
+            # and 200 -- the whole new file -- if it is not, which is the case
+            # below that starts again.
+            if_range = at.validators.if_range()
+            if if_range:
+                req.add_header("If-Range", if_range)
+
+            # Offsets on this side are counted after decoding and the server's
+            # are counted before it, so a range over a compressed body asks for a
+            # byte position that means something different at each end. Asking
+            # for the identity encoding makes the two agree. urllib, unlike Go's
+            # net/http, does not add an Accept-Encoding of its own, so this is
+            # here to stop a server compressing on its own initiative rather than
+            # to undo something the client did.
+            req.add_header("Accept-Encoding", "identity")
+        return urllib.request.urlopen(req)
+
+    def _fetch_http(
+        self, rec: Record, src: Source, epoch: int, partial: str, at: "_Attempt"
+    ) -> int:
+        """Get the bytes, and decide what the server's answer to a ranged request
+        actually means.
+
+        Three answers are possible and only one of them is "here is the rest of
+        your file". The other two -- the whole file from zero, and a range
+        starting somewhere other than where we asked -- are what a server sends
+        when the artifact it holds is no longer the artifact the bytes on disk
+        came from. Neither is a transport error, and neither may be appended.
+        """
+        ranged = at.start > 0
+        try:
+            resp = self._open(src, at)
+        except urllib.error.HTTPError as e:
+            # The offset is past the end of what the server holds. With an
+            # If-Range that matched, that means the artifact is the version these
+            # bytes came from and is nonetheless shorter than the prefix on disk
+            # -- so the prefix cannot be a prefix of it. Nothing is recoverable
+            # from that, and the checkpoint would produce the same 416 on every
+            # retry until somebody deleted the partial by hand.
+            #
+            # urllib raises on a 416 rather than returning it, which Go does not;
+            # the decision is the same either way.
+            if not (ranged and e.code == 416):
+                raise
+            e.close()
+            resp = self._restart_whole(rec, epoch, partial, at, src)
+
+        try:
+            if ranged and resp.status == 206:
+                try:
+                    got = _content_range_start(resp.headers.get("Content-Range"))
+                    misplaced = got != at.start
+                    why = (
+                        None
+                        if not misplaced
+                        else DownloadError(
+                            f"download: asked for bytes from {at.start}, got a "
+                            f"range starting at {got}"
+                        )
+                    )
+                except DownloadError as e:
+                    misplaced, why = True, e
+                if misplaced:
+                    # A range that does not begin where we asked is not a partial
+                    # answer to this request. Its bytes belong at an offset nobody
+                    # asked about, and appending them puts the artifact's own
+                    # content at the wrong place in the file -- invisible to a
+                    # length check and invisible to a transport error. Do not
+                    # trust it; start again.
+                    resp.close()
+                    resp = self._restart_whole(rec, epoch, partial, at, src, why)
+
+            elif ranged and resp.status == 200:
+                # The server answered a ranged request with the whole file. With
+                # an If-Range on the request that is the server saying, in the
+                # only way HTTP has, "the file you have is not the file I have --
+                # here is mine". Without one it is a server that does not do
+                # ranges. Either way the body is a complete artifact starting at
+                # byte zero, and either way appending it to the prefix on disk
+                # splices two files together at an arbitrary offset.
+                #
+                # So rewind and take it -- this response, not a second request.
+                # It is not an error and the transfer proceeds normally; the
+                # earlier bytes are simply wasted. Chromium reaches the same
+                # conclusion in download_utils.cc, resetting the offset and
+                # clearing the hash state rather than failing the download.
+                self._restart(rec, epoch, partial, at)
+
+            elif resp.status != 200:
+                raise DownloadError(f"download: {src.locator}: {resp.status}")
+
+            # What this response says about the version being served, recorded
+            # now so that the next attempt can ask for the same one. On a first
+            # download this is the only chance to learn it; on a resume it
+            # confirms it.
+            at.validators = strong_validators(resp.headers)
 
             # Worked out BEFORE the copy. Content-Length on a 200 is the whole
             # artifact; on a 206 it is what remains, so the offset has to be
@@ -1037,37 +1489,98 @@ class Runner:
             try:
                 length = int(resp.headers.get("Content-Length") or 0)
                 if length > 0:
-                    declared = start + length
+                    declared = at.start + length
             except ValueError:
                 declared = 0
 
-            total = self._drain(rec, resp, epoch, partial, h, start)
+            total = self._drain(rec, resp, epoch, partial, at)
+        finally:
+            resp.close()
 
-            # The transport's own promise, checked even when the spec makes
-            # none. A spec without a size or a digest is the normal case for a
-            # bare URL out of a model list, and without this there was NOTHING
-            # to catch a truncated transfer: the partial was delivered under the
-            # final name and presented to the application as a finished
-            # download. That is precisely the failure this layer exists to
-            # refuse, reproduced by the layer itself.
-            #
-            # Go gets this for free -- its HTTP client errors on a body shorter
-            # than Content-Length -- and urllib does not, which is why this
-            # cannot be left to the language underneath.
-            if declared and total != declared:
-                raise ShortTransfer(
-                    f"download: got {total} bytes, the server said {declared}"
-                )
-            return total
+        # The transport's own promise, checked even when the spec makes none. A
+        # spec without a size or a digest is the normal case for a bare URL out
+        # of a model list, and without this there was NOTHING to catch a
+        # truncated transfer: the partial was delivered under the final name and
+        # presented to the application as a finished download. That is precisely
+        # the failure this layer exists to refuse, reproduced by the layer
+        # itself.
+        #
+        # Go gets this for free -- its HTTP client errors on a body shorter than
+        # Content-Length -- and urllib does not, which is why this cannot be left
+        # to the language underneath.
+        if declared and total != declared:
+            raise ShortTransfer(
+                f"download: got {total} bytes, the server said {declared}"
+            )
+        return total
+
+    def _restart_whole(
+        self,
+        rec: Record,
+        epoch: int,
+        partial: str,
+        at: "_Attempt",
+        src: Source,
+        why: Optional[Exception] = None,
+    ):
+        """Throw the prefix away and ask for the artifact from byte zero.
+
+        Used where the answer to the ranged request cannot be written at the
+        offset it was asked for AND is not itself a whole artifact, so a second
+        request is the only way to get one.
+        """
+        self._restart(rec, epoch, partial, at)
+        resp = self._open(src, at)  # no Range this time: the whole file
+        if resp.status != 200:
+            resp.close()
+            # Say what drove us here as well as what went wrong now. Without the
+            # first half the error reads as an ordinary bad status and hides the
+            # fact that a prefix was just thrown away to get it.
+            raise DownloadError(
+                f"download: {src.locator}: {resp.status}"
+                + (f" (restarting after {why})" if why else "")
+            )
+        return resp
+
+    def _restart(self, rec: Record, epoch: int, partial: str, at: "_Attempt") -> None:
+        """The byte stream begins again at zero, with a partial already on disk
+        and a rolling hash already part-filled.
+
+        A source has told us the artifact it holds is not the one these bytes
+        came from, so everything derived from those bytes goes: the file back to
+        nothing, the hash back to empty, the recorded prefix and the validators
+        that identified it back to zero. The offset goes with them, so that the
+        checkpoints written from here on and any remaining source all agree the
+        transfer now starts at zero.
+        """
+        if os.path.exists(partial):
+            with open(partial, "r+b") as f:
+                f.truncate(0)
+        at.restart()
+
+        def reset(r: Record) -> None:
+            r.progress.done = 0
+            r.checkpoint = Checkpoint().to_dict()
+
+        try:
+            self.store.update(rec.id, epoch, reset)
+        except Exception:
+            # A store that will not take the checkpoint must not stop the
+            # transfer that is about to write the bytes it describes.
+            pass
 
     def _fetch_file(
-        self, rec: Record, src: Source, epoch: int, partial: str, h, start: int
+        self, rec: Record, src: Source, epoch: int, partial: str, at: "_Attempt"
     ) -> int:
         with open(src.locator, "rb") as f:
-            f.seek(start)
-            return self._drain(rec, f, epoch, partial, h, start)
+            f.seek(at.start)
+            return self._drain(rec, f, epoch, partial, at)
 
-    def _drain(self, rec: Record, reader, epoch: int, partial: str, h, start: int) -> int:
+    def _drain(
+        self, rec: Record, reader, epoch: int, partial: str, at: "_Attempt"
+    ) -> int:
+        start = at.start
+        h = at.h
         total = start
         since_persist = 0
         last_persist = time.monotonic()
@@ -1081,6 +1594,7 @@ class Runner:
                     out.write(chunk)
                     h.update(chunk)
                     total += len(chunk)
+                    at.written += len(chunk)
                     since_persist += len(chunk)
 
                     now = time.monotonic()
@@ -1090,7 +1604,7 @@ class Runner:
                     ):
                         out.flush()
                         os.fsync(out.fileno())
-                        self._persist(rec.id, epoch, total)
+                        self._persist(rec.id, epoch, total, at.validators)
                         since_persist = 0
                         last_persist = now
             finally:
@@ -1101,23 +1615,24 @@ class Runner:
                 #
                 # Periodic checkpointing alone is not enough, and the gap is
                 # worst exactly where it is least expected: a transfer that dies
-                # before the FIRST checkpoint has proven nothing, so the resume
-                # point is min(0, what is on disk) = 0, and a partial file
-                # sitting right there is fetched again from zero. On a fast link
-                # that is every download under 8 MiB; on a slow one it is the
-                # first five seconds of a 40 GB model.
+                # before the FIRST checkpoint has proven nothing, so a partial
+                # file sitting right there is fetched again from zero. On a fast
+                # link that is every download under 8 MiB; on a slow one it is
+                # the first five seconds of a 40 GB model.
                 out.flush()
                 os.fsync(out.fileno())
                 if total > start:
                     try:
-                        self._persist(rec.id, epoch, total)
+                        self._persist(rec.id, epoch, total, at.validators)
                     except Exception:
                         # A store that will not take the checkpoint must not
                         # replace the real error with its own.
                         pass
         return total
 
-    def _persist(self, job_id: str, epoch: int, done: int) -> None:
+    def _persist(
+        self, job_id: str, epoch: int, done: int, validators: "Validators"
+    ) -> None:
         """Write down what has been proven, and renew the lease on the same beat.
 
         Renewal rides this callback deliberately: without it a transfer that is
@@ -1128,7 +1643,13 @@ class Runner:
         def mutate(r: Record) -> None:
             r.progress.done = done
             r.state = RUNNING
-            r.checkpoint = {"verified_prefix": done}
+            # The validators go down with the prefix, in the same write. A
+            # checkpoint that records how far it got but not WHICH version it
+            # got that far through is the checkpoint this whole change exists to
+            # stop existing.
+            r.checkpoint = Checkpoint(
+                verified_prefix=done, validators=validators
+            ).to_dict()
 
         try:
             self.store.renew(job_id, epoch, self.lease_ttl)

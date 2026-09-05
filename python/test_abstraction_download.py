@@ -5,6 +5,7 @@ the same assertions is what makes this an abstraction rather than a file format
 with one reader.
 """
 
+import email.message
 import hashlib
 import http.server
 import os
@@ -26,7 +27,7 @@ for _candidate in (
         sys.path.insert(0, _candidate)
         break
 
-from abstraction_job import FileStore, TRANSFERRED, COMPLETE
+from abstraction_job import FileStore, Record, TRANSFERRED, COMPLETE
 import abstraction_download as dl
 
 
@@ -81,13 +82,18 @@ class DownloadTest(unittest.TestCase):
             sink=dl.Sink(final=final),
         )
 
-    def stage(self, job_id, on_disk, proven):
+    def stage(self, job_id, on_disk, proven, validators=None):
         """Put a partial on disk and a checkpoint in the record.
+
+        validators say which version those bytes came from, which is what a
+        current owner records and what the resume then sends back. Staging
+        without them tests a record no owner would write.
 
         Asserting the staging took is not paranoia: an earlier version of the Go
         equivalent staged with a 1 ms lease, the setup update was refused, the
         error was ignored, and two resume tests passed while testing nothing.
         """
+        v = validators or dl.Validators()
         rec = self.store.load(job_id)
         partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
         os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
@@ -96,13 +102,17 @@ class DownloadTest(unittest.TestCase):
         held = self.store.claim(job_id, "stager", 30)
 
         def mutate(r):
-            r.checkpoint = {"verified_prefix": proven}
+            r.progress.done = proven
+            r.checkpoint = dl.Checkpoint(
+                verified_prefix=proven, validators=v
+            ).to_dict()
 
         self.store.update(job_id, held.lease.epoch, mutate)
         self.store.release(job_id, held.lease.epoch)
+        staged = dl.checkpoint_of(self.store.load(job_id))
         self.assertEqual(
-            dl.checkpoint_of(self.store.load(job_id)).verified_prefix,
-            proven,
+            (staged.verified_prefix, staged.validators),
+            (proven, v),
             "staging did not take, so this test would prove nothing",
         )
         return partial
@@ -141,10 +151,15 @@ class DownloadTest(unittest.TestCase):
         )
         self.assertEqual(dl.checkpoint_of(rec).verified_prefix, 0)
 
-    def test_refuses_a_server_that_ignores_range(self):
-        """Ask for bytes from 20,000, get 200 and the whole file, append it, and
-        you have a file of plausible length and impossible content. curl -C -
-        does exactly this."""
+    def test_restarts_when_the_server_ignores_range(self):
+        """Ask for bytes from 20,000, get 200 and the whole file. Appending it
+        gives a file of plausible length and impossible content -- curl -C - does
+        exactly this.
+
+        The answer is not to fail: the response IS a complete, valid artifact. So
+        the prefix is thrown away and it is taken from byte zero, which is what
+        the delivered content proves happened.
+        """
         body, digest = payload(64 * 1024)
         srv, url = serve(body, ignore_range=True)
         self.addCleanup(srv.server_close)
@@ -153,8 +168,43 @@ class DownloadTest(unittest.TestCase):
         jid = dl.submit(self.store, self.spec(url, digest, len(body)))
         self.stage(jid, body[:20000], 20000)
 
-        with self.assertRaises(dl.RangeIgnored):
+        dl.Runner(self.store).run(jid)
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(jid)).sink)
+        with open(final, "rb") as f:
+            self.assertEqual(
+                f.read(), body, "the 200 was appended to the prefix on disk"
+            )
+
+    def test_a_partial_shorter_than_its_record_is_refused(self):
+        """The record claims more was proven than the file holds. That is not a
+        resume point at a lower offset -- it is a file something other than this
+        library has been writing to -- so the attempt fails, the partial is
+        thrown away, and the transfer starts again from zero."""
+        body, digest = payload(64 * 1024)
+        srv, url = serve(body)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        jid = dl.submit(self.store, self.spec(url, digest, len(body)))
+        partial = self.stage(jid, body[:1000], 50000)  # a lie the file cannot back up
+
+        with self.assertRaises(dl.FileTooShort):
             dl.Runner(self.store).run(jid)
+        self.assertFalse(
+            os.path.exists(partial),
+            "the disagreeing partial was kept; the next runner would resume onto it",
+        )
+        self.assertEqual(
+            dl.checkpoint_of(self.store.load(jid)).verified_prefix,
+            0,
+            "the checkpoint still claims bytes are proven",
+        )
+
+        # And the restart it asked for actually works.
+        dl.Runner(self.store).run(jid)
+        _, final = dl.local_sink(self.store, dl.spec_of(self.store.load(jid)).sink)
+        with open(final, "rb") as f:
+            self.assertEqual(f.read(), body)
 
     def test_resumes_from_what_was_proven_not_what_is_on_disk(self):
         """The dead process wrote more than it checkpointed. Nothing vouches for
@@ -287,9 +337,10 @@ class ResumeTest(unittest.TestCase):
             self.store, spec, owner_name=owner_name or self.OWNER
         )
 
-    def stage(self, job_id, body, on_disk, proven):
-        """What a killed download leaves: bytes on disk, and a record saying how
-        many of them were proven."""
+    def stage(self, job_id, body, on_disk, proven, validators=None):
+        """What a killed download leaves: bytes on disk, a record saying how many
+        of them were proven, and which version they came from."""
+        v = validators or dl.Validators()
         rec = self.store.load(job_id)
         partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
         if on_disk is not None:
@@ -299,7 +350,10 @@ class ResumeTest(unittest.TestCase):
         held = self.store.claim(job_id, "stager", 30)
 
         def mutate(r):
-            r.checkpoint = {"verified_prefix": proven}
+            r.progress.done = proven
+            r.checkpoint = dl.Checkpoint(
+                verified_prefix=proven, validators=v
+            ).to_dict()
 
         self.store.update(job_id, held.lease.epoch, mutate)
         self.store.release(job_id, held.lease.epoch)
@@ -416,15 +470,33 @@ class ResumeTest(unittest.TestCase):
             self.assertEqual(f.read(), body)
 
     # The same, one step less obvious: the file is there but shorter than the
-    # checkpoint says.
-    def test_a_short_partial_resumes_from_the_file(self):
+    # checkpoint says. That is not a resume point at a lower offset -- something
+    # other than this library shortened the file, so no part of the prefix that
+    # is still there can be believed. It is reported as no resume point at all,
+    # and as the bytes it costs.
+    def test_a_short_partial_has_no_resume_point(self):
         body, _ = payload(32 * 1024)
         spec = self.spec("http://example.invalid/e.bin", "e.bin")
         first, _ = self.call(spec)
         self.stage(first, body, 1024, 20 * 1024)
 
         _, c = self.call(spec)
-        self.assertEqual(c.resume_from, 1024)
+        self.assertEqual(
+            c.resume_from, 0, "a file shorter than its checkpoint was resumed onto"
+        )
+        self.assertEqual(c.discarded, 1024)
+
+    # The ordinary case, and the other half of the three-way test: the dead owner
+    # wrote past its last checkpoint. The unproven tail is counted, not kept.
+    def test_an_unproven_tail_is_reported_as_discarded(self):
+        body, _ = payload(32 * 1024)
+        spec = self.spec("http://example.invalid/e2.bin", "e2.bin")
+        first, _ = self.call(spec)
+        self.stage(first, body, 5000, 4000)
+
+        _, c = self.call(spec)
+        self.assertEqual(c.resume_from, 4000)
+        self.assertEqual(c.discarded, 1000)
 
     # A URL is not the identity; the destination is. Continuing anyway is a
     # choice, so the caller is told which source the job it was handed fetches.
@@ -500,6 +572,434 @@ class ResumeTest(unittest.TestCase):
     # The Go test of the same name pins the same string.
     def test_the_id_for_a_destination_is_pinned(self):
         self.assertEqual(dl._destination_id("/models/x.gguf"), "dest-01ec6db371a234af")
+
+
+class VersionedServer(http.server.BaseHTTPRequestHandler):
+    """Serves whatever body it currently holds under a validator, and behaves the
+    way RFC 7233 says a server should: a Range with an If-Range that does not
+    match the current entity is answered with the whole current entity and a 200,
+    not with a range of it.
+
+    Every request's headers are kept, so a test can assert on the wire rather
+    than infer from how many bytes arrived.
+    """
+
+    body = b""
+    etag = ""
+    last_modified = ""
+    seen = None
+
+    def _send(self, status, chunk, extra=()):
+        self.send_response(status)
+        if self.etag:
+            self.send_header("ETag", self.etag)
+        if self.last_modified:
+            self.send_header("Last-Modified", self.last_modified)
+        self.send_header("Accept-Ranges", "bytes")
+        for k, v in extra:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(chunk)))
+        self.end_headers()
+        self.wfile.write(chunk)
+
+    def do_GET(self):
+        self.seen.append(self.headers)
+        rng = self.headers.get("Range")
+        if_range = self.headers.get("If-Range")
+        current = [v for v in (self.etag, self.last_modified) if v]
+        if rng and (if_range is None or if_range in current):
+            start = int(rng.split("=")[1].split("-")[0])
+            if start >= len(self.body):
+                self._send(
+                    416, b"", [("Content-Range", "bytes */%d" % len(self.body))]
+                )
+                return
+            self._send(
+                206,
+                self.body[start:],
+                [
+                    (
+                        "Content-Range",
+                        "bytes %d-%d/%d" % (start, len(self.body) - 1, len(self.body)),
+                    )
+                ],
+            )
+            return
+        # The client is holding bytes from a version this is no longer serving,
+        # or asked for no range at all. Give it the current one, whole.
+        self._send(200, self.body)
+
+    def log_message(self, *a):
+        pass
+
+
+def versioned_serve(body, etag="", last_modified=""):
+    seen = []
+    handler = type(
+        "H",
+        (VersionedServer,),
+        {"body": body, "etag": etag, "last_modified": last_modified, "seen": seen},
+    )
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/blob.bin" % srv.server_port, seen
+
+
+def scripted_serve(handle):
+    """A server whose whole behaviour is one function of (headers) -> (status,
+    body, extra headers). For the answers a well-behaved server never gives."""
+    seen = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers)
+            status, chunk, extra = handle(self.headers)
+            self.send_response(status)
+            for k, v in extra:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(chunk)))
+            self.end_headers()
+            self.wfile.write(chunk)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/blob.bin" % srv.server_port, seen
+
+
+class ValidatorTest(unittest.TestCase):
+    """Whether the bytes a server is offering now are the same artifact as the
+    bytes already on disk.
+
+    These mirror the Go tests of the same names. A resume that cannot say which
+    version it is continuing invites a valid range of a different file, and the
+    result is a file of exactly the right length holding two versions spliced
+    together.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileStore(self.dir.name)
+
+    def spec(self, url, digest="", size=0):
+        return dl.Spec(
+            artifact=dl.Artifact(digest=digest, size=size),
+            sources=[dl.Source(scheme="http", locator=url)],
+            sink=dl.Sink(final="out.bin"),
+        )
+
+    def stage(self, job_id, prefix, validators):
+        rec = self.store.load(job_id)
+        partial, _ = dl.local_sink(self.store, dl.spec_of(rec).sink)
+        os.makedirs(os.path.dirname(partial) or ".", exist_ok=True)
+        with open(partial, "wb") as f:
+            f.write(prefix)
+        held = self.store.claim(job_id, "dead-owner", 30)
+
+        def mutate(r):
+            r.progress.done = len(prefix)
+            r.checkpoint = dl.Checkpoint(
+                verified_prefix=len(prefix), validators=validators
+            ).to_dict()
+
+        self.store.update(job_id, held.lease.epoch, mutate)
+        self.store.release(job_id, held.lease.epoch)
+        staged = dl.checkpoint_of(self.store.load(job_id))
+        self.assertEqual(
+            (staged.verified_prefix, staged.validators),
+            (len(prefix), validators),
+            "staging did not take, so this test would prove nothing",
+        )
+        return partial
+
+    def final(self, job_id):
+        _, f = dl.local_sink(self.store, dl.spec_of(self.store.load(job_id)).sink)
+        with open(f, "rb") as fh:
+            return fh.read()
+
+    # The bug this class exists for.
+    #
+    # The artifact changed between attempts and the new version is the same
+    # length as the old, so nothing about the resulting file's SIZE can reveal
+    # what happened. The download carries no digest either, which is the ordinary
+    # case for a bare URL. The only thing that can catch it is the exchange
+    # itself: the resume says which version it is continuing, the server says
+    # that is not the version it has, and the client starts again.
+    #
+    # Asserted on content. A length assertion passes on the corrupt file.
+    def test_a_changed_file_is_not_spliced_onto_the_old_one(self):
+        v1 = b"A" * (40 * 1024)
+        v2 = b"B" * (40 * 1024)
+        srv, url, _ = versioned_serve(v2, etag='"v2"')  # already changed
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        jid = dl.submit(self.store, self.spec(url))
+        self.stage(jid, v1[:1000], dl.Validators(etag='"v1"'))
+
+        dl.Runner(self.store).run(jid)
+
+        got = self.final(jid)
+        self.assertEqual(len(got), len(v2), "the delivered file is not even the size")
+        self.assertEqual(
+            got,
+            v2,
+            "the delivered file is not the current artifact: the old prefix was "
+            "spliced onto the new file",
+        )
+
+        # And the record now describes what was actually delivered, so the NEXT
+        # resume continues v2 rather than v1.
+        cp = dl.checkpoint_of(self.store.load(jid))
+        self.assertEqual(cp.verified_prefix, len(v2))
+        self.assertEqual(
+            cp.validators.etag,
+            '"v2"',
+            "the checkpoint does not name the version that was delivered",
+        )
+
+    # The header that makes the case above possible is actually on the wire,
+    # carrying the stored ETag, and it does not stop the resume being a resume
+    # when the file has NOT changed.
+    def test_resume_sends_if_range(self):
+        body, digest = payload(40 * 1024)
+        srv, url, seen = versioned_serve(body, etag='"v1"')
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        jid = dl.submit(self.store, self.spec(url, digest, len(body)))
+        self.stage(jid, body[: 12 * 1024], dl.Validators(etag='"v1"'))
+
+        dl.Runner(self.store).run(jid)
+
+        self.assertEqual(
+            len(seen), 1, "an unchanged file needs no restart, so one request"
+        )
+        req = seen[0]
+        self.assertEqual(req.get("Range"), "bytes=12288-")
+        self.assertEqual(
+            req.get("If-Range"),
+            '"v1"',
+            "a resume that does not say which version it is continuing invites a "
+            "range of a different file",
+        )
+        # Byte offsets are counted after decoding here and before it at the
+        # server, so a ranged request must not be answered with a compressed body.
+        self.assertEqual(req.get("Accept-Encoding"), "identity")
+        self.assertEqual(self.final(jid), body)
+
+    # W/"..." means the server is asserting that two responses are equivalent,
+    # not that they are byte-identical -- which is exactly the distinction a
+    # byte-range resume depends on. Recording one would buy an If-Range that a
+    # changed file could still satisfy: false confidence, worse than none.
+    def test_a_weak_etag_is_neither_stored_nor_used(self):
+        body, digest = payload(8 * 1024)
+        last_modified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        srv, url, seen = versioned_serve(
+            body, etag='W/"weak"', last_modified=last_modified
+        )
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        first = dl.submit(self.store, self.spec(url, digest, len(body)))
+        dl.Runner(self.store).run(first)
+
+        cp = dl.checkpoint_of(self.store.load(first))
+        self.assertEqual(cp.validators.etag, "", "a weak ETag was recorded")
+        self.assertEqual(
+            cp.validators.last_modified,
+            last_modified,
+            "Last-Modified was not recorded in place of the unusable ETag",
+        )
+
+        # And on the wire: whatever a resume sends, it is never the weak tag.
+        second = dl.submit(
+            self.store,
+            dl.Spec(
+                artifact=dl.Artifact(digest=digest, size=len(body)),
+                sources=[dl.Source(scheme="http", locator=url)],
+                sink=dl.Sink(final="out2.bin"),
+            ),
+        )
+        self.stage(second, body[: 2 * 1024], cp.validators)
+        dl.Runner(self.store).run(second)
+
+        for req in seen:
+            self.assertNotIn(
+                "w/",
+                (req.get("If-Range") or "").lower(),
+                "If-Range carried a weak validator",
+            )
+        self.assertEqual(
+            seen[-1].get("If-Range"),
+            last_modified,
+            "the resume did not send the Last-Modified it had stored",
+        )
+
+    # The same rule at the unit it lives in, including the forms a real server
+    # writes.
+    def test_strong_validators(self):
+        lm = "Wed, 21 Oct 2015 07:28:00 GMT"
+        cases = [
+            ("strong etag wins", {"ETag": '"abc"', "Last-Modified": lm},
+             dl.Validators(etag='"abc"')),
+            ("weak etag is dropped", {"ETag": 'W/"abc"', "Last-Modified": lm},
+             dl.Validators(last_modified=lm)),
+            ("weak in lower case too", {"ETag": 'w/"abc"'}, dl.Validators()),
+            ("unquoted is not an etag", {"ETag": "abc"}, dl.Validators()),
+            ("a date that is not a date", {"Last-Modified": "yesterday"},
+             dl.Validators()),
+            ("nothing at all", {}, dl.Validators()),
+        ]
+        for name, headers, want in cases:
+            with self.subTest(name):
+                msg = email.message.Message()
+                for k, v in headers.items():
+                    msg[k] = v
+                self.assertEqual(dl.strong_validators(msg), want)
+
+        self.assertEqual(
+            dl.Validators(etag='"a"', last_modified=lm).if_range(),
+            '"a"',
+            "if_range preferred the Last-Modified over the ETag",
+        )
+        self.assertEqual(dl.Validators(last_modified=lm).if_range(), lm)
+        self.assertEqual(dl.Validators().if_range(), "")
+        self.assertTrue(dl.Validators().empty())
+
+    # The status says partial content and the Content-Range says it begins
+    # somewhere other than where we asked. Those bytes are the artifact's, but
+    # they belong at an offset nobody asked about, so writing them where the
+    # request expected them puts real content in the wrong place -- a corruption
+    # no length check and no transport error can see.
+    def test_a_206_at_the_wrong_offset_restarts(self):
+        body, digest = payload(32 * 1024)
+
+        def handle(headers):
+            if not headers.get("Range"):
+                return 200, body, []
+            # Asked for bytes from N; answers with the whole file and calls it a
+            # range starting at zero. Servers behind rewriting proxies do this.
+            return (
+                206,
+                body,
+                [("Content-Range", "bytes 0-%d/%d" % (len(body) - 1, len(body)))],
+            )
+
+        srv, url, seen = scripted_serve(handle)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        jid = dl.submit(self.store, self.spec(url, digest, len(body)))
+        self.stage(jid, body[: 4 * 1024], dl.Validators(etag='"v1"'))
+
+        dl.Runner(self.store).run(jid)
+        self.assertEqual(
+            self.final(jid), body, "a misplaced range was trusted and appended"
+        )
+        self.assertEqual(
+            [bool(r.get("Range")) for r in seen],
+            [True, False],
+            "want a ranged request and then a whole-file restart",
+        )
+
+    # The stored offset is past the end of what the server now holds. Left alone
+    # the checkpoint produces the same 416 on every retry, so the job could never
+    # finish without somebody deleting the partial by hand.
+    def test_a_416_restarts(self):
+        body, digest = payload(8 * 1024)
+        srv, url, seen = versioned_serve(body, etag='"v1"')
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        jid = dl.submit(self.store, self.spec(url, digest, len(body)))
+        # A prefix longer than the artifact the server now serves.
+        self.stage(jid, b"\x00" * (16 * 1024), dl.Validators(etag='"v1"'))
+
+        dl.Runner(self.store).run(jid)
+        self.assertEqual(self.final(jid), body)
+        self.assertEqual(
+            [bool(r.get("Range")) for r in seen],
+            [True, False],
+            "want a ranged request answered 416 and then a whole-file restart",
+        )
+
+    # The forms the header arrives in, including the ones that must not be read
+    # as a starting byte.
+    def test_content_range_start(self):
+        ok = {
+            "bytes 0-99/100": 0,
+            "bytes 1000-40959/*": 1000,
+            "  bytes 12-99/100  ": 12,
+            "BYTES 7-99/100": 7,
+            "bytes 500-999/123456": 500,
+        }
+        for text, want in ok.items():
+            self.assertEqual(dl._content_range_start(text), want, text)
+        for text in (
+            "",
+            None,
+            "items 0-99/100",
+            "bytes */100",
+            "bytes 0-99",
+            "bytes x-99/100",
+            "bytes -99/100",
+        ):
+            with self.assertRaises(dl.DownloadError, msg=repr(text)):
+                dl._content_range_start(text)
+
+    # The three-way test on its own: ahead of the checkpoint, exactly at it,
+    # behind it, and gone.
+    def test_resume_at(self):
+        def write(name, n):
+            p = os.path.join(self.dir.name, name)
+            with open(p, "wb") as f:
+                f.write(b"\x00" * n)
+            return p
+
+        v = dl.Validators(etag='"v1"')
+
+        rp = dl._resume_at(write("ahead.bin", 1500), dl.Checkpoint(1000, v))
+        self.assertEqual((rp.from_, rp.discarded, rp.validators), (1000, 500, v))
+
+        rp = dl._resume_at(write("equal.bin", 1000), dl.Checkpoint(1000))
+        self.assertEqual((rp.from_, rp.discarded), (1000, 0))
+
+        with self.assertRaises(dl.FileTooShort):
+            dl._resume_at(write("short.bin", 900), dl.Checkpoint(1000))
+
+        # Missing is not short: there is no prefix to disbelieve, so this starts
+        # over rather than failing.
+        gone = os.path.join(self.dir.name, "gone.bin")
+        self.assertEqual(dl._resume_at(gone, dl.Checkpoint(1000)).from_, 0)
+        # No checkpoint, no questions: a first attempt over whatever is there.
+        self.assertEqual(dl._resume_at(write("any.bin", 77), dl.Checkpoint()).from_, 0)
+
+    # The record is the contract. A checkpoint written here must be the one Go
+    # reads, field names included, or a job started by one and continued by the
+    # other resumes with no validator at all.
+    def test_the_checkpoint_names_the_fields_go_reads(self):
+        cp = dl.Checkpoint(
+            verified_prefix=1000,
+            validators=dl.Validators(etag='"v1"', last_modified="x"),
+        )
+        self.assertEqual(
+            cp.to_dict(),
+            {
+                "verified_prefix": 1000,
+                "validators": {"etag": '"v1"', "last_modified": "x"},
+            },
+        )
+        # Absent rather than empty, matching Go's omitempty, so a record written
+        # here and one written there are the same bytes.
+        self.assertEqual(dl.Checkpoint(5).to_dict(), {"verified_prefix": 5})
+
+        rec = Record(id="x", kind=dl.KIND)
+        rec.checkpoint = cp.to_dict()
+        self.assertEqual(dl.checkpoint_of(rec), cp)
 
 
 if __name__ == "__main__":
