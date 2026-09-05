@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction/download/go"
-	job "github.com/ReinisLusis/abstraction/job/go"
+	download "github.com/openabstractions/abstraction-download/go"
+	job "github.com/openabstractions/abstraction-job/go"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
 )

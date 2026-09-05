@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // A job record is read by machines other than the one that wrote it. The moment

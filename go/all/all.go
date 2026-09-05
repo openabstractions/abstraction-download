@@ -1,6 +1,6 @@
 // Package all links every download tier into a program.
 //
-//	import _ "github.com/ReinisLusis/abstraction/download/go/all"
+//	import _ "github.com/openabstractions/abstraction-download/go/all"
 //
 // That single line is what an application adds, and then download.Discover finds
 // whatever this machine actually has. It is the classpath, spelled the way a
@@ -13,6 +13,6 @@
 package all
 
 import (
-	_ "github.com/ReinisLusis/abstraction/download/go/bits"
-	_ "github.com/ReinisLusis/abstraction/download/go/nas"
+	_ "github.com/openabstractions/abstraction-download/go/bits"
+	_ "github.com/openabstractions/abstraction-download/go/nas"
 )

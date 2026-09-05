@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // fakeDelegate behaves the way BITS does, including the parts that are

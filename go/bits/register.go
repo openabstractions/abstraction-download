@@ -1,8 +1,8 @@
 package bits
 
 import (
-	config "github.com/ReinisLusis/abstraction/config/go"
-	download "github.com/ReinisLusis/abstraction/download/go"
+	config "github.com/openabstractions/abstraction-config/go"
+	download "github.com/openabstractions/abstraction-download/go"
 )
 
 // Registering here is what makes the OS transfer service available without any

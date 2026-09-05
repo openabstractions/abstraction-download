@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // A Delegator hands the whole job to something outside this process and then

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // Kind is the job.Record.Kind this package understands. A process that finds a

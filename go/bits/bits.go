@@ -84,7 +84,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	download "github.com/ReinisLusis/abstraction/download/go"
+	download "github.com/openabstractions/abstraction-download/go"
 )
 
 // System is the value recorded in job.Delegation.System. It is what decides,

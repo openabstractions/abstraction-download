@@ -35,8 +35,8 @@ import (
 	"path/filepath"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction/download/go"
-	job "github.com/ReinisLusis/abstraction/job/go"
+	download "github.com/openabstractions/abstraction-download/go"
+	job "github.com/openabstractions/abstraction-job/go"
 	"net/url"
 	"strings"
 )

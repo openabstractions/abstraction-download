@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // Telling the supervisor to look now, instead of waiting for it to look anyway.

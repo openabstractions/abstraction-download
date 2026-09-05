@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	config "github.com/ReinisLusis/abstraction/config/go"
-	job "github.com/ReinisLusis/abstraction/job/go"
+	config "github.com/openabstractions/abstraction-config/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // Tier registration: how a binding makes itself available without this package
@@ -24,7 +24,7 @@ import (
 //
 // and an application linking a binding in with a blank import:
 //
-//	import _ "github.com/ReinisLusis/abstraction/download/go/all"
+//	import _ "github.com/openabstractions/abstraction-download/go/all"
 //
 // That import is the honest cost. In a compiled language "present" has to mean
 // "linked in", and pretending otherwise would require plugins that do not work

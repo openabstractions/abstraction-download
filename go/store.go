@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	storage "github.com/ReinisLusis/abstraction/storage/go"
+	storage "github.com/openabstractions/abstraction-storage/go"
 )
 
 // This file is where bytes in motion meet bytes at rest.

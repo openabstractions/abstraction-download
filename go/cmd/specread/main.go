@@ -26,7 +26,7 @@ import (
 	"os"
 	"sort"
 
-	download "github.com/ReinisLusis/abstraction/download/go"
+	download "github.com/openabstractions/abstraction-download/go"
 )
 
 func main() {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	config "github.com/ReinisLusis/abstraction/config/go"
-	download "github.com/ReinisLusis/abstraction/download/go"
+	config "github.com/openabstractions/abstraction-config/go"
+	download "github.com/openabstractions/abstraction-download/go"
 )
 
 // cmdSetup writes the machine's configuration once, so that no application ever

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction/job/go"
-	storage "github.com/ReinisLusis/abstraction/storage/go"
+	job "github.com/openabstractions/abstraction-job/go"
+	storage "github.com/openabstractions/abstraction-storage/go"
 )
 
 // Service is downloading, for an application that holds no store, no runner and
