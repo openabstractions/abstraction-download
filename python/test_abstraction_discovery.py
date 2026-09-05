@@ -158,7 +158,9 @@ class FakeSupervisor:
         except OSError:
             return
         with conn:
-            conn.recv(4096)
+            # Recorded, not discarded: the request assertion is the only check
+            # that the client frames its object the way the contract says.
+            self.request = conn.recv(4096)
             if self.reply is None:
                 self.stop.wait()
             else:
