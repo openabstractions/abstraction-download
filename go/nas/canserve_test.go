@@ -3,7 +3,7 @@ package nas
 import (
 	"testing"
 
-	download "github.com/ReinisLusis/abstraction-download"
+	download "github.com/ReinisLusis/abstraction/download/go"
 )
 
 // A delegate must be able to refuse work it could never do.

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction-download"
-	job "github.com/ReinisLusis/abstraction-job"
+	download "github.com/ReinisLusis/abstraction/download/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // Abandoning one job must not delete a file another job is still counting on.

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // Is a system downloader running on this machine, and can this application just

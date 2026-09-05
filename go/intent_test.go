@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // trickle serves a payload slowly enough that a person could press a button

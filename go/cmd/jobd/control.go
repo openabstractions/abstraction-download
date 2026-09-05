@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction-download"
-	job "github.com/ReinisLusis/abstraction-job"
+	download "github.com/ReinisLusis/abstraction/download/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // This file is jobd controlling jobd: start it in the background, stop it, and

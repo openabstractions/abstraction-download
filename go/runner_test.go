@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 func payload(t *testing.T, n int) ([]byte, string) {

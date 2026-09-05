@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction-download"
-	job "github.com/ReinisLusis/abstraction-job"
+	download "github.com/ReinisLusis/abstraction/download/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // twoMachines stands up both halves of the arrangement in one process: a local

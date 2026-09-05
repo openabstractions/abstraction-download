@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction-download"
-	job "github.com/ReinisLusis/abstraction-job"
+	download "github.com/ReinisLusis/abstraction/download/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // TestLiveRoundTrip runs the arrangement against a real NAS over a real share.

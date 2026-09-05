@@ -41,10 +41,10 @@ import (
 	"syscall"
 	"time"
 
-	config "github.com/ReinisLusis/abstraction-config"
-	"github.com/ReinisLusis/abstraction-download"
-	_ "github.com/ReinisLusis/abstraction-download/all"
-	job "github.com/ReinisLusis/abstraction-job"
+	config "github.com/ReinisLusis/abstraction/config/go"
+	"github.com/ReinisLusis/abstraction/download/go"
+	_ "github.com/ReinisLusis/abstraction/download/go/all"
+	job "github.com/ReinisLusis/abstraction/job/go"
 
 	// Mozilla's CA bundle, compiled in. Used only when the system has no trust
 	// store of its own, which is exactly the case in a FROM scratch container.

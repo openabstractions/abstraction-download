@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 func serviceOn(t *testing.T) (Service, job.Store) {

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // Runner executes one download job: claim it, get the bytes, prove them, deliver

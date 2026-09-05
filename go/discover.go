@@ -1,8 +1,8 @@
 package download
 
 import (
-	config "github.com/ReinisLusis/abstraction-config"
-	job "github.com/ReinisLusis/abstraction-job"
+	config "github.com/ReinisLusis/abstraction/config/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // Discover is the whole integration, for an application that knows nothing.

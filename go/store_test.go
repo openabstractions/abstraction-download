@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
-	storage "github.com/ReinisLusis/abstraction-storage"
+	job "github.com/ReinisLusis/abstraction/job/go"
+	storage "github.com/ReinisLusis/abstraction/storage/go"
 )
 
 // The 116 GB question, answered: bytes another tool on this machine already

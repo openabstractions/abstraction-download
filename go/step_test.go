@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // A delegate whose Finalize does real work, and reports it.

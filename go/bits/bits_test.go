@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	download "github.com/ReinisLusis/abstraction-download"
-	job "github.com/ReinisLusis/abstraction-job"
+	download "github.com/ReinisLusis/abstraction/download/go"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // Every test that touches BITS goes through this. It must SKIP and never fail

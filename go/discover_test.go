@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	config "github.com/ReinisLusis/abstraction-config"
+	config "github.com/ReinisLusis/abstraction/config/go"
 )
 
 // An application that knows nothing gets the right tier, and the test is written

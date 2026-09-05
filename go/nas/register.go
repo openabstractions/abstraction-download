@@ -1,8 +1,8 @@
 package nas
 
 import (
-	config "github.com/ReinisLusis/abstraction-config"
-	download "github.com/ReinisLusis/abstraction-download"
+	config "github.com/ReinisLusis/abstraction/config/go"
+	download "github.com/ReinisLusis/abstraction/download/go"
 )
 
 // Registering here is what makes a NAS available to an application that has

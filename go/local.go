@@ -3,7 +3,7 @@ package download
 import (
 	"errors"
 
-	job "github.com/ReinisLusis/abstraction-job"
+	job "github.com/ReinisLusis/abstraction/job/go"
 )
 
 // This file is the whole of what download knows about filesystems, and it exists
