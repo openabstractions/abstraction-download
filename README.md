@@ -1,267 +1,199 @@
-# download — one interface, many ways to actually get the bytes
+# abstraction-download
 
-Every local-AI tool ships its own downloader. Each one re-solves resume, retries,
-progress and verification privately, and each one loses your 40 GB model when the
-machine sleeps — because the transfer lives inside the application, and when the
-application goes away the transfer goes with it.
+A Go and Python library that fetches a file described by a job record, checks it against a
+digest, and saves enough progress that another process can finish a transfer this one started.
 
-This is the interface those tools should have been coding against. It sits on top
-of [`job`](../job/README.md), which owns the part that has to survive: what is
-wanted, where it may be had, how far it got, and who is allowed to work on it
-right now. This layer adds the one thing missing — something that can fetch.
+## The problem it solves
 
-## The split, and why it is where it is
+An application that downloads a large file usually keeps the transfer inside its own process.
+When the process exits the transfer is gone, and the partial file left behind carries no record
+of how many of its bytes were ever checked, so resuming means starting again or appending onto
+bytes nobody verified. This library keeps the file's identity, the progress made and who may
+work on it in a record on disk, apart from whatever moves the bytes, so a transfer interrupted
+by a crash, a sleep or a reboot can be finished by another process or machine.
+
+## Terms
+
+A layer on top of [abstraction-job](https://github.com/openabstractions/abstraction-job), whose
+vocabulary it uses throughout.
+
+| term | meaning |
+|---|---|
+| **job** | a record on disk describing one unit of work: an id, a state, a `kind`. This library handles jobs of kind `download` and ignores the rest |
+| **store** | the directory those records live in. Any process that can read the directory can read the jobs |
+| **spec** | the body of a job, which the job layer does not interpret. A download spec is an `Artifact` (a **digest**, written `sha256:<hex>`, and a size), a list of `Source`s, and a `Sink`. The digest comes from the caller, and bytes that do not match it are refused |
+| **lease** | the time-limited right to work on a job. One holder at a time |
+| **epoch** | a counter on the lease, raised at each claim. Every write presents the epoch it holds, so a process whose lease expired while it was asleep has its later writes refused |
+| **checkpoint** | the resume point: how many leading bytes of the partial file are known to be the artifact's real bytes |
+| **orphan** | a job whose lease expired with the work unfinished, because the process holding it died |
+| **delegation** | handing a job to a system that keeps working after this process exits, recorded in the job as `{system, external_id}` |
+| **supervisor** | a process that watches a store and finishes work nobody is doing: it adopts orphans and checks up on delegated jobs. `jobd` here is one |
+| **tier** | a registered delegation target (a Windows service, a NAS) with a priority. The caller does not name a tier; whatever is registered and reachable is offered the job |
+| **binding** | an implementation of `Fetcher`, which streams bytes through this process, or of `Delegator`, which hands the transfer to something else and gets back a handle |
+
+## Install
+
+The Go module lives in the `go/` subdirectory, so its path ends in `/go` and is **not** the
+repository URL. `go get` also fetches `abstraction-job/go`, `abstraction-config/go` and
+`abstraction-storage/go`, all `github.com/openabstractions/…` at `v0.1.0`.
 
 ```
-  model       AI-specific: what a "quantisation" is, where a digest is published
-              ── builds on download. download never imports it ──
-  ─────────────────────────────────────────────────────────────────
-  download    THIS package. artifact · sources · sink, and nothing about
-              what the bytes are for
-              Runner: claim → resume → hash → verify → deliver
-  ─────────────────────────────────────────────────────────────────
-  job         id · state · lease · progress · delegation · spec(opaque)  ← survives
+go get github.com/openabstractions/abstraction-download/go@v0.1.0
 ```
 
-**This package is the download abstraction, not the model download abstraction.**
-The AI layer sits above it as a consumer — it resolves `hf://org/repo#Q4_K_M`
-into an ordinary `Spec` and hands it down. Dependencies point one way: `model`
-imports `download`, `download` imports `job`, and nothing imports `model`.
+Python has no package index release. Clone this repository and the job repository side by side
+and put both `python/` directories on `PYTHONPATH`, separated by `;` on Windows:
 
-The rule that keeps it honest is that this package must contain no word from the
-other domain. It slipped twice and both were caught by grepping for them:
-`jobd` read an environment variable called `MODELGET_STORE`, and the NAS
-delegator defaulted to delivering into a directory called `models`. Both are now
-generic (`ABSTRACTION_STORE`, `nas.DefaultDir = "files"`), and the model layer
-sets `Dir = "models"` itself — specific naming the generic, never the reverse.
+```
+git clone https://github.com/openabstractions/abstraction-download.git
+git clone https://github.com/openabstractions/abstraction-job.git
+export PYTHONPATH="$PWD/abstraction-download/python:$PWD/abstraction-job/python"
+```
 
-Anything that can be described as "an artifact, some places to get it, and
-somewhere to put it" belongs here. Datasets, container layers, game assets, a
-firmware blob: none of them need this package to change.
+## A minimal example
 
-**The job layer does not know what a download is.** `artifact`, `sources` and
-`sink` live in this package's `Spec`, which the job record carries as an opaque
-blob tagged `kind: "download"`. So downloading can grow mirrors, chunk manifests
-and webseeds without touching a record that Go, Python and eventually C++ all
-have to agree about.
-
-That was not the first design. An earlier version put those three fields in the
-job record itself, and the schema had to move the moment a real implementation
-(BITS) turned up that did not fit. Moving them out is what stopped that.
-
-## Two shapes, and they cover everything
-
-Every implementation category the surveys turned up falls into one of two:
-
-| shape | who does the work | examples |
-|---|---|---|
-| **`Fetcher`** | streams bytes through us | http, a local file, an SMB path |
-| **`Delegator`** | the other system does it | BITS, a curl subprocess, a NAS daemon, a torrent client, a durable engine |
-
-That is not a taxonomy invented for tidiness. A Fetcher gives us an
-`io.Writer`'s worth of control and dies with our process. A Delegator writes the
-file itself, under its own account, keeps going while every process that asked is
-closed, and hands back nothing but a handle. Forcing BITS through the Fetcher
-interface would have meant reimplementing BITS badly.
-
-Because the two shapes are now both known, adding the BITS or NAS binding needs
-no new interface — which is the answer to the fair objection that an abstraction
-changing shape per tool is not an abstraction.
-
-**Fetchers are deliberately small and dumb.** A Fetcher appends bytes and reports
-how many. It does not verify, does not retry across sources, does not decide
-where the file goes, and never touches the job record.
-
-Everything that must be identical no matter who ran the transfer — hashing,
-resume position, progress persistence, lease renewal, the final rename — lives in
-the Runner. That is what makes a transfer started by one implementation
-finishable by a *different* one, which is the entire premise.
-
-It also keeps the interesting implementations possible. The best downloader on
-Windows is not ours: **BITS** already runs transfers that survive logoff and
-reboot. The right way to reach a NAS is not a protocol, it is opening a UNC path
-and letting the OS redirector be the SMB client. A facade that assumed it did the
-transferring itself could never delegate to either.
-
-## Use it
+Each program copies a local file through the library, checks it against its digest and prints
+what was delivered. Neither needs a network; both write into the current directory.
 
 ```go
-store, _ := job.NewFileStore("/var/lib/jobs")
-runner := download.NewRunner(store, "my-app")
+package main
 
-id, _ := download.Submit(store, download.Spec{
-    Artifact: download.Artifact{Digest: "sha256:74a4da…", Size: 491400032},
-    Sources: []download.Source{
-        {Scheme: "https", Locator: "https://huggingface.co/…/model.gguf"},
-        {Scheme: "smb",   Locator: `\\nas\models\model.gguf`, Priority: 1},
-    },
-    Sink: download.Sink{Final: "D:/models/model.gguf"},
-})
+import (
+	"context"
+	"fmt"
+	"os"
 
-err := runner.Run(ctx, id)
+	download "github.com/openabstractions/abstraction-download/go"
+	job "github.com/openabstractions/abstraction-job/go"
+)
+
+func check(err error) { if err != nil { panic(err) } }
+
+func main() {
+	payload := []byte("hello from the download abstraction\n")
+	// The sha256 of payload, which a caller is expected to know in advance.
+	digest := "sha256:59285083328ad8b69e30122940bddd0647570afa24b77532ac69f8d1ce6abfcc"
+	check(os.WriteFile("source.bin", payload, 0o644))
+	store, err := job.NewFileStore("store")
+	check(err)
+	id, err := download.Submit(store, download.Spec{
+		Artifact: download.Artifact{Digest: digest, Size: int64(len(payload))},
+		Sources:  []download.Source{{Scheme: "file", Locator: "source.bin"}},
+		Sink:     download.Sink{Final: "out/hello.bin"}, // relative to the store
+	})
+	check(err)
+	runner := download.NewRunner(store, "example")
+	check(runner.Run(context.Background(), id))
+	check(runner.TakeDelivery(id))
+	got, err := os.ReadFile("store/out/hello.bin")
+	check(err)
+	fmt.Printf("delivered %d bytes: %s", len(got), got) // delivered 36 bytes: hello …
+}
 ```
 
-Note the sources: an ordered list of typed locators, **not a URL**. BitTorrent v2
-and HuggingFace Xet were designed independently for exactly this payload class
-and both describe a transfer as a content identity plus a list of places to get
-it. Lock the descriptor to a URL and multi-source, mirrors, delegation to a NAS
-and dedup across model revisions all become impossible to add later.
+```python
+import hashlib
 
-On start, rescue whatever was in flight when the machine slept or the app was
-closed:
+from abstraction_job import FileStore
+import abstraction_download as dl
 
-```go
-n, _ := runner.Adopt(ctx)         // claims every orphan and finishes it here
-n, _ := runner.ReconcileAll(ctx)  // catches up with work handed to a service
+payload = b"hello from the download abstraction\n"
+with open("source.bin", "wb") as f:
+    f.write(payload)
+digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+store = FileStore("store")
+job_id = dl.submit(store, dl.Spec(
+    artifact=dl.Artifact(digest=digest, size=len(payload)),
+    sources=[dl.Source(scheme="file", locator="source.bin")],
+    sink=dl.Sink(final="out/hello.bin"),  # relative to the store
+))
+runner = dl.Runner(store, "example")
+runner.run(job_id)
+runner.take_delivery(job_id)
+with open("store/out/hello.bin", "rb") as f:
+    print("delivered:", f.read().decode(), end="")
 ```
 
-To hand a job to something that outlives this process:
+## API overview
 
-```go
-runner.Delegators = download.NewDelegators(bits.New())
-err := runner.Delegate(ctx, id)   // returns as soon as the service has it
-// this process may now exit; the transfer continues
+**Go, package `download`.** Describing work: `Kind`, `Spec`, `Artifact`, `Source`, `Sink`,
+`Checkpoint`, `Spec.Validate`, `Submit`, `SpecOf`, `CheckpointOf`, `Sink.Resolve`, `Portable`,
+`NormalDigest`. Doing work: `NewRunner`, and on `*Runner` — `Run`, `Adopt`, `TakeDelivery`,
+`TakeDeliveryAll`, `Delegate`, `DelegateAll`, `Reconcile`, `ReconcileAll`, `Tier`, `Handoff`.
+Transports: `Fetcher`, `Capability` (`CapResume`, `CapSurvivesProcessExit`, `CapVerifies`,
+`CapDelegates`), `Registry`, `NewRegistry`, `DefaultRegistry`, `HTTP`, `File`, `Delegator`,
+`Delegators`, `NewDelegators`, `Status`, `DelegateState`, `Selective`, `Suspendable`,
+`ReportingFinalizer`. Wiring: `Discover`, `DiscoverIn`, `Tier`, `RegisterTier`,
+`RegisteredTiers`, `Owner`, `Program`, `Service`, `NewService`, `Open`, `WithStorage`,
+`Credentials`, `EnvCredentials`, `CredentialAttr`, `Supervisor`, `Heartbeat`, `StopHeartbeat`,
+`SupervisorOf`, `Nudge`, `ListenForNudges`, `LocalSink`. Subpackages: `go/bits` (Windows BITS),
+`go/nas` (a supervisor reachable over a share), `go/all` (blank-import both).
+
+**Python, module `abstraction_download`:** `KIND`, `Spec`, `Artifact`, `Source`, `Sink`,
+`Checkpoint`, `submit`, `spec_of`, `checkpoint_of`, `portable`, `local_root`, `local_sink`,
+`store_root`, `owner`, `credentials`, `Supervisor`, `supervisor_of`, `Runner` (`run`, `adopt`,
+`take_delivery`), and the errors `DownloadError`, `DigestMismatch`, `ShortTransfer`,
+`RangeIgnored`, `NoSource`.
+
+Unusual semantics, in both languages:
+
+- A `Source` is a `{Scheme, Locator}` pair, not a URL; `file` and `smb` locators are filesystem
+  paths. Relative sink paths resolve against the store root on each machine, and a path
+  absolute under either Windows or POSIX rules is left as written.
+- `Run` leaves a finished job in state `transferred`; `TakeDelivery` is the requester saying it
+  has the bytes, and completes it. `Delegate` releases the lease before returning, so another
+  process can poll or finalise the job, and `Reconcile` catches up later.
+- Resuming starts at the smaller of the checkpoint and the size of the partial file; anything
+  past that is discarded and the hash rebuilt over what is kept. A `200` answer to a `Range`
+  request is an error, not a restart, and a digest mismatch deletes the partial file and
+  records the reason in the job.
+
+**Commands**, built from `go/`. `go build ./cmd/dl` gives `dl <url>`, plus `dl list`, `dl
+watch` and `dl tiers`. `go build ./cmd/jobd` gives the supervisor: `jobd once` makes one pass,
+`jobd run` supervises in the foreground, `jobd status` reports, and `jobd install` prints
+`schtasks` commands without running them. `go run ./cmd/specread <spec.json>` prints how this
+implementation reads a spec. `ABSTRACTION_STORE` selects the job store (default
+`~/.abstraction`), `MODELGET_STORE` is a legacy alias, and `ABSTRACTION_NAS_STORE` names one on
+a share that a supervisor elsewhere watches.
+
+## The `cpp/` directory
+
+`cpp/specread.cpp` parses a download spec and prints what it read. **There is no C++
+implementation of this library** — no fetcher, runner, delegator or supervisor. It exists so
+the Go, Python and C++ readings of one spec can be compared, using the samples in
+`testdata/specs/`. No build file for it ships here; it includes `abstraction/job/record.h`, so
+it needs the job repository's `cpp/include` and `nlohmann/json` on the include path.
+
+## Status
+
+Experimental, at `v0.1.0`. Interfaces and the on-disk spec may change.
+
+- **Go** is the complete implementation: the runner, the HTTP and file/SMB fetchers,
+  delegation, the BITS and NAS delegators, and `jobd`.
+- **Python** is partial. Its `Runner` runs, adopts and takes delivery over `http`, `https`,
+  `file` and `smb`, but there is no delegation, reconcile, supervisor loop or tier registry,
+  and `adopt` skips delegated jobs. A Python process can neither hand work to BITS or a NAS nor
+  recover work handed there. **C++** reads specs only, as above.
+- The `bits` binding runs `powershell.exe` with the `BitsTransfer` module, so it works on
+  Windows only; its tests skip when BITS cannot be driven, and the `nas` tests that reach a
+  real NAS skip unless `ABSTRACTION_LIVE=1` and `ABSTRACTION_NAS_STORE` are set. Untested
+  altogether: interrupting a real multi-gigabyte transfer, and anything at NAS or BITS scale.
+
+## Tests
+
+```
+cd go && go build ./... && go test ./...
+cd ../python && python -m unittest discover
 ```
 
-`Delegate` records `{system, external_id}` in the job and **releases the lease** —
-holding it would stop anyone else polling or finalising, which would make the
-delegation pointless. Any later process calls `Reconcile` to catch up.
+66 Go test functions across 16 files (the `bits` package takes about a minute) and 10 Python
+tests, which find the job layer through `PYTHONPATH` or a sibling `abstraction-job` checkout.
 
-## What the Runner guarantees
+## Requirements
 
-**It resumes from what was proven, not from what is on disk.** The resume point
-is the *smaller* of the checkpoint's `verified_prefix` and what the file actually
-holds. Those differ after a crash — the record is written periodically, so the
-file can run ahead of it, and a partial can also be truncated or missing. The
-unproven tail is discarded, and the hash is rebuilt over the prefix that is kept.
-That last part is the cost of resuming honestly: a sequential read of what you
-already have, at disk speed, instead of re-downloading it at network speed.
+Go 1.26.0 or newer. The Python code is standard library only, and the tests are run against
+Python 3.12. It builds on Windows, Linux and macOS; `bits` needs Windows at run time.
 
-**It refuses a server that ignores a Range request.** Ask for bytes from 40,000,
-get back `200` and the whole file from zero, append it, and you have a file of
-plausible length and impossible content. `curl -C -` will do exactly that. This
-fails instead.
+## Licence
 
-**It refuses bytes that do not match their digest**, deletes the partial rather
-than leaving known-bad bytes for the next runner to resume onto, and records why
-in the job so a human can read it without finding the log of a process that no
-longer exists.
-
-**It verifies what a delegate delivered.** BITS "guarantees that the version of
-the file it transfers is consistent based on the file size and time stamp, not
-content" — so a delegate reporting success is not evidence the file is right.
-After `Finalize`, this layer hashes the delivered file itself and refuses it on a
-mismatch.
-
-**It survives the delegate disappearing.** BITS reaps jobs after 90 days, its
-queue database gets discarded wholesale when corrupt, and machines get rebuilt.
-A handle that no longer resolves returns the job to `pending` with its sources
-and checkpoint intact, so an ordinary in-process run can finish it.
-
-**It works on a record another machine wrote.** Sink paths are relative to the
-store root unless you say otherwise, and each machine resolves them against its
-own view of it. A record written by Windows into `\\nas\models\store` is the same
-record a container reading `/store` acts on — which is the entire NAS story, with
-no NAS-specific code anywhere. A path that is absolute under *either* convention
-is left alone, so `D:\models\x.gguf` handed to Linux fails with "no such file"
-rather than quietly creating a directory called `D:\models`.
-
-**It honours required capabilities.** A job that asks for a fetcher which
-survives process exit is not quietly served by one that does not — the in-process
-HTTP fetcher does not claim `survives_process_exit`, because it dies with its
-caller. Bindings differ enormously; pretending otherwise lies to the caller on
-the tier most people actually run.
-
-## jobd — the supervisor
-
-`Fetcher` and `Delegator` both leave the same gap: they only run when something
-calls them. A delegated transfer that finishes while no application is open sits
-there — BITS will not release the file until someone calls `Complete()`, and
-nothing verifies the digest until someone asks. Without a supervisor that happens
-the next time a human types a command, which may be days later.
-
-```bash
-jobd once          # one sweep — what a scheduled task runs
-jobd run           # supervise until stopped
-jobd status        # what is in the store, and what is stalled
-jobd install       # prints the schtasks lines; does not run them for you
-```
-
-It does not move bytes. It reconciles delegated jobs, finalises and verifies the
-finished ones, and adopts orphans. Reconcile runs before adopt, so the orphan
-pass never picks up work a delegate has in fact already completed.
-
-**Proved** ([`docs/results/SUPERVISOR1.txt`](../docs/results/SUPERVISOR1.txt)): a
-real 313 MB download killed with `SIGKILL`, then **no human runs the downloader
-again** — a single `jobd once` finds the abandoned job, finishes it, and delivers
-a file matching the digest HuggingFace published. A second sweep correctly does
-nothing.
-
-**A scheduled task, not a Windows service, and on purpose.** A real service means
-SCM plumbing and a dependency, and buys exactly one thing: jobs owned by
-LocalSystem keep running while the user is *logged off*, because that account is
-always logged on. Under a normal user account BITS still survives the application
-closing and a reboot — it suspends at logoff and resumes at logon. For a desktop
-that is nearly the whole win, at no cost and with no elevation. Note that BITS
-itself never needed elevation; only the SYSTEM account does.
-
-`jobd install` prints the `schtasks` commands rather than running them.
-Registering a scheduled task changes your machine and you should see exactly what
-it is first.
-
-## What ships today
-
-| implementation | shape | schemes | resume | survives process exit | status |
-|---|---|---|---|---|---|
-| `HTTP` | Fetcher | `http`, `https` | yes, `Range` | **no** | working |
-| `File` | Fetcher | `file`, `smb` | yes, seek | **no** | working |
-| `bits` | Delegator | `http`, `https`, `smb` | yes | **yes** | working, 12 tests against real BITS |
-| `nas` | Delegator | `http`, `https` | yes, over there | **yes** | working, verified against a Synology |
-
-**Nothing above chooses between them.** A caller asks for bytes; the Runner
-offers the job to whatever is registered and capable, and registration comes from
-configuration. A NAS outranks BITS because it is always on; BITS outranks
-in-process because it survives this process exiting. There is no argument
-anywhere that names a tier — see [`deploy/nas`](../deploy/nas/README.md).
-
-`research/transfer/SUMMARY.txt` said adopt BITS rather than write it, and that
-held up: persistent jobs with a GUID any process can open, documented ownership
-transfer, auto-resume on logon and network recovery.
-
-The `nas` binding needed no new wire format and no network protocol. It writes a
-job record into a store the far side can also see, and polls it by reading a file
-on a share. That it required nothing new is the strongest evidence the job layer
-was cut in the right place.
-
-## Why these two exist and aria2 does not
-
-From the survey, and both answers were "write it, honestly":
-
-- **aria2** is GPL-2.0 — a hard no for this project even at subprocess distance —
-  and has shipped one release in about two years.
-- **curl** is licence-clean but buys nothing from Go: `net/http` already does
-  ranges, redirects, proxies and TLS with no CGO and no cross-compilation tax.
-  What was worth taking was the *lesson*: `CURLOPT_RESUME_FROM` is 32-bit and
-  breaks silently past 2 GB, so every offset here is `int64`.
-- **rsync** is GPL-3.0, absent from Windows without vendoring Cygwin, has no job
-  identity, and its delta algorithm is actively counterproductive on single
-  opaque 40 GB blobs.
-
-## Tested
-
-```bash
-cd download/go && go test ./...
-```
-
-19 tests. The transfer path: resume from a partial; discarding an unproven tail;
-a checkpoint that claims more than the file holds; refusing a server that ignores
-Range; refusing a wrong digest and deleting the bad partial; falling back to a
-second source; honouring a required capability; adopting orphans.
-
-The delegation path, against a fake that behaves like BITS: recording the handle
-and releasing the lease; a second process tracking progress without holding a
-lease; two-phase finalisation; **refusing a delegate that delivered the wrong
-bytes**; and falling back to an in-process run when the delegate vanishes.
-
-**Not yet tested:** a real kill in the middle of a real multi-gigabyte transfer,
-and anything at NAS or BITS scale. Those need the service tier.
+Apache-2.0. See [LICENSE](LICENSE).

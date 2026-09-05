@@ -13,12 +13,18 @@ import tempfile
 import threading
 import unittest
 
-# The job layer is a sibling, not a copy. Copying it would let the two drift and
-# would defeat the point: this must run against the SAME record implementation
-# the Go tests interoperate with.
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "job", "python")
-)
+# The job layer is a separate repository, not a copy kept here. Put its python/
+# directory on PYTHONPATH, or check that repository out beside this one; either
+# way these tests run against the same record implementation the Go tests
+# interoperate with.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _candidate in (
+    os.path.join(_here, "..", "..", "abstraction-job", "python"),
+    os.path.join(_here, "..", "..", "job", "python"),
+):
+    if os.path.isdir(_candidate):
+        sys.path.insert(0, _candidate)
+        break
 
 from abstraction_job import FileStore, TRANSFERRED, COMPLETE
 import abstraction_download as dl
