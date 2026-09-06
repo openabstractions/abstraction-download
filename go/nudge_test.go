@@ -47,18 +47,20 @@ func nudgeAndWait(t *testing.T, store job.Store) {
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c.Write([]byte("look\n")); err != nil {
-		t.Fatalf("writing a nudge: %v", err)
+	// The listener accepts and closes without reading, so the acknowledgement
+	// arrives in whichever way this platform reports a peer that has gone: EOF
+	// on the read, ECONNRESET on Windows, EPIPE on the write on Linux — where
+	// this failed, because only the read was allowed to see it. All three say
+	// the connection was accepted and finished with, and the accept loop offers
+	// the wakeup after that close, so all three are proof the nudge landed.
+	// Never hearing back at all is the only failure.
+	_, err = c.Write([]byte("look\n"))
+	if err == nil {
+		_, err = io.ReadAll(c)
 	}
-	// Windows resets an AF_UNIX connection rather than closing it cleanly, so
-	// the acknowledgement arrives as ECONNRESET on one platform and as EOF on
-	// the other. Both say the same thing — the listener has finished with this
-	// connection — and only never hearing back at all is a failure.
-	if _, err := io.ReadAll(c); err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			t.Fatalf("the listener never closed the connection: %v", err)
-		}
+	var ne net.Error
+	if err != nil && errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("the listener never acknowledged the nudge: %v", err)
 	}
 }
 

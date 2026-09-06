@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -44,12 +45,38 @@ func TestRecordCorpus(t *testing.T) {
 				"resolve":  resolveVerdict(spec.Sink, rec.ID),
 			}
 			for _, field := range []string{"state", "partial", "final", "prefix", "verified", "resolve"} {
-				if got[field] != want[field] {
-					t.Errorf("%s: written by %s as %q, read now as %q", field, want["by"], want[field], got[field])
+				expect := want[field]
+				if field == "resolve" {
+					expect = onThisHost(expect)
+				}
+				if got[field] != expect {
+					t.Errorf("%s: written by %s as %q, read now as %q", field, want["by"], expect, got[field])
 				}
 			}
 		})
 	}
+}
+
+// onThisHost turns an expectation about an absolute sink into the answer this
+// machine owes.
+//
+// An absolute sink is honoured only where its convention is native and refused
+// everywhere else — that is ErrForeignPath, and it is deliberate. So `ok` and
+// `foreign` are one fact seen from two hosts, and a corpus that spells a single
+// verdict records whichever machine happened to run it as the contract. This
+// one recorded Windows, and every absolute row failed the first time the
+// package was tested on Linux.
+func onThisHost(want string) string {
+	native := "windows"
+	if want == "ok-on-posix" {
+		native = "posix"
+	} else if want != "ok-on-windows" {
+		return want
+	}
+	if (runtime.GOOS == "windows") == (native == "windows") {
+		return "ok"
+	}
+	return "foreign"
 }
 
 func resolveVerdict(sink Sink, owner string) string {

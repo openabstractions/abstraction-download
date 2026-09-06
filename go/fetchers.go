@@ -18,18 +18,29 @@ import (
 // the same way, including ones that have no progress API of their own — which is
 // most of them.
 type reportWriter struct {
-	w       io.Writer
-	n       int64
-	total   int64 // the artifact's full size, if this source disclosed one
-	report  func(written, total int64)
-	lastRep time.Time
+	w          io.Writer
+	n          int64
+	total      int64 // the artifact's full size, if this source disclosed one
+	report     func(written, total int64)
+	lastRep    time.Time
+	reportedAt int64
 }
+
+// reportEvery is the most that may pass unreported. Bytes as well as time,
+// because this callback is what drives the runner's checkpoint, and a purely
+// time-based throttle silently sets the checkpoint interval to whatever a
+// hundred milliseconds is worth on this link — 80 MB at loopback speed, so a
+// transfer killed inside the first tick resumed from zero and the runner's own
+// 8 MiB threshold was never reached to be evaluated. Measured by
+// TestNothingIsFetchedTwiceAfterAKill, which is what found it.
+const reportEvery = 1 << 20
 
 func (rw *reportWriter) Write(p []byte) (int, error) {
 	n, err := rw.w.Write(p)
 	rw.n += int64(n)
-	if rw.report != nil && time.Since(rw.lastRep) > 100*time.Millisecond {
+	if rw.report != nil && (rw.n-rw.reportedAt >= reportEvery || time.Since(rw.lastRep) > 100*time.Millisecond) {
 		rw.lastRep = time.Now()
+		rw.reportedAt = rw.n
 		rw.report(rw.n, rw.total)
 	}
 	return n, err
@@ -238,8 +249,13 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
+	// A megabyte, for the reason copyReporting in runner.go gives: io.Copy's
+	// own 32 KiB crosses the reader, the writer and the progress callback
+	// thirty-two thousand times per gigabyte. The local-file path here already
+	// used a megabyte and this one did not — measured on loopback, 32 KiB
+	// reaches 395–538 MB/s and 1 MiB reaches 777–821.
 	rw := &reportWriter{w: req.Out, total: total, report: req.Report}
-	written, err := io.Copy(rw, resp.Body)
+	written, err := io.CopyBuffer(rw, resp.Body, make([]byte, 1<<20))
 	if err != nil {
 		return Result{Written: written, Total: total}, err
 	}

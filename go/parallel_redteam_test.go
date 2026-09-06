@@ -3,8 +3,6 @@ package download
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -370,11 +368,32 @@ func TestRenewalErasesConcurrentWrites(t *testing.T) {
 	}
 }
 
+// corruptAfterEachRange is the stray writer, standing in for a predecessor
+// still holding the file across a share.
+//
+// It writes through the fetcher rather than from a goroutine watching the file
+// grow, because that watcher was a race: it had to notice the partial at full
+// size and get its byte in before the hash, and a 1 MiB read buffer closed that
+// window on Linux. Every range that returns has already had its bytes written,
+// and the hash cannot start until the last one has returned, so a write here is
+// ordered after the transfer and before the digest by construction.
+type corruptAfterEachRange struct {
+	RangeFetcher
+	partial string
+}
+
+func (c corruptAfterEachRange) FetchRange(ctx context.Context, req RangeRequest) error {
+	err := c.RangeFetcher.FetchRange(ctx, req)
+	if f, ferr := os.OpenFile(c.partial, os.O_WRONLY, 0); ferr == nil {
+		f.WriteAt([]byte{'!'}, 0)
+		f.Close()
+	}
+	return err
+}
+
 // The file is hashed after the last range, by path, with nothing holding it. If
-// the bytes change between the two — here: a stray writer, standing in for a
-// predecessor still holding the file across a share — the digest catches it,
-// and everything is thrown away. The parallel path is honest here; this pins
-// that it stays so.
+// the bytes change between the two, the digest catches it and everything is
+// thrown away. The parallel path is honest here; this pins that it stays so.
 func TestHashIsOverTheFileNotTheStream(t *testing.T) {
 	body, digest := payload(t, minParallel+7)
 	srv := newParallelServer(t, body)
@@ -382,34 +401,13 @@ func TestHashIsOverTheFileNotTheStream(t *testing.T) {
 	partial := partialOf(t, store, id)
 
 	r.Connections = 2
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			if st, err := os.Stat(partial); err == nil && st.Size() == int64(len(body)) {
-				f, err := os.OpenFile(partial, os.O_WRONLY, 0)
-				if err == nil {
-					f.WriteAt([]byte{'!'}, 0)
-					f.Close()
-				}
-				return
-			}
-			select {
-			case <-time.After(time.Millisecond):
-			}
-		}
-	}()
+	r.Fetchers = NewFetchers(corruptAfterEachRange{HTTP{}, partial})
+
 	err := r.Run(context.Background(), id)
-	<-done
-	if err == nil {
-		got, _ := os.ReadFile(finalOf(t, store, id))
-		sum := sha256.Sum256(got)
-		if "sha256:"+hex.EncodeToString(sum[:]) != digest {
-			t.Fatal("delivered a file whose bytes are not the artifact")
-		}
-		return
-	}
 	if !errors.Is(err, ErrDigestMismatch) {
-		t.Fatalf("run failed for another reason: %v", err)
+		t.Fatalf("a byte written after the last range was delivered as the artifact: %v", err)
+	}
+	if _, err := os.Stat(finalOf(t, store, id)); !os.IsNotExist(err) {
+		t.Fatal("the final path exists; a refused transfer must deliver nothing")
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
 )
@@ -46,6 +45,41 @@ func (d slowDelegate) FinalizeReporting(ctx context.Context, externalID, dest st
 
 func (d slowDelegate) Abandon(ctx context.Context, externalID string) error { return nil }
 
+// stepRecorder keeps every step the record passed through, taken from the write
+// rather than from a reader sampling the file.
+//
+// A sampler sees only the phases that outlive its interval, so what it proves
+// is how slow the machine is: this test polled every 2 ms and passed on Windows
+// for a fortnight, then failed on Linux the first time it ran there, because
+// hashing six bytes on a tmpfs is over before the first sample. Every phase
+// change is an Update, so watching Update is the same observation with no clock
+// in it.
+type stepRecorder struct {
+	*job.FileStore
+	mu   sync.Mutex
+	seen []string
+}
+
+func (s *stepRecorder) Update(id string, epoch int64, mutate func(*job.Record) error) (*job.Record, error) {
+	r, err := s.FileStore.Update(id, epoch, mutate)
+	if r == nil || r.Progress.Step == nil {
+		return r, err
+	}
+	label := fmt.Sprintf("%d/%d %s", r.Progress.Step.Ordinal, r.Progress.Step.Of, r.Progress.Step.Name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.seen) == 0 || s.seen[len(s.seen)-1] != label {
+		s.seen = append(s.seen, label)
+	}
+	return r, err
+}
+
+func (s *stepRecorder) steps() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.seen...)
+}
+
 // A delegated download is three phases and only the first was ever visible. The
 // far side reports done, and then this machine copies every byte back across a
 // share and re-hashes them — with the record, before this, still showing the
@@ -53,10 +87,11 @@ func (d slowDelegate) Abandon(ctx context.Context, externalID string) error { re
 // download do nothing, twice over.
 func TestADelegatedDownloadSaysWhichPhaseItIsIn(t *testing.T) {
 	dir := t.TempDir()
-	store, err := job.NewFileStore(dir)
+	fs, err := job.NewFileStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	store := &stepRecorder{FileStore: fs}
 
 	final := filepath.Join(dir, "out", "model.bin")
 	spec := Spec{
@@ -69,34 +104,6 @@ func TestADelegatedDownloadSaysWhichPhaseItIsIn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Watch every step the record passes through, by reading it the way any
-	// other process would.
-	var seen []string
-	var mu sync.Mutex
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if rec, err := store.Load(id); err == nil && rec.Progress.Step != nil {
-				label := fmt.Sprintf("%d/%d %s", rec.Progress.Step.Ordinal,
-					rec.Progress.Step.Of, rec.Progress.Step.Name)
-				mu.Lock()
-				if len(seen) == 0 || seen[len(seen)-1] != label {
-					seen = append(seen, label)
-				}
-				mu.Unlock()
-			}
-			time.Sleep(2 * time.Millisecond)
-		}
-	}()
-
 	d := slowDelegate{}
 	r := NewRunner(store, "test-runner")
 	r.Delegators = NewDelegators(d)
@@ -107,13 +114,8 @@ func TestADelegatedDownloadSaysWhichPhaseItIsIn(t *testing.T) {
 	if err := r.Reconcile(context.Background(), id); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	close(stop)
-	wg.Wait()
 
-	mu.Lock()
-	got := append([]string(nil), seen...)
-	mu.Unlock()
-
+	got := store.steps()
 	if len(got) == 0 {
 		t.Fatal("the record never said which phase it was in; the copy back is invisible again")
 	}
