@@ -1,0 +1,46 @@
+{
+  "content": [
+    "abstraction.job/base@1",
+    "abstraction.job/intent@1"
+  ],
+  "critical": [
+    "abstraction.job/base@1",
+    "abstraction.job/intent@1"
+  ],
+  "id": "1788673443229-4b7013690ff3377e14ad",
+  "kind": "download",
+  "state": "pending",
+  "spec": {
+    "artifact": {
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "size": 4096
+    },
+    "sources": [
+      {
+        "scheme": "https",
+        "locator": "https://example.invalid/u.gguf"
+      }
+    ],
+    "sink": {
+      "partial": "work/1788673443229-4b7013690ff3377e14ad",
+      "final": "models/u.gguf"
+    }
+  },
+  "progress": {
+    "done": 0,
+    "total": 4096,
+    "updated_at": "2026-09-06T05:44:03.229575Z"
+  },
+  "lease": {
+    "owner": "",
+    "epoch": 0,
+    "expires_at": "0001-01-01T00:00:00.000000Z"
+  },
+  "intent": {
+    "want": "cancel",
+    "by": "person",
+    "at": "2026-09-06T05:44:03.238184Z"
+  },
+  "created_at": "2026-09-06T05:44:03.229575Z",
+  "updated_at": "2026-09-06T05:44:03.238184Z"
+}

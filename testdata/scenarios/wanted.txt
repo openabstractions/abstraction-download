@@ -1,0 +1,36 @@
+# requires: wanted
+#
+# A folder is the door for a person with no program. A text file put in
+# wanted/ is a request: a URL, optionally a digest, optionally a destination
+# inside the store. The folder answers by renaming the file, and the name is
+# the whole of what a person has to read.
+#
+# It is a wider door than a record, because anyone who can write to the share
+# can use it, so it accepts less: only http and https, only destinations inside
+# the store that are not the store's own, and never a header or a credential.
+# B through F are refused and their text is kept; A and G are taken, and the
+# folder says how each ended.
+drop A src=http:plain size=64 digest=good
+drop B src=http:plain size=64 dest=../outside.bin
+drop C src=http:plain size=64 dest=jobs/x.json
+drop D src=http:plain size=64 dest=wanted/again.txt
+drop E src=file size=64
+drop F text=not-a-url
+drop G src=http:status-404 size=64 digest=bad dest=models/
+sweep
+run A alpha
+run G gamma
+sweep
+
+# expect 8: A=accepted [DL-W1]
+# expect 8: G=accepted
+# expect 8: B=refused [DL-W2]
+# expect 8: C=refused
+# expect 8: D=refused
+# expect 8: E=refused [DL-W3]
+# expect 8: F=refused
+# expect 9: ok state=transferred
+# expect 9: done=64 err=none
+# expect 10: transfer-failed state=failed
+# expect 11: A=done [DL-W4]
+# expect 11: G=failed

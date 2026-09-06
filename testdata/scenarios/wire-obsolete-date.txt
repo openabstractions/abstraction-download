@@ -1,0 +1,20 @@
+# requires: wire
+#
+# A Last-Modified in the obsolete RFC 850 spelling, which RFC 9110 requires a
+# recipient to accept and forbids a sender to use. Servers send it anyway.
+#
+# The value is never interpreted -- it is echoed back verbatim as If-Range, and
+# the origin server evaluates that by exact match -- so accepting it is a
+# question about which spellings are recognised and not about parsing a date.
+# Until 2026-09-06 the three implementations answered it three ways, because
+# each asked its own standard library instead of the contract: Go took a
+# three-letter timezone the grammar does not allow, Python took RFC 2822, and
+# C++ dropped everything but IMF-fixdate. A dropped validator is a resume that
+# cannot name its version, and no other line in a transcript shows it.
+submit A size=64 digest=good src=http:obsoletedate
+run A alpha
+state A
+
+# expect 2: ok state=transferred
+# expect 2: done=64 err=none
+# expect 2: cp={"verified_prefix":64,"validators":{"last_modified":"Sunday, 06-Nov-94 08:49:37 GMT"}} [DL-V5]

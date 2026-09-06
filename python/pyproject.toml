@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abstraction-download"
+version = "0.1.0"
+description = "What a download job is, and a runner that claims, resumes, hashes, verifies and delivers it."
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = ["abstraction-job>=0.1,<0.2"]
+
+[project.urls]
+Source = "https://github.com/openabstractions/abstraction-download"
+
+[tool.setuptools]
+py-modules = ["abstraction_download", "abstraction_discovery"]

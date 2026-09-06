@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -222,6 +223,12 @@ func TestAWeakETagIsNeitherStoredNorUsed(t *testing.T) {
 	}
 
 	// And on the wire: whatever a resume sends, it is never the weak tag.
+	//
+	// The first download's file would otherwise be copied for this second
+	// request of the same bytes — that is the already-here dedup [DL-R28] doing
+	// exactly its job — and no request would reach the server at all. Remove it,
+	// so this half exercises the resume-over-network path it is about.
+	os.Remove(filepath.Join(root, "final.bin"))
 	second := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: srv.URL})
 	stageResume(t, store, second, body[:2<<10], cp.Validators)
 	if err := r.Run(context.Background(), second); err != nil {
@@ -409,10 +416,9 @@ func TestResumeAt(t *testing.T) {
 	if err != nil || rp.From() != 1000 || rp.Discarded != 0 {
 		t.Fatalf("equal: %+v, %v", rp, err)
 	}
-	if _, err = planResume(write("short.bin", 900), Checkpoint{VerifiedPrefix: 1000}, 0); err == nil {
-		t.Fatal("a file shorter than its checkpoint was accepted as a resume point")
-	} else if !strings.Contains(err.Error(), "900") {
-		t.Fatalf("short: %v", err)
+	rp, err = planResume(write("short.bin", 900), Checkpoint{VerifiedPrefix: 1000}, 0)
+	if err != nil || rp.From() != 900 || rp.Discarded != 0 {
+		t.Fatalf("short: %+v, %v — the file is the floor, so 900 of the claimed 1000 stand", rp, err)
 	}
 	// Missing is not short: there is no prefix to disbelieve, so this starts
 	// over rather than failing.

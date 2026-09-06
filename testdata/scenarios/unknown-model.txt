@@ -1,0 +1,47 @@
+# requires: store
+#
+# The negotiation, exercised. `content` names what a record carries and
+# `critical` names what a reader must understand or refuse it -- and until this
+# scenario existed nothing had ever put a name in either that an implementation
+# did not know. Every name in the format has been understood by every reader
+# since the format existed, so the branch that refuses was reachable only by a
+# writer that does not exist yet.
+#
+# `plant` is that writer. It forges the declaration on disk because a conforming
+# one cannot: an implementation validates its own declaration on the way out and
+# will not write a record it could not read back, which is correct and is
+# exactly why its own refusal path had no test.
+#
+# A is the advisory half. The name is decoration, the record still says
+# everything a reader needs, and refusing it would be the old integer version's
+# only answer to any addition at all. It is read, and the name is carried in
+# memory and not written back, because `content` is derived from the data on
+# every write and this reader has no data for it.
+#
+# B is the critical half, and the answer must be the opposite. The distinction
+# is not cosmetic: `invalid` says the record is broken and a caller may discard
+# it, `unknown-model` says the record is fine and this reader is too old to
+# touch it. Go answered `refused` and the other two answered `invalid` for as
+# long as the mechanism existed.
+#
+# Steps 7 and 8 are the consequence. A record a reader must refuse is a record
+# it must not claim and must not write an intent onto, and step 9 is the one
+# that matters most: a sweep that offered B to an adopter would hand it work it
+# has just declared itself unable to understand.
+submit A size=64 digest=good src=file
+submit B size=64 digest=good src=file
+plant A content abstraction.test/hovercraft@7
+state A
+plant B critical abstraction.test/hovercraft@7
+state B
+claim B alpha 5000
+intent B cancel
+orphans
+
+# expect 4: ok [JOB-D1]
+# expect 4: state=pending
+# expect 5: unknown-model [JOB-D1]
+# expect 6: unknown-model [JOB-D7]
+# expect 7: unknown-model
+# expect 8: unknown-model
+# expect 9: ok A

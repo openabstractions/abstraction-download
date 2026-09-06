@@ -115,9 +115,17 @@ var (
 	ErrNoDelegator = errors.New("download: no delegator for this job's sources")
 	// ErrNotDelegated means the job is not in someone else's hands.
 	ErrNotDelegated = errors.New("download: job is not delegated")
+	// ErrStrandedHere is a record already in somebody's hands, naming a system
+	// THIS process cannot speak to. Distinct from ErrNoDelegator, which is this
+	// process having nowhere to send a job in the first place: there the work is
+	// still ours to do, and here it is not ours to touch at all.
+	//
+	// It wraps ErrNoDelegator so that a caller asking only the coarse question
+	// gets the same answer it always did.
+	ErrStrandedHere = fmt.Errorf("%w: nothing here understands", ErrNoDelegator)
 )
 
-// Delegators picks a Delegator for a source, the same way Registry does for
+// Delegators picks a Delegator for a source, the same way Fetchers does for
 // Fetchers.
 type Delegators struct {
 	all []Delegator
@@ -173,17 +181,9 @@ type Selective interface {
 	CanServe(spec Spec) bool
 }
 
-func (d *Delegators) For(src Source, requires []string) (Delegator, bool) {
-	return d.forSpec(Spec{Sources: []Source{src}}, src, requires)
-}
-
 // ForSpec picks a delegate for a whole job, so one that can refuse gets to see
-// what it is being offered.
+// what it is being offered rather than only the source's scheme.
 func (d *Delegators) ForSpec(spec Spec, src Source, requires []string) (Delegator, bool) {
-	return d.forSpec(spec, src, requires)
-}
-
-func (d *Delegators) forSpec(spec Spec, src Source, requires []string) (Delegator, bool) {
 	for _, x := range d.all {
 		if !hasScheme(x.Schemes(), src.Scheme) {
 			continue
@@ -275,20 +275,38 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 	// qualifies, this returns ErrNoDelegator, the job stays unclaimed, and the
 	// supervisor's own adoption pass runs it here — where the checkpoint IS
 	// honoured. Slower than a NAS, and it keeps the bytes.
-	//
-	// The prefix, not the range set, and deliberately: a delegate takes one
-	// offset and streams from it, so what it can carry forward is the leading
-	// run and nothing else. Proven ranges past the first hole are re-fetched by
-	// it, which is a cost and not a correctness problem — it writes the same
-	// artifact's bytes over them, and Reconcile hashes the whole delivered file
-	// afterwards. Handing a delegate holes it cannot express would be the
-	// mistake; letting it re-fetch them is only slower.
 	requires := rec.Requires
 	if cp.VerifiedPrefix > 0 {
 		requires = append(append([]string{}, requires...), string(CapResume))
 	}
+	// Bytes this store has already proven are a local copy, and a delegate
+	// would fetch them again from the network and hand them back across a share.
+	if len(proven(r.Store, spec.Artifact.Digest, id)) > 0 {
+		r.Store.Release(id, epoch)
+		return ErrNoDelegator
+	}
+
+	// A delegate is a different process, sometimes a different account, and it
+	// has no idea where our store lives. Hand it paths that are already real on
+	// the machine it runs on.
+	//
+	// Resolved before any delegate is consulted, because this is the crossing
+	// where the record's author and the writer's authority come apart: the
+	// submitter chose the destination and the delegate does the writing. A sink
+	// that leaves the store root is refused here and no delegate hears about the
+	// job at all.
+	sinkPartial, sinkFinal, err := LocalSink(r.Store, id, spec.Sink)
+	if err != nil {
+		r.Store.Release(id, epoch)
+		return err
+	}
 
 	for _, src := range spec.Sources {
+		// A delegate opens the socket in a process this policy cannot reach
+		// into, so the question is asked before it is handed the work.
+		if r.Reach.check(HostOf(src.Locator)) != nil {
+			continue
+		}
 		one := spec
 		one.Sources = []Source{src}
 		// The whole job, not just the scheme, so a delegate that can tell it
@@ -297,10 +315,7 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		if !ok {
 			continue
 		}
-		// A delegate is a different process, sometimes a different account, and
-		// it has no idea where our store lives. Hand it paths that are already
-		// real on the machine it runs on.
-		one.Sink.Partial, one.Sink.Final = LocalSink(r.Store, spec.Sink)
+		one.Sink.Partial, one.Sink.Final = sinkPartial, sinkFinal
 		extID, err := d.Start(ctx, one, cp.VerifiedPrefix)
 		if err != nil {
 			continue
@@ -365,10 +380,10 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		// The interface has always had Abandon for exactly this — "a job left
 		// unacknowledged sits in the BITS queue for 90 days" — and nothing
 		// called it on this path.
-		if rec.Delegated() && !rec.Delegation.Delivered {
-			return r.abandonDelegated(ctx, rec)
+		if rec.Delegation.Delivered {
+			return nil
 		}
-		return nil
+		return r.abandonDelegated(ctx, rec)
 	}
 
 	// What somebody wants, before asking the delegate how it is getting on.
@@ -399,7 +414,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	}
 	d, ok := r.Delegators.BySystem(rec.Delegation.System)
 	if !ok {
-		return fmt.Errorf("%w: nothing here understands %q", ErrNoDelegator, rec.Delegation.System)
+		return r.stranded(rec)
 	}
 
 	st, err := d.Poll(ctx, rec.Delegation.ExternalID)
@@ -468,10 +483,16 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		_, err = r.Store.Update(id, epoch, func(rr *job.Record) error {
 			rr.Delegation = nil
 			rr.State = job.StatePending
+			// A handle that evaporated is not an attempt at these bytes. Error
+			// means "the last try at fetching this failed, and here is why",
+			// and three things read it that way: a waiting caller ends on it,
+			// `dl status` prints it, and the retry backoff counts it. A store
+			// that was cleaned out has told us nothing about the download, so
+			// writing there makes all three wrong to gain a line jobd already
+			// prints from what Reconcile returns. A delegate that tried and
+			// failed is the opposite, and keeps its reason.
 			if st.Err != "" {
 				rr.Error = st.Err
-			} else if st.State == DelegateGone {
-				rr.Error = "delegate no longer knows this handle"
 			}
 			return nil
 		})
@@ -483,14 +504,37 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		_, final := LocalSink(r.Store, spec.Sink)
+		// The delegate is about to be told where to put the bytes, so the same
+		// refusal that guarded Delegate guards the finalise.
+		_, final, err := LocalSink(r.Store, claimed.ID, spec.Sink)
+		if err != nil {
+			return err
+		}
 
 		// A delegated download is not one transfer, it is three phases, and only
 		// the first was ever visible. Saying which one is happening is the
 		// difference between "this finished ten minutes ago and is doing
 		// nothing" and "this is copying 40 GB back across a share".
 		const phases = 3
-		r.step(id, epoch, &job.Step{
+
+		// Both phases below are proportional to the size of the file — a copy
+		// across a share, then a hash of every byte that arrived — and nothing
+		// here renewed the lease claimed a few lines above. So the terminal
+		// Update at the bottom was refused for any artifact that took longer
+		// than LeaseTTL, thirty seconds by default, to bring across and verify.
+		// The NAS proofs passed because 112 MB fits inside that window. A
+		// multi-gigabyte model does not, and it failed quietly first: the steps
+		// stopped landing and only the last write said anything.
+		//
+		// The keeper renews on a timer for as long as the work keeps reporting,
+		// and stops renewing once it has been silent for the budget. The bound
+		// is not optional — an owner that renewed on a bare timer would hold a
+		// lease forever while a delegate held a connection and sent nothing.
+		// keeper.go and docs/stall-detection.md have the argument.
+		ctx, keep := r.keep(ctx, id, epoch)
+		defer keep.stop()
+
+		r.step(keep, &job.Step{
 			Name:    "copying from " + rec.Delegation.System,
 			Ordinal: 2,
 			Of:      phases,
@@ -498,7 +542,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		if rf, ok := d.(ReportingFinalizer); ok {
 			err = rf.FinalizeReporting(ctx, rec.Delegation.ExternalID, final,
 				func(done, total int64) {
-					r.step(id, epoch, &job.Step{
+					r.step(keep, &job.Step{
 						Name:    "copying from " + rec.Delegation.System,
 						Ordinal: 2,
 						Of:      phases,
@@ -510,6 +554,12 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			err = d.Finalize(ctx, rec.Delegation.ExternalID, final)
 		}
 		if err != nil {
+			// A copy this owner's own watchdog cancelled surfaces as "context
+			// canceled", which describes the mechanism and not the reason. The
+			// reason is on the keeper, and it is the one a person needs.
+			if ferr := keep.fenced(); ferr != nil {
+				return fmt.Errorf("copying from %s: %w", rec.Delegation.System, ferr)
+			}
 			return err
 		}
 
@@ -517,12 +567,48 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		// mostly did not, and even the one that did sent the bytes over a second
 		// network to get here. Re-hashing gigabytes is not instant either, and
 		// it was the second half of the silence.
-		r.step(id, epoch, &job.Step{Name: "verifying", Ordinal: 3, Of: phases})
-		total, digest, err := hashFile(final)
+		//
+		// It is also the phase the silence budget must not stop. Hashing is
+		// local CPU with nothing to report to any network and it legitimately
+		// runs for minutes on a large model, so it reports: every chunk to the
+		// watchdog, which costs nothing, and to the record no more often than a
+		// checkpoint would have been written, because a person cannot read a
+		// number that changes fifty times a second.
+		r.step(keep, &job.Step{Name: "verifying", Ordinal: 3, Of: phases})
+		said := time.Now()
+		total, digest, err := hashFile(ctx, final, func(done, of int64) {
+			keep.beat()
+			if r.PersistInterval > 0 && time.Since(said) < r.PersistInterval {
+				return
+			}
+			said = time.Now()
+			r.step(keep, &job.Step{
+				Name:    "verifying",
+				Ordinal: 3,
+				Of:      phases,
+				Done:    done,
+				Total:   of,
+			})
+		})
 		if err != nil {
+			if ferr := keep.fenced(); ferr != nil {
+				return fmt.Errorf("verifying what %s delivered: %w", rec.Delegation.System, ferr)
+			}
 			return err
 		}
-		if want := spec.Artifact.Digest; want != "" && !equalFold(digest, want) {
+
+		// The fence, before the two writes that are not idempotent. An owner
+		// whose lease lapsed while it hashed must not tell the store this file
+		// is delivered, and must not reset the checkpoint on a mismatch: a
+		// successor may have claimed the job and be writing that path right now.
+		//
+		// Stopping rather than only checking, and stopping HERE rather than in
+		// the deferred stop above: a renewal still in flight re-writes a record
+		// it loaded moments ago, and would undo the terminal write below.
+		if err := keep.stop(); err != nil {
+			return err
+		}
+		if want := spec.Artifact.Digest; want != "" && !sameDigest(digest, want) {
 			_, uerr := r.Store.Update(id, epoch, func(rr *job.Record) error {
 				rr.Delegation = nil
 				rr.State = job.StatePending
@@ -551,6 +637,84 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	return fmt.Errorf("download: delegate reported unknown state %q", st.State)
 }
 
+// stranded is a delegated record naming a system this process cannot speak to.
+//
+// Repeating the complaint on every sweep — which is what this used to do, for
+// good — is the one answer that is certainly wrong. Such a record is either
+// somebody else's business, in which case saying anything is noise, or work
+// nobody here can advance, in which case it wants saying once and then leaving
+// alone. It cannot be told from the record which of the two it is: a delegation
+// handle carries the delegate's name and nothing about who created it.
+//
+// So the note goes on the RECORD, and only if it is not already there. That is
+// what makes "once" mean once. The `said` map in the supervisor cannot: a
+// supervisor installed as a scheduled task is a fresh process on every sweep
+// and remembers nothing, which is precisely how the same line came to be
+// written for good. The store is the only memory this design has ever had.
+//
+// It is also the other half of the defect. The only place this surfaced was a
+// log line, so a job stuck this way said nothing about being stuck, and the
+// record read exactly like one a delegate was busy on. An absent record means
+// refusal here as everywhere else: a supervisor that cannot move a job must not
+// leave it looking healthy.
+//
+// Nothing else changes, and deliberately. The state is left alone because the
+// delegate may be holding every byte, so this is waiting rather than failure,
+// and a process that DOES understand the handle — the same machine with that
+// tier linked in, or the one that delegated it — must still be able to finish
+// the job and clear the note. Adopt skips delegated records, so nothing here
+// starts fetching the same bytes a second time either.
+func (r *Runner) stranded(rec *job.Record) error {
+	system := rec.Delegation.System
+	err := fmt.Errorf("%w %q", ErrStrandedHere, system)
+
+	// Which of the two problems a person has, because the next thing they do
+	// differs: a tier that is linked but did not come up is something to fix on
+	// this machine, and one that was never linked is a job for another process.
+	why := "no such tier is linked into this program"
+	if linkedHere(system) {
+		why = "that tier is linked here but did not come up"
+	}
+	note := fmt.Sprintf("waiting for a process that understands %q: %s", system, why)
+	if rec.Error == note {
+		return err
+	}
+
+	claimed, cerr := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	if cerr != nil {
+		// Somebody holds the lease, so somebody is working on it and this
+		// process has nothing to add. Not a second failure to report.
+		return err
+	}
+	epoch := claimed.Lease.Epoch
+	_, uerr := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+		rr.Error = note
+		return nil
+	})
+	r.Store.Release(rec.ID, epoch)
+	if uerr != nil {
+		return uerr
+	}
+	return err
+}
+
+// linkedHere reports whether a tier by this name is compiled into this program
+// at all.
+//
+// The distinction RegisteredTiers was added for: "linked, but not available
+// here" and "not linked at all" are very different problems and a user needs to
+// tell them apart. It is asked of the program rather than of the runner on
+// purpose — a runner may have been handed a shorter list by an operator running
+// `--without bits`, and that is still a tier this build understands.
+func linkedHere(system string) bool {
+	for _, name := range RegisteredTiers() {
+		if name == system {
+			return true
+		}
+	}
+	return false
+}
+
 // ReconcileAll walks every delegated download and brings each up to date. This
 // is what a service runs on a timer, and on start after a reboot.
 func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
@@ -564,20 +728,30 @@ func (r *Runner) ReconcileAll(ctx context.Context) (int, error) {
 		if rec.Kind != Kind || !rec.Delegated() {
 			continue
 		}
-		// A terminal job is NOT skipped when it still holds a delegation handle.
-		// That filter is what made the abandon-on-terminal path unreachable: the
-		// inner function knew to tell the delegate, and this one never called
-		// it, so a cancelled job left a NAS fetching 3.1 GB to completion for
-		// nobody. Terminal here means "this side is finished with it", which is
-		// exactly when the other side needs telling.
-		if rec.State.Terminal() && rec.Delegation.Delivered {
-			continue
-		}
 		// Nothing to catch up on, and asking would undo it — see Reconcile.
+		//
+		// A terminal job is NOT skipped merely for being terminal, only for
+		// having been delivered. Skipping it made the abandon-on-terminal path
+		// unreachable: Reconcile knew to tell the delegate, and this loop never
+		// called it, so a cancelled job left a NAS fetching 3.1 GB to completion
+		// for nobody. Terminal means "this side is finished with it", which is
+		// exactly when the other side needs telling.
 		if rec.Delegation.Delivered || rec.State == job.StateTransferred {
 			continue
 		}
 		if err := r.Reconcile(ctx, rec.ID); err != nil {
+			// A delegate this process cannot speak to is not a problem the
+			// sweep can report its way out of, and it is not a problem that
+			// changes between sweeps. Reconcile has already put the reason
+			// where a person will find it — on the record — so raising it here
+			// as well is the line that printed on every sweep for good.
+			//
+			// It is not counted either. A job nothing here can move was not
+			// reconciled, and saying it was is the same lie as the healthy
+			// `reconciled=2` below.
+			if errors.Is(err, ErrStrandedHere) {
+				continue
+			}
 			// One unreachable delegate must not stop the others -- but it must
 			// not vanish either. This was a bare `continue`, and the silence
 			// cost real time: a job that could not progress looked exactly like
@@ -735,17 +909,33 @@ func (r *Runner) honourDelegated(ctx context.Context, rec *job.Record, want job.
 	return nil
 }
 
-// step records which phase this job is in, best-effort.
+// step records which phase this job is in, and doubles as this owner's proof
+// that it still holds the lease.
 //
-// Best-effort on purpose: a step is advisory, and failing to write one must
-// never fail the transfer it is describing. The lease is already held by the
-// caller, so this is one small write on a record it owns.
-func (r *Runner) step(id string, epoch int64, st *job.Step) {
-	_, _ = r.Store.Update(id, epoch, func(rr *job.Record) error {
+// The write is still advisory: a step nobody could record must never fail the
+// transfer it was only describing. But the ERROR is not advisory, and throwing
+// it away is what hid the bug the keeper exists to fix. This was `_, _ =`, so
+// once the lease lapsed under a long finalise the steps silently stopped
+// landing and the first thing anyone heard about it was the terminal update
+// failing, minutes later, with nothing to say which write had been the first to
+// be refused.
+//
+// So a refusal for a stale epoch or a lapsed lease goes to the keeper, which
+// remembers it and stops the work — that is the fence clause of the lease
+// protocol, and this is one of the two places an owner learns it has been
+// fenced. Anything else is ignored, as before.
+func (r *Runner) step(k *keeper, st *job.Step) {
+	_, err := r.Store.Update(k.id, k.epoch, func(rr *job.Record) error {
 		rr.Progress.Step = st
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		return nil
 	})
+	if err != nil {
+		k.refused(err)
+		return
+	}
+	// A phase that got as far as writing the record is a phase that moved.
+	k.beat()
 }
 
 // abandonDelegated tells a delegate to stop work the local record has already

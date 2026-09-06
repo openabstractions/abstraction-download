@@ -1,0 +1,16 @@
+# requires: wire
+#
+# `Content-Encoding: gzip` on a body nobody asked to have compressed. A request
+# that sends no Accept-Encoding has, by RFC 9110, accepted every coding, so this
+# is a legal answer -- and the transport underneath each language then decides
+# on its own whether the bytes handed up are the artifact's or the envelope's.
+# An offset over an encoded body names a different byte at each end, which is
+# why a ranged request asks for identity.
+submit A size=64 digest=good src=http:gzip
+run A alpha
+orphans
+state A
+
+# expect 2: transfer-failed state=pending [DL-R11]
+# expect 2: done=0 err=set
+# expect 3: ok A [DL-R12]

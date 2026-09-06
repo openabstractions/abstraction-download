@@ -1,0 +1,20 @@
+# requires: store
+#
+# Two listeners on one store are independent: each has its own present, and
+# taking a notice from one takes nothing from the other.
+submit A size=64 digest=good src=file
+watch W 300
+watch V 300
+next W
+claim A alpha 60000
+next W
+next V
+next V
+
+# expect 4: changed
+# expect 4: A=pending/0
+# expect 6: changed
+# expect 6: A=running/0
+# expect 7: changed [WATCH-X2]
+# expect 7: A=running/0
+# expect 8: quiet [WATCH-X2]

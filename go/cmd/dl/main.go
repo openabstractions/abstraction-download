@@ -24,7 +24,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -32,10 +34,9 @@ import (
 	"strings"
 	"time"
 
+	asks "github.com/openabstractions/abstraction-asks/go"
 	download "github.com/openabstractions/abstraction-download/go"
 	job "github.com/openabstractions/abstraction-job/go"
-
-	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 func main() {
@@ -83,15 +84,10 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-// open is the whole of this program's setup. It used to be four lines that
-// found a directory, opened a file store and built a runner — an application
-// assembling the machinery it was supposed to be spared.
-//
-// dl still takes the job.Store alongside, because it reads and renders records
-// and lives inside this layer. That is the INTERFACE, not the binding: dl cannot
-// tell whether there is a directory behind it, which is exactly the property
-// that was missing when this was a *job.FileStore.
-func open() (download.Service, job.Store) {
+// open is this program's whole setup. dl takes the job.Store alongside the
+// client because it reads and renders records; it gets the interface, never the
+// binding.
+func open() (download.Client, job.Store) {
 	svc, store, err := download.Open()
 	if err != nil {
 		fatal(err)
@@ -148,10 +144,10 @@ func cmdGet(ctx context.Context, args []string) {
 		}
 	}
 
+	mayReach(ctx, url)
 	svc, store := open()
-	// One call. Where the destination name comes from, whether a supervisor
-	// exists, and who ends up moving the bytes are all settled below this line —
-	// dl no longer asks and no longer branches.
+	// Where the destination name comes from, whether a supervisor exists, and
+	// who ends up moving the bytes are all settled below this line.
 	//
 	// A digest changes what is possible rather than merely adding a check. It is
 	// an identity, so the layer below can ask whether these exact bytes are
@@ -169,7 +165,10 @@ func cmdGet(ctx context.Context, args []string) {
 		fatal(err)
 	}
 	spec, _ := download.SpecOf(rec)
-	_, abs := download.LocalSink(store, spec.Sink)
+	_, abs, err := download.LocalSink(store, rec.ID, spec.Sink)
+	if err != nil {
+		fatal(err)
+	}
 
 	fmt.Printf("%s\n", url)
 	fmt.Printf("  to        %s\n", abs)
@@ -179,79 +178,48 @@ func cmdGet(ctx context.Context, args []string) {
 	fmt.Println()
 
 	done := make(chan error, 1)
-	go func() { done <- waitForEnd(ctx, store, id) }()
-	go follow(ctx, svc, store, id)
+	go func() { _, err := svc.Deliver(ctx, id); done <- err }()
+	shown, stop := context.WithCancel(ctx)
+	followed := make(chan struct{})
+	go func() { follow(shown, store, id); close(followed) }()
 
-	if err := <-done; err != nil {
+	err = <-done
+	stop()
+	<-followed
+	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Println("\ninterrupted. Progress is on disk — `dl watch` to see it resume.")
 			os.Exit(130)
 		}
 		fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond) // let the follower print the last line
 	report(store, id)
-}
-
-// waitForEnd blocks until the job stops being in flight, by watching the live
-// collection — the only method that works when the process moving the bytes is
-// not this one. It replaces waiting on a Runner, which only ever knew about a
-// transfer this process was performing itself.
-func waitForEnd(ctx context.Context, store job.Store, id string) error {
-	sub := job.Watch(store, download.Kind)
-	defer sub.Close()
-	for {
-		for _, rec := range sub.Records() {
-			if rec.ID != id {
-				continue
-			}
-			if rec.State == job.StateFailed {
-				return fmt.Errorf("%s", rec.Error)
-			}
-			if rec.State.Terminal() || rec.State == job.StateTransferred {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-sub.Changes():
-		}
-	}
 }
 
 // follow prints progress by reading the record, which is the same thing any
 // other process would do. Nothing here is privileged and nothing is in memory:
 // stop this program, start it again, and the picture is identical.
-func follow(ctx context.Context, svc download.Service, store job.Store, id string) {
+func follow(ctx context.Context, store job.Store, id string) {
+	sub := job.Watch(store, download.Kind)
+	defer sub.Close()
 	last := ""
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
-		}
-		rec, err := store.Load(id)
+		n, err := sub.Next(ctx)
 		if err != nil {
 			return
 		}
-		line := statusLine(store, rec)
-		if line != last {
-			fmt.Printf("\r%-78s", line)
-			last = line
-		}
-		if rec.State == job.StateTransferred || rec.State.Terminal() {
-			fmt.Println()
-			if rec.State == job.StateTransferred {
-				report(store, id)
-				// Take delivery: the requester saying "I have it". Without this a
-				// finished job waits in the store forever for somebody who never
-				// comes, and `dl watch` fills with downloads that ended days ago.
-				if err := svc.TakeDelivery(id); err != nil {
-					fmt.Fprintf(os.Stderr, "dl: %v\n", err)
-				}
+		for _, rec := range n.Records {
+			if rec.ID != id {
+				continue
 			}
-			return
+			if line := statusLine(store, rec); line != last {
+				fmt.Printf("\r%-78s", line)
+				last = line
+			}
+			if rec.State == job.StateTransferred || rec.State.Terminal() {
+				fmt.Println()
+				return
+			}
 		}
 	}
 }
@@ -285,7 +253,11 @@ func report(store job.Store, id string) {
 	if err != nil {
 		return
 	}
-	_, final := download.LocalSink(store, spec.Sink)
+	_, final, err := download.LocalSink(store, rec.ID, spec.Sink)
+	if err != nil {
+		fmt.Printf("\n%v\n", err)
+		return
+	}
 	switch rec.State {
 	case job.StateTransferred, job.StateComplete:
 		fmt.Printf("\n%s\n", final)
@@ -318,7 +290,14 @@ func cmdList(ctx context.Context) {
 		}
 		n++
 		spec, _ := download.SpecOf(rec)
-		_, final := download.LocalSink(store, spec.Sink)
+		// A record whose sink leaves the store root is listed as what it is,
+		// rather than as a blank name. Somebody has to be able to see the bad
+		// record in order to remove it.
+		_, final, err := download.LocalSink(store, rec.ID, spec.Sink)
+		if err != nil {
+			fmt.Printf("%-11s %v\n", statusLine(store, rec), err)
+			continue
+		}
 		fmt.Printf("%-11s %s\n", statusLine(store, rec), filepath.Base(final))
 	}
 	if n == 0 {
@@ -352,7 +331,12 @@ func cmdWatch(ctx context.Context) {
 				continue
 			}
 			spec, _ := download.SpecOf(rec)
-			_, final := download.LocalSink(store, spec.Sink)
+			_, final, err := download.LocalSink(store, rec.ID, spec.Sink)
+			if err != nil {
+				fmt.Printf("%s %v\n", statusLine(store, rec), err)
+				live++
+				continue
+			}
 			fmt.Printf("%s %s\n", statusLine(store, rec), filepath.Base(final))
 			live++
 		}
@@ -386,7 +370,7 @@ func human(n int64) string {
 // Get takes a URL and a place to put it, which is all most callers have. When a
 // digest is known it goes through Submit instead, because that is the path that
 // can look the artifact up before fetching it.
-func getWith(svc download.Service, url, out, digest string) (job.Job, error) {
+func getWith(svc download.Client, url, out, digest string) (job.Job, error) {
 	if digest == "" {
 		return svc.Get(url, out)
 	}
@@ -429,4 +413,34 @@ func schemeOf(u string) string {
 		return u[:i]
 	}
 	return "https"
+}
+
+func mayReach(ctx context.Context, rawurl string) {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		fatal(err)
+	}
+	c := &asks.Client{Endpoint: asks.DefaultEndpoint()}
+	ask := asks.Ask{Asker: "dl", Key: "download.reach", Slots: map[string]string{"host": u.Host}}
+	a, err := c.Ask(ctx, ask)
+	if errors.Is(err, asks.ErrNoService) {
+		fmt.Fprintf(os.Stderr, "dl: nothing on this machine answers questions; fetching from %s unasked\n", u.Host)
+		return
+	}
+	if err != nil {
+		fatal(err)
+	}
+	if a.Pending {
+		fmt.Printf("dl has asked whether it may fetch from %s\n  a person answers:  asks pending  then  asks answer %s allow|once|refuse|never\n", u.Host, a.ID)
+		if a, err = c.Await(ctx, ask); err != nil {
+			fatal(err)
+		}
+	}
+	switch {
+	case a.Yes:
+	case a.Kept:
+		fatal(fmt.Errorf("a person said never to fetching from %s;  asks forget %s  reopens it", u.Host, a.ID))
+	default:
+		fatal(fmt.Errorf("a person refused fetching from %s this time", u.Host))
+	}
 }

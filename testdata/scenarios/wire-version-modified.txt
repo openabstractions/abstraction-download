@@ -1,0 +1,23 @@
+# requires: wire
+#
+# wire-version-changed with the other validator. Plenty of servers publish no
+# ETag at all, so Last-Modified is the only token a resume can offer them, and
+# an implementation that records one and an implementation that does not are
+# indistinguishable until the day a file changes.
+#
+# The date is an IMF-fixdate, which is the one spelling RFC 9110 requires a
+# server to send. What the three do with the obsolete spellings is NOT compared
+# here and they do not agree; see feedback/2026-09-06-wire-gaps.md.
+submit A size=64 digest=good src=http:modified
+claim A alpha 5000
+stage A 40 stale
+progress A alpha 40 {"verified_prefix":40,"validators":{"last_modified":"Sun, 06 Nov 1994 08:49:37 GMT"}}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred
+# expect 6: done=64 err=none
+# expect 6: cp={"verified_prefix":64,"validators":{"last_modified":"Mon, 07 Nov 1994 08:49:37 GMT"}} [DL-V4]
+# expect 7: ok -

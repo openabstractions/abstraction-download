@@ -1,8 +1,11 @@
 package download
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	job "github.com/openabstractions/abstraction-job/go"
@@ -50,10 +53,55 @@ type Artifact struct {
 // Lock the descriptor to a URL and delegation, multi-source, mirrors and dedup
 // across model revisions all become impossible to add later.
 type Source struct {
-	Scheme   string            `json:"scheme"`
-	Locator  string            `json:"locator"`
-	Attrs    map[string]string `json:"attrs,omitempty"`
-	Priority int               `json:"priority,omitempty"`
+	Scheme  string `json:"scheme"`
+	Locator string `json:"locator"`
+
+	// Attrs describe the source to THIS LAYER and never reach the wire.
+	//
+	// They used to do both. Anything here that no switch statement recognised
+	// was copied into the outgoing request as a header, so `boundaries` — a
+	// range table read off a reconstruction manifest — was one forgotten case
+	// away from being sent to a CDN, and every attribute anyone added after it
+	// would have leaked by default. Four special cases and no rule.
+	//
+	// Now the rule is the shape: an attribute cannot become a header, because
+	// nothing reads this map when a request is built. Forgetting is no longer
+	// expressible.
+	Attrs map[string]string `json:"attrs,omitempty"`
+
+	// Headers are what the caller intends to send, named one at a time.
+	//
+	// Deliberately not a place for a secret. A credential is named in Attrs and
+	// resolved on this machine at the moment of the request, so it is never in
+	// the record — see Credentials. Validate refuses the header names a secret
+	// is conventionally spelled with, which closes the common mistake and
+	// cannot close them all; the rule that carries the weight is still that a
+	// record stores a reference, never a value.
+	//
+	// That constraint is what makes this field ADVISORY in the sense job.Record
+	// means it: an older reader that has never heard of this key drops it, and
+	// what it drops is decoration rather than the thing that authorises the
+	// request. A header whose absence would break the transfer is a credential,
+	// and a credential's absence is already a refusal rather than a silent
+	// anonymous fetch.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	Priority int `json:"priority,omitempty"`
+}
+
+// resolvedHeaders are the header names this layer decides for itself, which a
+// record therefore may not decide for it.
+//
+// Authorization and its proxy twin are where Credentials puts a resolved
+// secret; Cookie is the other place one is conventionally spelled. Range is
+// refused for a different reason: the bounds of a transfer are what the resume
+// logic and the range planner agree about, and a record that sets them tells the
+// server one thing and this layer another.
+var resolvedHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"range":               true,
 }
 
 // Sink is where the bytes land, declared at submission and never returned.
@@ -104,7 +152,32 @@ type Checkpoint struct {
 	Verified Ranges `json:"-"`
 }
 
-func (s Spec) Validate() error {
+// MarshalJSON refuses to write a checkpoint that carries ranges.
+//
+// Verified is not a field of this struct's JSON, so marshalling one drops it
+// without a word — and rec.SetCheckpoint(Checkpoint{Verified: ...}) is the
+// obvious call for anybody who has just read the struct. It has already been
+// written, in a test, and the ranges silently vanished. There is no way to make
+// that call correct without giving the record a second spelling of a state
+// allowed only one, so it is made loud instead: the right call is
+// setCheckpoint, which knows where the job layer keeps a range set.
+func (c Checkpoint) MarshalJSON() ([]byte, error) {
+	if len(c.Verified) > 0 {
+		return nil, errors.New("download: a checkpoint carrying ranges must be written through setCheckpoint")
+	}
+	type plain Checkpoint
+	return json.Marshal(plain(c))
+}
+
+// Validate checks a spec that belongs to no job yet. Every path in the store's
+// work area is reserved against it, because nothing owns one until an id
+// exists. See ValidateFor.
+func (s Spec) Validate() error { return s.ValidateFor("") }
+
+// ValidateFor checks a spec on behalf of the job that will carry it. The id is
+// needed because one relative path in the store — work/<id> — is reserved
+// against every job except the one it belongs to.
+func (s Spec) ValidateFor(owner string) error {
 	if len(s.Sources) == 0 {
 		return fmt.Errorf("download: at least one source is required")
 	}
@@ -115,9 +188,22 @@ func (s Spec) Validate() error {
 		if strings.TrimSpace(src.Locator) == "" {
 			return fmt.Errorf("download: source %d: locator is required", i)
 		}
+		if err := validHeaders(src); err != nil {
+			return fmt.Errorf("download: source %d: %w", i, err)
+		}
 	}
 	if strings.TrimSpace(s.Sink.Final) == "" {
 		return fmt.Errorf("download: sink final path is required")
+	}
+	// Final first, then partial, so a record with both wrong names the same
+	// field in every implementation.
+	for _, p := range []string{s.Sink.Final, s.Sink.Partial} {
+		if err := EscapesRoot(p); err != nil {
+			return err
+		}
+		if err := ReservedSink(owner, p); err != nil {
+			return err
+		}
 	}
 	if s.Artifact.Digest != "" && !strings.HasPrefix(s.Artifact.Digest, "sha256:") {
 		return fmt.Errorf("download: digest %q is not sha256:<hex>", s.Artifact.Digest)
@@ -125,21 +211,31 @@ func (s Spec) Validate() error {
 	return nil
 }
 
-// Submit creates a download job. It fills in a partial path under the store's
-// own work directory when the caller does not choose one, so a successor can
-// find what a predecessor left without either of them agreeing on a convention.
+func validHeaders(src Source) error {
+	for name := range src.Headers {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "" {
+			return fmt.Errorf("a header needs a name")
+		}
+		if resolvedHeaders[lower] || lower == strings.ToLower(src.Attrs[CredentialHeaderAttr]) {
+			return fmt.Errorf("header %q is resolved on the machine that fetches, so a record may not carry it", name)
+		}
+	}
+	return nil
+}
+
+// Submit creates a download job. It names the partial file when the caller does
+// not, so a successor can find what a predecessor left without the two of them
+// agreeing on a convention privately. See PartialFor.
 func Submit(store job.Store, spec Spec, requires ...string) (string, error) {
 	return submitAs(store, job.NewID(), spec, requires...)
 }
 
-// submitAs is Submit with the id chosen by the caller rather than invented here.
-//
-// The id is the store's only exclusion primitive: both bindings refuse a second
-// Submit of an id that already exists, so a caller that can compute an id from
-// the work itself gets create-or-find without a lock. ResumeOrSubmit is the one
-// caller that needs it; see resume.go.
+// submitAs is Submit under an id the caller chose, which is how a record keyed
+// to its destination gets created: the create either wins or tells the caller
+// somebody else already holds that destination. See client.claimDestination.
 func submitAs(store job.Store, id string, spec Spec, requires ...string) (string, error) {
-	if err := spec.Validate(); err != nil {
+	if err := spec.ValidateFor(id); err != nil {
 		return "", err
 	}
 	// Slashes, always, for the paths that are relative. filepath.Join on Windows
@@ -151,10 +247,7 @@ func submitAs(store job.Store, id string, spec Spec, requires ...string) (string
 	spec.Sink.Partial = Portable(spec.Sink.Partial)
 	spec.Sink.Final = Portable(spec.Sink.Final)
 	if spec.Sink.Partial == "" {
-		// Relative, deliberately. The store knows where its work directory is on
-		// whichever machine is asking; baking this machine's answer into the
-		// record is what would stop a NAS from ever adopting the job.
-		spec.Sink.Partial = "work/" + id
+		spec.Sink.Partial = PartialFor(spec.Sink.Final, id)
 	}
 	rec := job.Record{ID: id, Kind: Kind, Requires: requires}
 	rec.Progress.Total = spec.Artifact.Size
@@ -179,14 +272,6 @@ func SpecOf(rec *job.Record) (Spec, error) {
 
 // CheckpointOf reads the resume point. A job that has never checkpointed
 // returns a zero Checkpoint, which correctly means "start at the beginning".
-//
-// Verified and VerifiedPrefix both come back reconciled: the record's two
-// fields are unioned, canonicalised, and the prefix is then re-derived from the
-// result. So a record written by a prefix-only writer reads as one range
-// [0, prefix), a record written by a ranges-aware writer reads as its set, and
-// a record where a prefix-only writer took over from a ranges-aware one — which
-// is not an edge case, it is what any older implementation adopting the job
-// produces — reads as everything either of them proved.
 func CheckpointOf(rec *job.Record) (Checkpoint, error) {
 	var c Checkpoint
 	if err := rec.DecodeCheckpoint(&c); err != nil {
@@ -215,19 +300,158 @@ func CheckpointOf(rec *job.Record) (Checkpoint, error) {
 // contents are portable because nothing inside names the host's mount point.
 // Absolute paths are left alone — a caller who names `D:\models\x.gguf` means
 // that drive, and it is not this function's business to second-guess them.
-func (s Sink) Resolve(root string) (partial, final string) {
-	return resolveUnder(root, s.Partial), resolveUnder(root, s.Final)
+//
+// "Under the store root" is enforced, not assumed, and so are the two things
+// containment alone does not cover: a contained path that names the store's own
+// files (ErrReservedPath) and an absolute path written in the other platform's
+// convention (ErrForeignPath). owner is the job the sink belongs to, because
+// work/<owner> is the one reserved path that is this job's to use.
+func (s Sink) Resolve(root, owner string) (partial, final string, err error) {
+	if partial, err = resolveSink(root, owner, s.Partial); err != nil {
+		return "", "", err
+	}
+	if final, err = resolveSink(root, owner, s.Final); err != nil {
+		return "", "", err
+	}
+	return partial, final, nil
 }
 
-func resolveUnder(root, p string) string {
+// resolveSink is resolveUnder plus the two refusals that need to know which
+// machine is asking and which job is asking. Kept apart from resolveUnder
+// because EscapesRoot answers about a RECORD, which has neither.
+func resolveSink(root, owner, p string) (string, error) {
+	resolved, err := resolveUnder(root, p)
+	if err != nil {
+		return "", err
+	}
+	if err := ForeignPath(p); err != nil {
+		return "", err
+	}
+	if err := ReservedSink(owner, p); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// ErrEscapesRoot is a relative sink path that resolves somewhere other than
+// under the store root.
+//
+// This is the one place in the layer where the writer's authority and the
+// caller's choice come apart. A PC submits the record; a NAS adopts it and does
+// the writing, with the NAS's account, to a destination the PC named. Until this
+// check existed `filepath.Join` cleaned the `..` away and said nothing, so
+// `../../../Users/victim/.ssh/authorized_keys` in a record resolved to exactly
+// that file — as did an autostart directory. A confused deputy, reachable by
+// anyone who can put a record in a shared store.
+//
+// Refused, never clamped. Clamping would write 40 GB somewhere the caller did
+// not ask for and report success, which is the failure this layer exists to
+// refuse, and the caller would never learn its record was wrong.
+var ErrEscapesRoot = forever("download: sink path escapes the store root")
+
+func resolveUnder(root, p string) (string, error) {
 	if p == "" || !relativeEverywhere(p) {
-		return p
+		return p, nil
 	}
 	// Forgive a backslash in a RELATIVE path, because records written before
 	// Submit normalised them are on disk already, and because a backslash cannot
 	// legally appear in a Windows filename anyway — so reading it as a separator
 	// is the only interpretation that is ever right.
-	return filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(p, `\`, "/")))
+	resolved := filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(p, `\`, "/")))
+	if !under(root, resolved) {
+		return "", fmt.Errorf("%w: %s", ErrEscapesRoot, p)
+	}
+	return resolved, nil
+}
+
+// probeRoot is a stand-in store root, used to answer the containment question
+// about a path that has no root to hand — a record being read rather than run.
+// One segment deep, because containment is measured from the store root and a
+// deeper stand-in would absorb a `..` that a real root would not.
+const probeRoot = "/probe"
+
+// EscapesRoot reports whether a relative sink path would resolve outside the
+// store root — whichever root it is resolved against.
+//
+// Root-independent, and that is a fact about the question rather than a
+// shortcut: containment is measured from the store root, so one `..` climbs out
+// of it no matter how deep the root sits on any particular machine. That is what
+// lets a reader answer this about a RECORD, which deliberately names no root.
+//
+// Absolute paths answer nil. They are never joined onto the root, so they cannot
+// escape it in this sense; what a machine adopting a record should do with one
+// is a separate question and is not decided here.
+func EscapesRoot(p string) error {
+	_, err := resolveUnder(probeRoot, p)
+	return err
+}
+
+// under reports whether resolved names a location inside root.
+//
+// Asked of the RESULT of the join, never of the input. Scanning the input for
+// ".." is the check everybody writes and it is defeated by a path that spells
+// the climb some other way, and it fires on paths like `a/../b` that are
+// perfectly contained. Resolve first, then ask where the answer landed.
+//
+// Every shortcut in the comparison itself is wrong somewhere, so none is taken:
+//
+//   - `C:\store2` starts with `C:\store` and is a different directory, so the
+//     prefix has to end on a separator boundary.
+//   - Windows ignores case in a path and POSIX does not, so folding is
+//     conditional on the OS rather than done to be safe.
+//   - `\\nas\share\store`, `C:\`, `/` and a trailing separator must not change
+//     the answer, so both sides are reduced to one spelling first.
+//
+// What this does NOT close: a directory inside the root that is itself a
+// symlink or a junction pointing out of it. `models/x.gguf` is then contained
+// by every lexical measure and the bytes still land elsewhere. Closing it needs
+// the path resolved at the moment of the write — the file does not exist yet
+// when this runs, and resolving it here would only move the race earlier — and
+// none of Go, Python and C++ has a portable "open without following a link".
+// This is lexical containment and claims nothing more.
+func under(root, resolved string) bool {
+	r := comparablePath(root)
+	c := comparablePath(resolved)
+	if r == "" || r == "." {
+		// The store's binding is not a filesystem, so there is no root to be
+		// inside — localRoot answers "" for exactly that case. All that can be
+		// said is that the path did not climb out of wherever it eventually
+		// gets resolved, which the cleaning has already made visible.
+		return c != ".." && !strings.HasPrefix(c, "../")
+	}
+	if c == r {
+		return true
+	}
+	if !strings.HasSuffix(r, "/") {
+		r += "/"
+	}
+	return strings.HasPrefix(c, r)
+}
+
+// comparablePath reduces a path to the one spelling in which two of them can be
+// compared: cleaned, forward slashes, no trailing separator, and case-folded
+// only where the filesystem itself ignores case.
+func comparablePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	// The UNC root is held back over the clean. filepath.Clean collapses a
+	// leading `//` to `/` on POSIX and keeps it on Windows, so a record naming
+	// `//nas/share/x` compared differently depending on which machine asked —
+	// and Python's normpath and the C++ cleaner both keep it.
+	s := strings.ReplaceAll(p, `\`, "/")
+	unc := ""
+	if strings.HasPrefix(s, "//") && !strings.HasPrefix(s, "///") {
+		unc, s = "/", s[1:]
+	}
+	s = unc + strings.ReplaceAll(filepath.Clean(s), `\`, "/")
+	for len(s) > 1 && strings.HasSuffix(s, "/") {
+		s = s[:len(s)-1]
+	}
+	if runtime.GOOS == "windows" {
+		s = strings.ToLower(s)
+	}
+	return s
 }
 
 // relativeEverywhere reports whether p is relative under BOTH conventions.
@@ -250,15 +474,57 @@ func relativeEverywhere(p string) bool {
 	return !filepath.IsAbs(p)
 }
 
-// Portable puts a relative path into the one form every machine reads the same
-// way. Absolute paths are left exactly as given — they already name a specific
-// machine's filesystem, and rewriting their separators would not make them any
-// more portable, only harder to recognise.
+// PartialFor names the file the bytes accumulate in before they earn the final
+// name, for a caller that did not choose one. It is a wire-visible choice: the
+// name goes into the record, and a successor in another language finds what a
+// predecessor left by reading it. scripts/spec-conformance.sh compares the three
+// implementations' answers.
+//
+// Two cases, because "beside the store" and "beside the artifact" are both
+// right and neither is right for the other one.
+//
+// A RELATIVE final resolves under the store root on whichever machine picks the
+// job up, so the partial goes in the store's own work directory. Baking this
+// machine's answer into the record is what would stop a NAS from adopting it.
+//
+// An ABSOLUTE final names one machine's filesystem already, and the store may be
+// on a different volume — a model going to D:\ with the store on C:. Delivery
+// across volumes cannot be a rename, so it degrades to a copy INTO THE FINAL
+// NAME, and a crash halfway through leaves a truncated file under the name an
+// application reads as an installed model. That is the exact failure this layer
+// exists to refuse. Beside the artifact, delivery is a rename on one filesystem
+// and the final name does not exist until the bytes are all there.
+func PartialFor(final, id string) string {
+	if relativeEverywhere(final) {
+		return "work/" + id
+	}
+	return final + ".part"
+}
+
+// Portable puts a path into the one spelling a record uses: `/` is the only
+// separator, everywhere, whatever wrote it.
+//
+// Absolute paths used to be exempt, on the argument that they already name one
+// machine and respelling them buys nothing. What that missed is that the
+// separator then records WHICH machine wrote the record — a job delegated to the
+// NAS came back spelled `C:/Users/...` and the same file fetched here was
+// `C:\Users\...` — and that two spellings of one destination do not compare
+// equal, so "are we already fetching this?" answers no and the artifact is
+// fetched twice. An adopter joining a native directory to a file name with a
+// hardcoded `/` produced a path that changed convention halfway through, and
+// nothing refused it.
+//
+// Nothing is lost by the rewrite: a drive letter and a UNC root still say
+// Windows afterwards — windowsShaped reads `//server/share` as UNC for exactly
+// this reason — and Windows accepts either separator in every path it is given.
+//
+// A POSIX-rooted path is returned untouched, because there a backslash is a
+// legal character in a file's name and rewriting it would name a different file.
 func Portable(p string) string {
-	if !relativeEverywhere(p) {
+	if strings.HasPrefix(p, "/") {
 		return p
 	}
-	return filepath.ToSlash(p)
+	return strings.ReplaceAll(p, `\`, "/")
 }
 
 // sameDigest compares two sha256 digests written by different implementations.

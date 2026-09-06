@@ -1,0 +1,31 @@
+# requires: transfer
+#
+# The two endings a failed transfer can have, and the difference between them is
+# the whole of it: a refusal nobody will ever satisfy must end the job, and a
+# source that merely was not there must leave it adoptable. Get this backwards
+# in either direction and the store either re-fetches a 404 forever or gives up
+# on a NAS that had rebooted.
+submit A size=64 digest=good src=nofetcher
+run A alpha
+orphans
+submit B size=64 digest=good src=missing
+run B beta
+orphans
+submit C size=64 digest=bad src=file
+run C gamma
+orphans
+state A
+state B
+state C
+
+# expect 2: transfer-failed state=failed [DL-E4]
+# expect 3: ok - [DL-E2]
+# expect 5: transfer-failed state=pending [DL-E5]
+# expect 5: err=set [DL-E1]
+# expect 6: ok B
+# expect 8: transfer-failed state=pending [DL-R16]
+# expect 8: done=0 err=set [DL-R15]
+# expect 9: ok B C
+# expect 10: state=failed
+# expect 11: state=pending
+# expect 12: state=pending

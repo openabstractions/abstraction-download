@@ -1,0 +1,19 @@
+# requires: store
+#
+# The first notice a listener gets is the present -- what is true, whether or
+# not anything moved since before it attached. A listener attaching late sees
+# a running job as running, never a history it has to replay.
+watch W 300
+next W
+submit A size=64 digest=good src=file
+next W
+claim A alpha 60000
+watch V 300
+next V
+
+# expect 2: changed [WATCH-P1]
+# expect 2: -
+# expect 4: changed
+# expect 4: A=pending/0
+# expect 7: changed [WATCH-P1]
+# expect 7: A=running/0

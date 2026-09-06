@@ -233,7 +233,7 @@ func TestRepeatingTheCommandInsideADeadOwnersLeaseStillResumes(t *testing.T) {
 	r.LeaseTTL = 3 * time.Second
 	r.PersistInterval = 200 * time.Millisecond
 	r.PersistEvery = 64 << 10
-	svc := NewService(r)
+	svc := NewClient(r)
 
 	dest := t.TempDir() + "/out.bin"
 	spec := Spec{
@@ -284,5 +284,51 @@ func TestRepeatingTheCommandInsideADeadOwnersLeaseStillResumes(t *testing.T) {
 	}
 	if sha256.Sum256(got) != want {
 		t.Fatal("digest mismatch after resuming")
+	}
+}
+
+// An owner that dies between a pause being asked for and the pause being
+// carried out leaves the record RUNNING, wanting pause, under a lease that
+// lapses. Sweeps skip a paused job — deliberately, so nothing restarts work
+// seconds after a person stopped it — and that made this state permanent:
+// nothing may claim the job, so nothing may pause, resume or cancel it either.
+// A job no owner can ever pick up is worse than a failed one.
+func TestAPauseNobodyHonouredIsStillAdoptable(t *testing.T) {
+	body, digest := payload(t, 4096)
+	srv := newParallelServer(t, body)
+	r, store, id := parallelJob(t, body, digest, srv.URL+"/blob.bin")
+
+	if _, err := store.Claim(id, "dead-owner", 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetIntent(id, job.WantPause, "ui"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	orphans, err := store.Orphans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 {
+		t.Fatalf("a job left running under a dead lease was swept up by nobody: %d orphans", len(orphans))
+	}
+	if _, err := r.Adopt(context.Background()); err != nil {
+		t.Fatalf("adopting it: %v", err)
+	}
+
+	rec, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != job.StatePending || rec.Lease.Owner != "" {
+		t.Fatalf("the pause was still not honoured: state %s, held by %q", rec.State, rec.Lease.Owner)
+	}
+	if n := len(srv.ranges()); n != 0 {
+		t.Fatalf("the adopter made %d requests for a job it had been asked to pause", n)
+	}
+	// And now that somebody has honoured it, it is a paused job like any other.
+	if orphans, err = store.Orphans(); err != nil || len(orphans) != 0 {
+		t.Fatalf("an honoured pause is being swept again: %d orphans, %v", len(orphans), err)
 	}
 }

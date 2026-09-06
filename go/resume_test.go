@@ -14,9 +14,9 @@ import (
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
-// resumeService is serviceOn plus the runner, because these tests have to move
+// resumeClient is clientOn plus the runner, because these tests have to move
 // real bytes to see a real Range header.
-func resumeService(t *testing.T) (Service, *Runner, job.Store, string) {
+func resumeClient(t *testing.T) (Client, *Runner, job.Store, string) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := job.NewFileStore(root)
@@ -31,7 +31,7 @@ func resumeService(t *testing.T) (Service, *Runner, job.Store, string) {
 	if err := Heartbeat(store, "test-supervisor@host:1", "here", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	return NewService(r), r, store, root
+	return NewClient(r), r, store, root
 }
 
 // recordingServer serves body, honours Range, and remembers every Range header
@@ -70,7 +70,7 @@ func writePartial(t *testing.T, store job.Store, id string, body []byte, n int) 
 // A one-shot command has no job id to remember. Asked a second time for the same
 // destination, it must be handed the record it made the first time.
 func TestASecondCallFindsTheFirstRecord(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	spec := Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/a.bin"}},
 		Sink:    Sink{Final: filepath.Join(root, "out", "a.bin")},
@@ -80,15 +80,15 @@ func TestASecondCallFindsTheFirstRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c1.Disposition != Submitted {
-		t.Fatalf("first call reported %q, want %q", c1.Disposition, Submitted)
+	if c1.Decision != Submitted {
+		t.Fatalf("first call reported %q, want %q", c1.Decision, Submitted)
 	}
 	second, c2, err := svc.ResumeOrSubmit(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.Disposition != Resumed {
-		t.Fatalf("second call reported %q, want %q", c2.Disposition, Resumed)
+	if c2.Decision != Resumed {
+		t.Fatalf("second call reported %q, want %q", c2.Decision, Resumed)
 	}
 	if first.ID() != second.ID() {
 		t.Fatalf("two ids for one destination: %s and %s", first.ID(), second.ID())
@@ -109,7 +109,7 @@ func TestTheSecondAttemptSendsARangeRequest(t *testing.T) {
 	body, digest := payload(t, 64<<10)
 	const have = 12 << 10
 	srv, ranges := recordingServer(t, body)
-	svc, runner, store, root := resumeService(t)
+	svc, runner, store, root := resumeClient(t)
 
 	spec := Spec{
 		Artifact: Artifact{Digest: digest, Size: int64(len(body))},
@@ -132,8 +132,8 @@ func TestTheSecondAttemptSendsARangeRequest(t *testing.T) {
 	if second.ID() != first.ID() {
 		t.Fatalf("second call started a new job %s instead of continuing %s", second.ID(), first.ID())
 	}
-	if c.Disposition != Resumed {
-		t.Fatalf("disposition %q, want %q", c.Disposition, Resumed)
+	if c.Decision != Resumed {
+		t.Fatalf("decision %q, want %q", c.Decision, Resumed)
 	}
 	if c.ResumeFrom != have {
 		t.Fatalf("ResumeFrom = %d, want %d", c.ResumeFrom, have)
@@ -163,7 +163,7 @@ func TestTheSecondAttemptSendsARangeRequest(t *testing.T) {
 // create one id twice is what makes this one record rather than two racing
 // transfers to the same path.
 func TestConcurrentCallersProduceOneRecord(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	spec := Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/c.bin"}},
 		Sink:    Sink{Final: filepath.Join(root, "out", "c.bin")},
@@ -215,7 +215,7 @@ func TestConcurrentCallersProduceOneRecord(t *testing.T) {
 func TestAVanishedPartialIsNotTrusted(t *testing.T) {
 	body, digest := payload(t, 32<<10)
 	srv, ranges := recordingServer(t, body)
-	svc, runner, store, root := resumeService(t)
+	svc, runner, store, root := resumeClient(t)
 
 	spec := Spec{
 		Artifact: Artifact{Digest: digest, Size: int64(len(body))},
@@ -257,12 +257,11 @@ func TestAVanishedPartialIsNotTrusted(t *testing.T) {
 }
 
 // The same, one step less obvious: the file is there but shorter than the
-// checkpoint says. There is no resume point in that, and there used to be one —
-// the smaller of the two numbers — which reported 1 KiB as a place to carry on
-// from for a file nothing had proven a single byte of.
-func TestAShortPartialHasNoResumePoint(t *testing.T) {
+// checkpoint says. The file is the floor, so what a person is told is the
+// smaller of the two numbers and nothing on disk is thrown away to get it.
+func TestAShortPartialResumesFromTheFile(t *testing.T) {
 	body, _ := payload(t, 32<<10)
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	spec := Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/e.bin"}},
 		Sink:    Sink{Final: filepath.Join(root, "out", "e.bin")},
@@ -278,21 +277,18 @@ func TestAShortPartialHasNoResumePoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ResumeFrom != 0 {
-		t.Fatalf("ResumeFrom = %d, want 0 — the smaller of two disagreeing numbers is not a resume point", c.ResumeFrom)
+	if c.ResumeFrom != 1<<10 {
+		t.Fatalf("ResumeFrom = %d, want %d — the file is the floor and it holds that much", c.ResumeFrom, 1<<10)
 	}
-	if c.Discarded != 1<<10 {
-		t.Fatalf("Discarded = %d, want %d: the bytes being thrown away are a number, not a surprise", c.Discarded, 1<<10)
-	}
-	if !strings.Contains(c.Note, "unproven") {
-		t.Fatalf("Note does not mention what is being thrown away: %q", c.Note)
+	if c.Discarded != 0 {
+		t.Fatalf("Discarded = %d, want 0: there is no tail above the highest byte the file can back up", c.Discarded)
 	}
 }
 
 // A URL is not the identity; the destination is. Continuing anyway is a choice,
 // so the caller is told which source the job it was handed actually fetches.
 func TestADifferentSourceIsContinuedAndReported(t *testing.T) {
-	svc, _, _, root := resumeService(t)
+	svc, _, _, root := resumeClient(t)
 	final := filepath.Join(root, "out", "f.bin")
 	first, _, err := svc.ResumeOrSubmit(Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://origin.invalid/f.bin"}},
@@ -321,7 +317,7 @@ func TestADifferentSourceIsContinuedAndReported(t *testing.T) {
 
 // Complete means the file is there. Checked, not believed.
 func TestACompletedDownloadIsNotFetchedAgain(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	final := filepath.Join(root, "out", "g.bin")
 	spec := Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/g.bin"}},
@@ -343,8 +339,8 @@ func TestACompletedDownloadIsNotFetchedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Disposition != Delivered {
-		t.Fatalf("disposition %q, want %q", c.Disposition, Delivered)
+	if c.Decision != Delivered {
+		t.Fatalf("decision %q, want %q", c.Decision, Delivered)
 	}
 	if second.ID() != first.ID() {
 		t.Fatal("a finished download was fetched again")
@@ -362,14 +358,14 @@ func TestACompletedDownloadIsNotFetchedAgain(t *testing.T) {
 	if third.ID() == first.ID() {
 		t.Fatal("a completed record was reused although its file had gone")
 	}
-	if c.Disposition != Submitted {
-		t.Fatalf("disposition %q, want %q", c.Disposition, Submitted)
+	if c.Decision != Submitted {
+		t.Fatalf("decision %q, want %q", c.Decision, Submitted)
 	}
 }
 
 // Somebody else is downloading to this path. Their lease is theirs.
 func TestAnotherOwnersLeaseIsNotTaken(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	spec := Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/h.bin"}},
 		Sink:    Sink{Final: filepath.Join(root, "out", "h.bin")},
@@ -390,8 +386,8 @@ func TestAnotherOwnersLeaseIsNotTaken(t *testing.T) {
 	if second.ID() != first.ID() {
 		t.Fatal("a job somebody else is doing was duplicated")
 	}
-	if c.Disposition != Busy {
-		t.Fatalf("disposition %q, want %q", c.Disposition, Busy)
+	if c.Decision != Busy {
+		t.Fatalf("decision %q, want %q", c.Decision, Busy)
 	}
 	after, err := store.Load(first.ID())
 	if err != nil {
@@ -404,7 +400,7 @@ func TestAnotherOwnersLeaseIsNotTaken(t *testing.T) {
 
 // Two spellings of one path are one destination.
 func TestTwoSpellingsOfOneDestinationAreOneRecord(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	src := []Source{{Scheme: "https", Locator: "https://example.invalid/i.bin"}}
 	plain := filepath.Join(root, "out", "i.bin")
 	roundabout := root + "/out/./sub/../i.bin"
@@ -431,7 +427,7 @@ func TestTwoSpellingsOfOneDestinationAreOneRecord(t *testing.T) {
 
 // ResumeOrGet is the shape a command-line tool has: a URL and a path.
 func TestResumeOrGetIsKeyedOnTheSamePath(t *testing.T) {
-	svc, _, store, root := resumeService(t)
+	svc, _, store, root := resumeClient(t)
 	dest := filepath.Join(root, "out", "j.bin")
 	first, _, err := svc.ResumeOrGet("https://example.invalid/j.bin", dest)
 	if err != nil {
@@ -444,8 +440,8 @@ func TestResumeOrGetIsKeyedOnTheSamePath(t *testing.T) {
 	if first.ID() != second.ID() {
 		t.Fatal("running the command twice made two jobs")
 	}
-	if c.Disposition != Resumed {
-		t.Fatalf("disposition %q, want %q", c.Disposition, Resumed)
+	if c.Decision != Resumed {
+		t.Fatalf("decision %q, want %q", c.Decision, Resumed)
 	}
 	all, err := store.List()
 	if err != nil {

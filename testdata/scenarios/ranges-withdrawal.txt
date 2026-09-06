@@ -1,0 +1,23 @@
+# requires: transfer
+#
+# A record that declared the ranges model, taken over by a runner with nothing
+# but a prefix to report. The declaration is CARRIED, not derived -- the job
+# layer cannot rediscover it, because what it describes lives inside a field
+# that is opaque there -- so a writer that stops having holes to report has to
+# withdraw it, and nothing else will.
+#
+# Left declared, `content` names a data model the checkpoint does not carry, and
+# every reader that trusts the declaration is wrong about the same thing: it
+# looks for `verified`, finds nothing, and cannot tell "no holes" from "written
+# by somebody who never heard of ranges" -- which is the one distinction the
+# declaration exists to make.
+submit A size=64 digest=good src=file
+claim A alpha 5000
+progress A alpha 40 {"verified_prefix":8,"verified":[[0,8],[16,40]]}
+release A alpha
+run A beta
+state A
+
+# expect 5: ok state=transferred
+# expect 5: done=64
+# expect 5: content=abstraction.job/base@1 [JOB-D2]

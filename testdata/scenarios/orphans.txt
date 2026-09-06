@@ -1,0 +1,34 @@
+# requires: store
+#
+# Which records a sweep may adopt, as a function of state, lease and intent.
+# Three of these rows cost something real: a transferred job re-fetched forever,
+# a paused job restarted seconds after a person stopped it, and a job left
+# RUNNING under a dead owner that nothing may ever claim again.
+submit A size=64 digest=good src=file
+submit B size=64 digest=good src=file
+submit C size=64 digest=good src=file
+orphans
+claim A alpha 400
+orphans
+sleep 900
+orphans
+intent A pause
+orphans
+claim B beta 400
+release B beta
+intent B pause
+sleep 900
+orphans
+claim C gamma 400
+finish C gamma transferred
+sleep 900
+orphans
+state A
+state B
+state C
+
+# expect 4: ok A B C
+# expect 6: ok B C
+# expect 8: ok A B C
+# expect 10: ok A B C [JOB-I12]
+# expect 15: ok A C [JOB-I11] [JOB-T2]

@@ -1,0 +1,45 @@
+# requires: store
+#
+# The machine stays awake for exactly as long as a lease is held on running
+# work, and no longer. `hold` takes the platform's idle-sleep inhibitor for the
+# lease the record carries, the way a runner does at claim. Every way a lease
+# stops being one ends the hold: the holder letting go, the job turning
+# terminal, the lease lapsing. A record whose lease is not live holds nothing,
+# and a hold belongs to one epoch, so the same owner claiming again after a
+# lapse does not revive it. The holder dying is the case a scenario cannot
+# script and the one an inhibitor bound to a process gets for free.
+#
+# The hold learns of an ending through the watch layer, so an observation
+# follows the ending by one poll.
+submit A size=64 digest=good src=file
+hold A
+claim A alpha 5000
+hold A
+release A alpha
+sleep 1000
+state A
+claim A alpha 5000
+hold A
+finish A alpha failed
+sleep 1000
+state A
+submit B size=64 digest=good src=file
+claim B alpha 1500
+hold B
+sleep 1900
+state B
+claim B alpha 1500
+hold B
+sleep 1900
+claim B alpha 1500
+
+# expect 2: awake=no
+# expect 4: awake=yes
+# expect 7: awake=no
+# expect 9: awake=yes
+# expect 12: awake=no
+# expect 15: awake=yes
+# expect 17: awake=no
+# expect 19: awake=yes
+# expect 21: ok state=running
+# expect 21: awake=no

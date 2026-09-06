@@ -1,0 +1,20 @@
+# requires: wire
+#
+# DREAM.md § Rights: turn May reach off and the application's next connection
+# is refused with a reason it can show. Until this scenario the question was
+# put at the command line and the runner reached whatever a record named. This
+# is the refusal at the point a connection would be opened: the source is fine,
+# this machine will not go there, and the job is left for a machine that may —
+# or for the same machine once the switch is turned back on.
+submit A size=64 digest=good src=http:plain
+refuse 127.0.0.1 not on this machine's list
+run A alpha
+orphans
+allow 127.0.0.1
+run A alpha
+state A
+
+# expect 3: transfer-failed state=pending [DL-E8]
+# expect 3: done=0 err=set [DL-E1]
+# expect 4: ok A
+# expect 6: ok state=transferred

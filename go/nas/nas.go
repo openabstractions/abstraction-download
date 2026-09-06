@@ -101,7 +101,7 @@ var _ download.Delegator = (*Delegator)(nil)
 func (d *Delegator) System() string { return System }
 
 // Schemes: whatever the far side can fetch. It runs this same download layer,
-// so the answer is the list its own Registry would give.
+// so the answer is the list its own Fetchers would give.
 func (d *Delegator) Schemes() []string { return []string{"http", "https"} }
 
 // Capabilities. CapVerifies is claimed here and, unusually, it is true — the far
@@ -231,7 +231,14 @@ func (d *Delegator) FinalizeReporting(ctx context.Context, externalID, dest stri
 	if err != nil {
 		return err
 	}
-	_, src := download.LocalSink(d.store, spec.Sink)
+	// This store is the NAS's own, and the record in it was written by whoever
+	// asked. A sink that leaves the root names a file on the NAS that the
+	// requester chose and the NAS's account would read — so it is refused here
+	// as well as on the side that submits.
+	_, src, err := download.LocalSink(d.store, rec.ID, spec.Sink)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("nas: the far side reported success but %s is not there: %w", src, err)
 	}
@@ -285,9 +292,18 @@ func (d *Delegator) Abandon(ctx context.Context, externalID string) error {
 	// Measured, not theorised: a pause that reached the record as a cancel left
 	// a complete 3.1 GB model sitting on a share as a transferred job with no
 	// requester, and nothing was ever going to remove it.
-	if spec, serr := download.SpecOf(rec); serr == nil {
-		partial, final := download.LocalSink(d.store, spec.Sink)
-
+	//
+	// And nothing is removed for a record whose sink leaves the store root.
+	// Deleting outside the root on a requester's say-so is the same confused
+	// deputy as writing there, with the damage already done by the time anyone
+	// looks.
+	spec, serr := download.SpecOf(rec)
+	partial, final := "", ""
+	rerr := error(nil)
+	if serr == nil {
+		partial, final, rerr = download.LocalSink(d.store, rec.ID, spec.Sink)
+	}
+	if serr == nil && rerr == nil {
 		// The partial is named after this job's id, so it belongs to this job
 		// and nothing else can want it.
 		remove(externalID, partial)

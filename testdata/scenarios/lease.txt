@@ -1,0 +1,29 @@
+# requires: store
+#
+# The lease protocol as an observer sees it. Every line here is something a
+# caller branches on: whether it got the job, which epoch it holds, and which
+# of the three ways of not holding it any more happened to it.
+submit A size=64 digest=good src=file
+claim A alpha 1500
+claim A beta 1500
+progress A alpha 16 {"verified_prefix":16}
+sleep 1900
+progress A alpha 24 {"verified_prefix":24}
+claim A beta 1500
+progress A alpha 32 {"verified_prefix":32}
+progress A beta 32 {"verified_prefix":32}
+release A beta
+state A
+
+# expect 3: lease-held
+# expect 6: lease-expired [JOB-L5]
+# expect 6: done=16
+# expect 8: stale-epoch [JOB-L1]
+# expect 8: done=16
+# expect 9: ok state=running [JOB-S1]
+# expect 9: done=32
+# expect 10: ok state=pending [JOB-L6]
+
+# Step 3 cites nothing on purpose. No rule on either page says a live lease
+# refuses another claim — the pages describe the epoch, the expiry and the sweep,
+# and leave the plainest thing the lease does to be inferred.

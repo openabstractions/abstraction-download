@@ -1,0 +1,23 @@
+# requires: wire
+#
+# The multipart body again, this time under a top-level Content-Range naming
+# exactly the span that was asked for. Every offset check passes and the bytes
+# are still MIME, so the only thing left standing is the media type: a
+# multipart/byteranges body answers a request we never send, whatever its
+# headers agree about.
+#
+# Without that rule the boundary line goes into the artifact and the digest
+# catches it — one language at a time, and identically in all three, which is
+# the shape of defect no cross-implementation diff can see.
+submit A size=64 digest=good src=http:markedmultipart
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-R8]
+# expect 6: done=64 err=none
+# expect 7: ok -

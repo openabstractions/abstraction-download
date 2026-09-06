@@ -65,7 +65,10 @@ func partialOf(t *testing.T, store job.Store, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	partial, _ := LocalSink(store, spec.Sink)
+	partial, _, err := LocalSink(store, id, spec.Sink)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return partial
 }
 
@@ -79,7 +82,10 @@ func finalOf(t *testing.T, store job.Store, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, final := LocalSink(store, spec.Sink)
+	_, final, err := LocalSink(store, id, spec.Sink)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return final
 }
 
@@ -237,12 +243,18 @@ func TestResumeDiscardsUnprovenBytes(t *testing.T) {
 }
 
 // TestPartialShorterThanRecord: the record claims more was proven than the file
-// actually holds. That is not a resume point at a lower offset — it is a file
-// something other than this library has been writing to — so the attempt fails,
-// the partial is thrown away, and the transfer starts again from zero.
+// actually holds. The file is the floor — the claim is cut down to what is on
+// disk, the hash is rebuilt over the bytes that are there, and the transfer
+// carries on from them. The partial is never deleted, because deleting it is
+// the 40 GB this layer exists not to fetch twice.
 func TestPartialShorterThanRecord(t *testing.T) {
 	body, digest := payload(t, 64<<10)
-	srv := rangeServer(t, body)
+	var asked string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		asked = req.Header.Get("Range")
+		http.ServeContent(w, req, "blob.bin", time.Unix(0, 0), strings.NewReader(string(body)))
+	}))
+	t.Cleanup(srv.Close)
 	r, store, root := newRunner(t)
 	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: srv.URL})
 
@@ -251,26 +263,15 @@ func TestPartialShorterThanRecord(t *testing.T) {
 	}
 	stageDeadOwner(t, store, id, 50000, 50000) // a lie the file cannot back up
 
-	err := r.Run(context.Background(), id)
-	if !errors.Is(err, ErrFileTooShort) {
-		t.Fatalf("Run = %v, want ErrFileTooShort — the record was believed down to a lower offset", err)
-	}
-	if _, err := os.Stat(partialOf(t, store, id)); err == nil {
-		t.Fatal("the disagreeing partial was kept; the next runner would resume onto it")
-	}
-	rec, _ := store.Load(id)
-	cp, _ := CheckpointOf(rec)
-	if cp.VerifiedPrefix != 0 {
-		t.Fatalf("checkpoint still claims %d bytes are proven", cp.VerifiedPrefix)
-	}
-
-	// And the restart it asked for actually works.
 	if err := r.Run(context.Background(), id); err != nil {
-		t.Fatalf("second Run: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
 	got, _ := os.ReadFile(finalOf(t, store, id))
 	if string(got) != string(body) {
-		t.Fatal("the restarted download does not match the source")
+		t.Fatal("the clamped resume delivered a file that does not match the source")
+	}
+	if asked != "bytes=1000-" {
+		t.Fatalf("the resume asked for %q, want bytes=1000- — the bytes on disk were fetched again", asked)
 	}
 }
 

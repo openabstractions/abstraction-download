@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // reportWriter counts bytes on their way through and tells the runner. Counting
@@ -34,7 +37,7 @@ func (rw *reportWriter) Write(p []byte) (int, error) {
 
 // HTTP fetches over http and https.
 //
-// This is the console tier from research/transfer/SUMMARY.txt, and the survey's
+// This is the console tier from https://github.com/openabstractions/research/blob/main/transfer/SUMMARY.txt, and the survey's
 // conclusion was to write it rather than adopt: aria2 is GPL-2.0, which this
 // project will not take, and curl bought nothing from Go because net/http
 // already does ranges, redirects, proxies and TLS with no CGO. What was worth
@@ -78,11 +81,11 @@ func (h HTTP) get(ctx context.Context, req Request) (*http.Response, error) {
 		// INCLUSIVE and To is exclusive, so it goes out as To-1 — an off-by-one
 		// here would fetch one byte too few and leave a one-byte hole that
 		// only a digest would ever catch.
-		span := strconv.FormatInt(req.From, 10) + "-"
+		byteRange := strconv.FormatInt(req.From, 10) + "-"
 		if req.To > req.From {
-			span += strconv.FormatInt(req.To-1, 10)
+			byteRange += strconv.FormatInt(req.To-1, 10)
 		}
-		hreq.Header.Set("Range", "bytes="+span)
+		hreq.Header.Set("Range", "bytes="+byteRange)
 
 		// Say which version the bytes on disk came from. Without this a server
 		// whose file has changed answers the range honestly, with a valid range
@@ -93,24 +96,19 @@ func (h HTTP) get(ctx context.Context, req Request) (*http.Response, error) {
 		if v := req.Validators.IfRange(); v != "" {
 			hreq.Header.Set("If-Range", v)
 		}
-
-		// Offsets on this side are counted after decoding and the server's are
-		// counted before it, so a range over a compressed body asks for a byte
-		// position that means something different at each end. Asking for the
-		// identity encoding makes the two agree.
-		hreq.Header.Set("Accept-Encoding", "identity")
 	}
-	return h.client().Do(hreq)
+
+	// On every request, not only the ranged ones. Offsets on this side are
+	// counted after decoding and the server's before it, so a range over a
+	// compressed body names a different byte at each end — but the digest is
+	// over the artifact, and a coding applied to a whole body changes what "the
+	// bytes" are just as much. Setting this header also turns OFF net/http's own
+	// transparent gzip, which is what made this the one question where the
+	// answer depended on which language's transport was underneath.
+	hreq.Header.Set("Accept-Encoding", "identity")
+	return h.do(hreq, req.Reach)
 }
 
-// Fetch gets the bytes, and decides what the server's answer to a ranged
-// request actually means.
-//
-// Three answers are possible and only one of them is "here is the rest of your
-// file". The other two — the whole file from zero, and a range starting
-// somewhere other than where we asked — are what a server sends when the
-// artifact it holds is no longer the artifact the bytes on disk came from.
-// Neither is a transport error, and neither may be appended.
 func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	resp, err := h.get(ctx, req)
 	if err != nil {
@@ -152,17 +150,22 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 		return again, nil
 	}
 
+	if coding := unwantedCoding(resp.Header); coding != "" {
+		return Result{}, fmt.Errorf("download: %s applied Content-Encoding %s to a request that asked for identity",
+			req.Source.Locator, coding)
+	}
+
 	switch {
-	case ranged && resp.StatusCode == http.StatusPartialContent:
-		start, cerr := contentRangeStart(resp.Header.Get("Content-Range"))
-		if cerr != nil || start != req.From {
-			// A range that does not begin where we asked is not a partial
-			// answer to this request. Its bytes belong at an offset nobody
-			// asked about, and appending them puts the artifact's own content
-			// at the wrong place in the file — invisible to a length check and
-			// invisible to a transport error. Do not trust it; start again.
-			if cerr == nil {
-				cerr = fmt.Errorf("download: asked for bytes from %d, got a range starting at %d", req.From, start)
+	case resp.StatusCode == http.StatusPartialContent:
+		// Every 206, ranged or not. A first fetch sends no Range and a CDN may
+		// still answer 206; that response is acceptable exactly when it names
+		// the offset being written at, which for a first fetch is zero — the
+		// same question, and one rule rather than two.
+		if cerr := answersFrom(resp, req.From); cerr != nil {
+			if !ranged {
+				// Nothing to rewind to: this request already asked for the whole
+				// artifact and got a piece of somewhere else.
+				return Result{}, cerr
 			}
 			if resp, err = restartWhole(cerr); err != nil {
 				return Result{}, err
@@ -206,7 +209,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 		req.To = 0
 
 	case resp.StatusCode != http.StatusOK:
-		return Result{}, fmt.Errorf("download: %s: %s", req.Source.Locator, resp.Status)
+		return Result{}, statusError(req.Source.Locator, resp)
 	}
 
 	// What this response says about the version being served, recorded now so
@@ -243,6 +246,201 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	return Result{Written: written, Total: total}, nil
 }
 
+// Ranged asks the source two questions in one request: how long the artifact
+// is, and whether it will serve a bounded piece of it.
+//
+// A one-byte range is the cheapest honest probe. A 206 answers both — the
+// length is the total in Content-Range — and anything else means the source
+// sends whole files, which is a plan of one stream rather than an error.
+func (h HTTP) Ranged(ctx context.Context, src Source, headers map[string]string) (int64, bool, error) {
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, src.Locator, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	for k, v := range headers {
+		hreq.Header.Set(k, v)
+	}
+	hreq.Header.Set("Range", "bytes=0-0")
+	hreq.Header.Set("Accept-Encoding", "identity")
+
+	resp, err := h.do(hreq, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusPartialContent {
+		return sizeFromContentRange(resp.Header.Get("Content-Range")), true, nil
+	}
+	if refused(resp.StatusCode) {
+		return 0, false, answered(src.Locator, resp)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, false, nil
+	}
+	size := int64(0)
+	if resp.ContentLength > 0 {
+		size = resp.ContentLength
+	}
+	return size, false, nil
+}
+
+// refused reports whether a status is the source saying no, as against the
+// transport having a bad moment. See Permanent: the first ends the job, the
+// second leaves it adoptable, and download/README.md § Two endings is the list
+// every implementation answers to.
+//
+// Listed rather than ranged, because the two mistakes do not cost the same: an
+// unrecognised 4xx is treated as "not now", since calling a retryable status a
+// refusal abandons a download that would have worked and this layer exists to
+// not lose downloads. 416 and 412 are the resume offset or the file version
+// being wrong and restart cleanly, 408, 425 and 429 say try later, 409 and 423
+// are somebody else's lock.
+func refused(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired,
+		http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed,
+		http.StatusNotAcceptable, http.StatusGone, http.StatusRequestURITooLong,
+		http.StatusUnavailableForLegalReasons:
+		return true
+	}
+	return false
+}
+
+// answered names the source and what it said, as a refusal nothing will retry.
+func answered(locator string, resp *http.Response) error {
+	return fmt.Errorf("%w: %s: %s", ErrRefused, locator, resp.Status)
+}
+
+// statusError is answered for a status on the list above and an ordinary "not
+// now" for every other one.
+//
+// Fetch used to call answered directly, so every non-200 was permanent and the
+// list this file spends thirty lines justifying was consulted by nobody on the
+// path that downloads. A 503 ended the job. Found by
+// download/testdata/scenarios/wire-notnow-status.txt.
+func statusError(locator string, resp *http.Response) error {
+	if refused(resp.StatusCode) {
+		return answered(locator, resp)
+	}
+	return fmt.Errorf("download: %s: %s", locator, resp.Status)
+}
+
+func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
+	last := req.Range.End - 1
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.Source.Locator, nil)
+	if err != nil {
+		return err
+	}
+	for k, v := range req.Headers {
+		hreq.Header.Set(k, v)
+	}
+	hreq.Header.Set("Range", "bytes="+strconv.FormatInt(req.Range.Start, 10)+"-"+strconv.FormatInt(last, 10))
+	if v := req.Validators.IfRange(); v != "" {
+		hreq.Header.Set("If-Range", v)
+	}
+
+	resp, err := h.do(hreq, req.Reach)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		if refused(resp.StatusCode) {
+			return answered(req.Source.Locator, resp)
+		}
+		return fmt.Errorf("download: asked for bytes %d-%d, server answered %s", req.Range.Start, last, resp.Status)
+	}
+	// A sequential fetch can trust its own offset because it only ever appends.
+	// A range is written into the middle of a file, so a proxy answering with a
+	// different range than the one asked for would corrupt bytes no later check
+	// could attribute. The server names what it sent; hold it to that.
+	if got := resp.Header.Get("Content-Range"); !namesRange(got, req.Range) {
+		return fmt.Errorf("download: asked for bytes %d-%d, server sent Content-Range %q", req.Range.Start, last, got)
+	}
+	return copyRange(ctx, req, resp.Body)
+}
+
+// namesRange reports whether a Content-Range describes exactly the range asked
+// for.
+func namesRange(header string, want job.Range) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(header), "bytes ")
+	slash := strings.IndexByte(v, '/')
+	if slash < 0 {
+		return false
+	}
+	dash := strings.IndexByte(v[:slash], '-')
+	if dash < 0 {
+		return false
+	}
+	start, err := strconv.ParseInt(v[:dash], 10, 64)
+	if err != nil {
+		return false
+	}
+	end, err := strconv.ParseInt(v[dash+1:slash], 10, 64)
+	return err == nil && start == want.Start && end == want.End-1
+}
+
+// sizeFromContentRange reads the artifact length out of a Content-Range, or 0 when the
+// server declined to say — "bytes 0-0/*" is legal and useless for planning.
+func sizeFromContentRange(header string) int64 {
+	_, total, ok := strings.Cut(strings.TrimSpace(header), "/")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(total, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func copyRange(ctx context.Context, req RangeRequest, body io.Reader) error {
+	want := req.Range.End - req.Range.Start
+	w := &rangeWriter{out: req.Out, at: req.Range.Start, end: req.Range.End, beat: req.Beat}
+	n, err := copyWithContext(ctx, w, io.LimitReader(body, want))
+	if err != nil {
+		return err
+	}
+	if n != want {
+		return fmt.Errorf("%w: range %d-%d gave %d of %d bytes", ErrShortTransfer, req.Range.Start, req.Range.End-1, n, want)
+	}
+	var surplus [1]byte
+	if extra, _ := body.Read(surplus[:]); extra > 0 {
+		return fmt.Errorf("%w: range %d-%d", ErrOverrun, req.Range.Start, req.Range.End-1)
+	}
+	return nil
+}
+
+// rangeWriter writes at absolute artifact offsets and cannot leave its range. It
+// also says the work is moving, without saying how far: distance is the proven
+// set's business and it only moves when a whole range lands.
+//
+// Bounded by construction rather than by the server's honesty. A 206 carrying a
+// correct Content-Range and a longer body than it named would otherwise be
+// copied whole, over bytes a neighbouring stream has already synced and
+// recorded as proven — and the second hashing pass would then throw the entire
+// artifact away for it.
+type rangeWriter struct {
+	out  io.WriterAt
+	at   int64
+	end  int64
+	beat func()
+}
+
+func (s *rangeWriter) Write(p []byte) (int, error) {
+	if s.at+int64(len(p)) > s.end {
+		return 0, fmt.Errorf("%w: %d bytes at %d reach past %d", ErrOverrun, len(p), s.at, s.end)
+	}
+	n, err := s.out.WriteAt(p, s.at)
+	s.at += int64(n)
+	if s.beat != nil {
+		s.beat()
+	}
+	return n, err
+}
+
 // File fetches from anything the operating system will open as a path.
 //
 // That includes a UNC path to a NAS, which is why there is no SMB protocol
@@ -275,17 +473,8 @@ func (File) Fetch(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
-	// A bounded gap reads exactly its own bytes and stops. Without the limit a
-	// file source would read to EOF over the top of every proven range after
-	// the hole — the same bytes, so nothing would break, but the whole saving
-	// of knowing which ranges are proven would be spent copying them again.
-	var src io.Reader = f
-	if req.To > req.From {
-		src = io.LimitReader(f, req.To-req.From)
-	}
-
 	rw := &reportWriter{w: req.Out, total: st.Size(), report: req.Report}
-	written, err := copyWithContext(ctx, rw, src)
+	written, err := copyWithContext(ctx, rw, f)
 	if err != nil {
 		return Result{Written: written}, err
 	}
@@ -321,15 +510,32 @@ func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, 
 	}
 }
 
-// DefaultRegistry is the set of fetchers that need nothing configured. The
-// Windows service tier (BITS) and any NAS-side delegation are added by whoever
-// has them, which is the whole point of the split.
-func DefaultRegistry() *Registry {
-	return NewRegistry(HTTP{}, File{})
+func (File) Ranged(_ context.Context, src Source, _ map[string]string) (int64, bool, error) {
+	st, err := os.Stat(src.Locator)
+	if err != nil {
+		return 0, false, err
+	}
+	return st.Size(), st.Mode().IsRegular(), nil
 }
 
-// compile-time proof that both satisfy the interface
+func (File) FetchRange(ctx context.Context, req RangeRequest) error {
+	f, err := os.Open(req.Source.Locator)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return copyRange(ctx, req, io.NewSectionReader(f, req.Range.Start, req.Range.End-req.Range.Start))
+}
+
+// DefaultFetchers is the set of fetchers that need nothing configured. The
+// Windows service tier (BITS) and any NAS-side delegation are added by whoever
+// has them, which is the whole point of the split.
+func DefaultFetchers() *Fetchers {
+	return NewFetchers(HTTP{}, File{})
+}
+
+// compile-time proof that both satisfy the interfaces
 var (
-	_ Fetcher = HTTP{}
-	_ Fetcher = File{}
+	_ RangeFetcher = HTTP{}
+	_ RangeFetcher = File{}
 )

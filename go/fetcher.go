@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"io"
+
+	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // Capability is something a Fetcher can promise. Fetchers differ enormously and
@@ -107,6 +109,12 @@ type Request struct {
 	// record and never in a Fetcher's hands longer than one request.
 	Headers map[string]string
 
+	// Reach is asked before every host this request opens a connection to,
+	// including each host a redirect leads to. The runner asked it about the
+	// source already; a Fetcher asks it about everything the source sends it
+	// on to, because that is where the socket opens. Nil reaches everything.
+	Reach Reach
+
 	// Report is called as bytes land, with the running count written by THIS
 	// request (not including From), and the artifact's full size if the source
 	// has revealed it by now — 0 if it has not, and 0 is not a promise that it
@@ -127,8 +135,7 @@ type Request struct {
 
 // Result is what one attempt achieved.
 type Result struct {
-	// Written is how many bytes this attempt appended — or wrote from zero, if
-	// it called Request.Restart.
+	// Written is how many bytes this attempt appended.
 	Written int64
 	// Total is the artifact's full size if the source revealed it, 0 if not.
 	// Some sources only disclose length in a response header, and some never
@@ -157,29 +164,104 @@ type Fetcher interface {
 var (
 	// ErrNoFetcher means nothing registered can serve any of the job's sources
 	// with the capabilities the job requires.
-	ErrNoFetcher = errors.New("download: no fetcher for this job's sources")
+	ErrNoFetcher = forever("download: no fetcher for this job's sources")
 	// ErrDigestMismatch means the bytes arrived and were not what was asked
 	// for. This is a refusal, never a warning.
 	ErrDigestMismatch = errors.New("download: digest mismatch")
 	// ErrShortTransfer means the source ended before the expected size.
 	ErrShortTransfer = errors.New("download: source ended early")
+	// ErrRefused means the source answered and said no. A gated repository, a
+	// deleted file, a bad token: the request as written will never work, so
+	// the job is over rather than waiting for a successor. Everything else a
+	// transport can return is treated as "not now" and stays adoptable.
+	ErrRefused = forever("download: the source refused")
 	// ErrCannotRestart means a source answered a request to continue with a
 	// stream that begins at zero, and the caller offered no way to rewind. The
 	// bytes are fine; there is just nowhere to put them.
 	ErrCannotRestart = errors.New("download: the stream restarts at zero and this request cannot rewind")
+	// ErrOverrun means a source sent more bytes than the range it was asked for.
+	// A range lands in the middle of a file other ranges share, so the surplus
+	// would be written over a neighbour a different stream has already proven.
+	ErrOverrun = errors.New("download: the source sent more than the range it named")
 )
 
-// Registry picks a Fetcher for a source.
-type Registry struct {
+// permanent marks an error as one that says no rather than not now, and forever
+// builds one.
+//
+// The class is attached where each error is DEFINED rather than kept in a list
+// this function consults, because the list is the part that drifts: this layer
+// kept one here and one in Python, they disagreed by a row for as long as both
+// existed, and neither language could see it because each only ever read its
+// own. See download/README.md § Two endings.
+type permanent struct{ error }
+
+func forever(text string) error { return permanent{errors.New(text)} }
+
+// Permanent reports whether trying this job again, unchanged, is pointless.
+//
+// It is the whole of the difference between the two endings a failed download
+// can have. A dropped connection, a full disk, a NAS that rebooted: the record
+// keeps its error, the lease lapses, and the next runner resumes from the last
+// proven byte — that is the case this project exists for and nothing here
+// gives up on it. A refusal is not that. Nobody is going to fetch a 404, and a
+// job that stays adoptable is fetched again on every sweep, forever.
+//
+// Two names, not a membership list: this layer's own refusals say so in their
+// own definitions, and the job layer's ErrInvalid means the record itself will
+// never be readable, which no successor can improve on.
+func Permanent(err error) bool {
+	var p permanent
+	return errors.As(err, &p) || errors.Is(err, job.ErrInvalid)
+}
+
+// RangeRequest is one bounded piece of an artifact, fetched out of order.
+type RangeRequest struct {
+	Source Source
+	// Range is half-open, and the whole of it must arrive. A Fetcher that
+	// returns nil having written less has lied about a byte range somebody is
+	// about to record as proven.
+	Range job.Range
+	// Out is written at absolute artifact offsets, so several ranges of one
+	// artifact land in one file with no coordination between them.
+	Out     io.WriterAt
+	Headers map[string]string
+	Reach   Reach
+	// Validators identify the version the ranges already on disk came from, and
+	// go out as If-Range. Without them a source that replaced the artifact
+	// between two runs answers every range honestly, from the new file, and the
+	// splice is caught only by the digest over the finished file — which costs
+	// every proven range in it.
+	Validators Validators
+	// Beat says bytes are still arriving. It writes nothing; see keeper.
+	Beat func()
+}
+
+// RangeFetcher is a Fetcher whose sources can serve a bounded range, which is
+// what lets one owner run several connections against one artifact.
+//
+// Separate from Fetcher because most tiers cannot do it and must not be asked
+// to pretend: BITS owns its own scheduling, and a delegate holding the whole
+// transfer has no range to be handed.
+type RangeFetcher interface {
+	Fetcher
+	// Ranged reports the artifact's length, and whether this source honoured a
+	// bounded request rather than answering with the whole file.
+	Ranged(ctx context.Context, src Source, headers map[string]string) (int64, bool, error)
+	// FetchRange writes exactly req.Range, at its own offset.
+	FetchRange(ctx context.Context, req RangeRequest) error
+}
+
+// Fetchers picks a Fetcher for a source.
+type Fetchers struct {
 	fetchers []Fetcher
 }
 
-func NewRegistry(fs ...Fetcher) *Registry { return &Registry{fetchers: fs} }
+func NewFetchers(fs ...Fetcher) *Fetchers { return &Fetchers{fetchers: fs} }
 
-func (r *Registry) Add(f Fetcher) { r.fetchers = append(r.fetchers, f) }
+func (r *Fetchers) Add(f Fetcher) { r.fetchers = append(r.fetchers, f) }
 
 // For returns a Fetcher that serves src and has every capability in requires.
-func (r *Registry) For(src Source, requires []string) (Fetcher, bool) {
+func (r *Fetchers) For(src Source, requires []string) (Fetcher, bool) {
 	for _, f := range r.fetchers {
 		if !serves(f, src.Scheme) {
 			continue

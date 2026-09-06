@@ -1,0 +1,25 @@
+# requires: transfer
+#
+# The file is the floor. A checkpoint claiming forty proven bytes over a partial
+# that holds twenty: the claim is cut down to what is on disk, the hash is
+# rebuilt over the kept prefix, and the transfer carries on from twenty. The
+# partial is never deleted, because deleting a prefix that is about to be
+# verified anyway is the 40 GB this layer exists not to fetch twice.
+#
+# Go and C++ deleted the file and refused until 2026-09-06, Python did what
+# download/README.md's first guarantee says, and the two texts contradicted each
+# other in writing for as long as both existed. Every other scenario was green
+# throughout: a harness that compares implementations to each other can see a
+# disagreement about this rule and cannot see the rule.
+submit A size=64 digest=good src=file
+claim A alpha 5000
+stage A 20
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-R3]
+# expect 6: done=64 err=none [DL-R4]
+# expect 7: ok -

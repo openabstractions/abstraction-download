@@ -1,0 +1,31 @@
+# requires: transfer
+#
+# An absolute sink written in the other platform's convention, met by a machine
+# that cannot resolve it.
+#
+# The record is not wrong: it is exactly right on the machine whose convention
+# it is, and this store is shared with one. So the refusal is the MACHINE's, the
+# same class as no trust store on the host, and it must land nowhere near the
+# two places that would spread it. Not at decode --
+# every reader of a shared store must be able to read every record in it, or a
+# NAS and a PC cannot share one. Not `failed` -- ending the job here would end it
+# for the machine that could have run it, which is every other machine.
+#
+# So: submitted (step 1), refused (step 2), still adoptable (step 3), still
+# claimable (step 4) and adoptable again after the claim goes (steps 5, 6).
+# Steps 4 and 6 are the ones that matter -- a record left `pending` with an
+# error on it looks exactly like every retryable failure, and the difference
+# between "not now" and "not here" is one no field in the record carries.
+submit A size=64 digest=good src=file sink=foreign
+run A alpha
+orphans
+claim A beta 5000
+release A beta
+orphans
+
+# expect 1: ok state=pending [DL-S6] [DL-S7]
+# expect 2: transfer-failed state=pending [DL-S5] [DL-E5]
+# expect 2: done=0 err=set [DL-E1]
+# expect 3: ok A
+# expect 4: ok state=running
+# expect 6: ok A

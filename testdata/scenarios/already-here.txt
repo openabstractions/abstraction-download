@@ -1,0 +1,24 @@
+# requires: transfer
+#
+# A digest is an identity. Once the store holds a record that transferred these
+# exact bytes and their file is still there at the size it proved, a second job
+# for the same digest copies from that file before it opens any source of its
+# own. B's only source does not exist, so the bytes B ends with can only have
+# come from A's delivery.
+#
+# On 2026-09-06 the NAS fetched the same 386 MB from Hugging Face a second time
+# over a file it already held, digest verified both times, because nothing
+# looked at what the store had already proven. Every conformance instrument
+# passed. C is the control: nothing has proven its digest, so it fails.
+submit A size=64 digest=good src=file
+run A alpha
+submit B size=64 digest=good src=missing
+run B beta
+submit C size=64 digest=bad src=missing
+run C gamma
+
+# expect 2: ok state=transferred
+# expect 2: done=64
+# expect 4: ok state=transferred [DL-R28]
+# expect 4: done=64 err=none
+# expect 6: transfer-failed

@@ -159,8 +159,8 @@ func TestResumeSkipsAProvenMiddleRange(t *testing.T) {
 	if cp.VerifiedPrefix != int64(len(body)) || len(cp.Verified) != 1 {
 		t.Fatalf("finished checkpoint is %+v, want one range covering the artifact", cp)
 	}
-	if containsModel(rec.Content, job.ModelRanges) {
-		t.Fatalf("a finished download still declares %s; content is %v", job.ModelRanges, rec.Content)
+	if containsModel(rec.Content, job.FeatureRanges) {
+		t.Fatalf("a finished download still declares %s; content is %v", job.FeatureRanges, rec.Content)
 	}
 }
 
@@ -203,17 +203,22 @@ func TestASparsePartialIsNotProgress(t *testing.T) {
 	// A file LONGER than the count of proven bytes and SHORTER than the highest
 	// proven offset. Under the old rule — compare the length against the number
 	// the checkpoint holds — 50 exceeds 20 and this is a healthy resume that is
-	// merely ahead of its checkpoint. It is not: byte 99 is claimed proven and
-	// the file stops at 50, so something outside this library has been editing
-	// it and none of what is left can be believed.
+	// merely ahead of its checkpoint. It is neither: the file is the floor, so
+	// the range at 90 is struck out because the file does not reach it and the
+	// range at 0 stands because it does.
 	short := dir + string(os.PathSeparator) + "short.bin"
 	if err := os.WriteFile(short, make([]byte, 50), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := planResume(short, cp, 100); err == nil {
-		t.Fatal("a file too short to hold its highest proven byte was accepted because it was longer than the proven COUNT")
-	} else if !strings.Contains(err.Error(), ErrFileTooShort.Error()) {
+	clipped, err := planResume(short, cp, 100)
+	if err != nil {
 		t.Fatalf("short file: %v", err)
+	}
+	if clipped.Have.Total() != 10 || clipped.Trim != 10 {
+		t.Fatalf("kept %d bytes trimmed to %d, want the 10 the file can back up", clipped.Have.Total(), clipped.Trim)
+	}
+	if len(clipped.Gaps) != 1 || clipped.Gaps[0] != (fetchRange{From: 10}) {
+		t.Fatalf("gaps are %+v, want one open request from 10 — nothing above it is proven any more", clipped.Gaps)
 	}
 
 	// And a genuine unproven tail is still cut off, at the highest proven
@@ -246,7 +251,7 @@ func TestPrefixOnlyRecordReadsAndContinues(t *testing.T) {
 	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: srv.URL})
 
 	// Written as a stranger's implementation would write it: the raw JSON, no
-	// `verified` key, no content model.
+	// `verified` key, no content feature.
 	const proven = 8 << 10
 	if err := os.WriteFile(partialOf(t, store, id), body[:proven], 0o644); err != nil {
 		t.Fatal(err)
@@ -369,14 +374,14 @@ func TestRangesRoundTripThroughTheStore(t *testing.T) {
 	if got := compact(t, rec.Checkpoint); got != `{"verified_prefix":200,"verified":[[0,200],[600,700]],"validators":{}}` {
 		t.Fatalf("stored checkpoint is %s, which is not the one spelling three languages agreed on", got)
 	}
-	if !containsModel(rec.Content, job.ModelRanges) {
-		t.Fatalf("a record carrying ranges does not declare %s; content is %v", job.ModelRanges, rec.Content)
+	if !containsModel(rec.Content, job.FeatureRanges) {
+		t.Fatalf("a record carrying ranges does not declare %s; content is %v", job.FeatureRanges, rec.Content)
 	}
 	// Advisory, always. A reader that ignores ranges re-fetches some bytes and
 	// is otherwise correct, so marking this critical would stop every existing
 	// reader dead for no safety gain.
-	if containsModel(rec.Critical, job.ModelRanges) {
-		t.Fatalf("%s is marked critical; critical is %v", job.ModelRanges, rec.Critical)
+	if containsModel(rec.Critical, job.FeatureRanges) {
+		t.Fatalf("%s is marked critical; critical is %v", job.FeatureRanges, rec.Critical)
 	}
 
 	// Validators are not this layer's keys and survive alongside the ranges,
@@ -421,23 +426,23 @@ func TestPrefixShapedRecordsAreUnchanged(t *testing.T) {
 	if got := string(rec.Checkpoint); got != `{"verified_prefix":4096,"validators":{"etag":"\"v1\""}}` {
 		t.Fatalf("prefix-and-validators checkpoint is %s", got)
 	}
-	if containsModel(rec.Content, job.ModelRanges) {
-		t.Fatalf("a prefix-shaped record declares %s", job.ModelRanges)
+	if containsModel(rec.Content, job.FeatureRanges) {
+		t.Fatalf("a prefix-shaped record declares %s", job.FeatureRanges)
 	}
 
-	// Holes appear, so the model is declared; the holes are then filled, so it
+	// Holes appear, so the feature is declared; the holes are then filled, so it
 	// is withdrawn. Carried rather than derived means nothing else will do it.
 	if err := setCheckpoint(rec, Checkpoint{Verified: Ranges{{Start: 0, End: 10}, {Start: 20, End: 30}}}); err != nil {
 		t.Fatal(err)
 	}
-	if !containsModel(rec.Content, job.ModelRanges) {
-		t.Fatalf("holes did not declare %s; content is %v", job.ModelRanges, rec.Content)
+	if !containsModel(rec.Content, job.FeatureRanges) {
+		t.Fatalf("holes did not declare %s; content is %v", job.FeatureRanges, rec.Content)
 	}
 	if err := setCheckpoint(rec, Checkpoint{Verified: Ranges{{Start: 0, End: 30}}}); err != nil {
 		t.Fatal(err)
 	}
-	if containsModel(rec.Content, job.ModelRanges) {
-		t.Fatalf("filling the holes left %s declared; content is %v", job.ModelRanges, rec.Content)
+	if containsModel(rec.Content, job.FeatureRanges) {
+		t.Fatalf("filling the holes left %s declared; content is %v", job.FeatureRanges, rec.Content)
 	}
 	if got := string(rec.Checkpoint); got != `{"verified_prefix":30,"validators":{}}` {
 		t.Fatalf("checkpoint after the holes closed is %s", got)
@@ -459,12 +464,12 @@ func TestContinuationReportsProvenBytesAndResumePoint(t *testing.T) {
 	// leaves when the part covering byte zero is the one that failed.
 	stageSparse(t, store, id, body, Range{Start: 8 << 10, End: 64 << 10})
 
-	svc := NewService(r)
+	svc := NewClient(r)
 	rec, err := store.Load(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := svc.(*service).continuation(rec, Spec{})
+	c := svc.(*client).outcome(rec, Spec{})
 	if c.ResumeFrom != 0 {
 		t.Fatalf("ResumeFrom is %d, want 0 — the first hole is at byte zero", c.ResumeFrom)
 	}

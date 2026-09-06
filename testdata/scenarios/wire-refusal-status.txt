@@ -1,0 +1,40 @@
+# requires: wire
+#
+# download/README.md § Two endings lists ten statuses as "the source refused",
+# and records that Go and Python disagreed about four of them for as long as
+# both existed because no test in this repository compares one implementation's
+# classification of a status against another's. This is that test. Each of these
+# must end the job, and none of them may come back in the sweep.
+submit A size=64 digest=good src=http:status-400
+run A alpha
+submit B size=64 digest=good src=http:status-401
+run B alpha
+submit C size=64 digest=good src=http:status-402
+run C alpha
+submit D size=64 digest=good src=http:status-403
+run D alpha
+submit E size=64 digest=good src=http:status-404
+run E alpha
+submit F size=64 digest=good src=http:status-405
+run F alpha
+submit G size=64 digest=good src=http:status-406
+run G alpha
+submit H size=64 digest=good src=http:status-410
+run H alpha
+submit I size=64 digest=good src=http:status-414
+run I alpha
+submit J size=64 digest=good src=http:status-451
+run J alpha
+orphans
+
+# expect 2: transfer-failed state=failed [DL-E4]
+# expect 4: transfer-failed state=failed
+# expect 6: transfer-failed state=failed
+# expect 8: transfer-failed state=failed
+# expect 10: transfer-failed state=failed
+# expect 12: transfer-failed state=failed
+# expect 14: transfer-failed state=failed
+# expect 16: transfer-failed state=failed
+# expect 18: transfer-failed state=failed
+# expect 20: transfer-failed state=failed
+# expect 21: ok - [DL-E6]

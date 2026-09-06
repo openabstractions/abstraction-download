@@ -15,8 +15,8 @@ import (
 // A delegate whose Finalize does real work, and reports it.
 type slowDelegate struct{}
 
-func (d slowDelegate) System() string          { return "pretend-nas" }
-func (d slowDelegate) Schemes() []string       { return []string{"https", "http"} }
+func (d slowDelegate) System() string    { return "pretend-nas" }
+func (d slowDelegate) Schemes() []string { return []string{"https", "http"} }
 func (d slowDelegate) Capabilities() []Capability {
 	return []Capability{CapResume, CapSurvivesProcessExit}
 }

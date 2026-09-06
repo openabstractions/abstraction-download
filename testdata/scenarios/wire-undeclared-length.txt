@@ -1,0 +1,15 @@
+# requires: wire
+#
+# No Content-Length, no chunked framing, thirty-two bytes and a close. This is
+# HTTP/1.0 delimitation and it is indistinguishable on the wire from the same
+# transfer cut in half by a network. The digest is the whole defence, which is
+# the argument for refusing to deliver a spec that carries neither a size nor a
+# digest.
+submit A size=64 digest=good src=http:nolength
+run A alpha
+orphans
+state A
+
+# expect 2: transfer-failed state=pending
+# expect 2: done=32 err=set [DL-R13]
+# expect 3: ok A

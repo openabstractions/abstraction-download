@@ -1,27 +1,9 @@
 package download
 
 import (
-	"errors"
 	"fmt"
 	"os"
 )
-
-// ErrFileTooShort means the partial file cannot hold the bytes the checkpoint
-// says were proven.
-//
-// It is a refusal, not a warning, and it is the reason this file exists. The
-// obvious reading of "the record and the file disagree" is to believe the
-// smaller of the two and carry on from there — which is what this library did.
-// That reading is wrong in a way that is hard to see: a file too short for its
-// checkpoint is not a file with less proven in it, it is a file that something
-// else has been editing. A temp cleaner truncating it, a copy that ran out of
-// disk, a second process writing the same path: none of those leave a file
-// whose remaining bytes are still the artifact's, and taking the smaller number
-// silently promotes a corrupt file to a valid resume point.
-//
-// So the partial is discarded and the transfer starts again from zero. The cost
-// is the bytes; the alternative was a file that looked finished and was not.
-var ErrFileTooShort = errors.New("download: the partial file is shorter than its checkpoint")
 
 // fetchRange is one request the runner still has to make.
 //
@@ -123,13 +105,26 @@ func (p resumePlan) oneStream() bool {
 // That gives two cases where there were three:
 //
 //   - size < the highest proven offset. The file cannot hold what the record
-//     says is in it. Something outside this library has edited it, so none of
-//     what is left can be trusted either. Refuse: ErrFileTooShort.
+//     says is in it, so the part of the set that reaches past the end of the
+//     file is struck out and the rest stands. THE FILE IS THE FLOOR.
 //
 //   - size >= the highest proven offset. The set stands exactly as written.
-//     Trim to the highest proven offset — cutting off a tail nothing vouches
-//     for, which is the only cut that is safe at any offset — and fetch the
-//     gaps.
+//
+// Either way, trim to the highest proven offset — cutting off a tail nothing
+// vouches for, which is the only cut that is safe at any offset — and fetch the
+// gaps.
+//
+// ~~This refused a short file outright until 2026-09-06~~, on the argument that
+// something outside this library had been editing it and none of the remaining
+// content could be believed. The argument does not survive being asked what it
+// buys. A file the RIGHT length that a second writer replaced is accepted by
+// this function without a murmur, because length is the only witness it has and
+// length says nothing about content — so refusing the short case detects no
+// class of corruption, it only declines the one case where the damage announced
+// itself. What answers "we cannot trust these bytes" is the digest, which is
+// taken over the whole artifact before anything is delivered. Deleting a
+// verified prefix to avoid a check that happens anyway is 40 GB fetched twice,
+// which is the complaint this layer exists to answer.
 //
 // "Longer" and "equal" collapsed into one because cutting is no longer how
 // unproven bytes are dealt with. Under a prefix, deleting them was the only way
@@ -170,11 +165,6 @@ func planResume(partial string, cp Checkpoint, size int64) (resumePlan, error) {
 		return resumePlan{Gaps: gapsFor(nil, size)}, nil
 	}
 
-	// The highest proven offset. This, and not the count of proven bytes, is
-	// what a length can be compared against: a set of ranges occupies a file up
-	// to here and says nothing about how much of that span it fills.
-	reach := have[len(have)-1].End
-
 	st, err := os.Stat(partial)
 	switch {
 	case os.IsNotExist(err):
@@ -185,10 +175,15 @@ func planResume(partial string, cp Checkpoint, size int64) (resumePlan, error) {
 		return resumePlan{}, fmt.Errorf("download: %s is a directory, not a partial file", partial)
 	}
 
-	if size := st.Size(); size < reach {
-		return resumePlan{}, fmt.Errorf("%w: %s holds %d bytes, the checkpoint says byte %d is proven",
-			ErrFileTooShort, partial, size, reach-1)
+	have = clip(have, st.Size())
+	if len(have) == 0 {
+		return resumePlan{Gaps: gapsFor(nil, size)}, nil
 	}
+
+	// The highest proven offset. This, and not the count of proven bytes, is
+	// what a length can be compared against: a set of ranges occupies a file up
+	// to here and says nothing about how much of that range it fills.
+	reach := have[len(have)-1].End
 
 	return resumePlan{
 		Have:       have,
@@ -197,6 +192,27 @@ func planResume(partial string, cp Checkpoint, size int64) (resumePlan, error) {
 		Discarded:  st.Size() - reach,
 		Validators: cp.Validators,
 	}, nil
+}
+
+// clip is min(checkpoint, length) once the checkpoint stopped being a number.
+//
+// A range that runs past the end of the file is not there to be proven, and one
+// that straddles the end keeps the half that exists. Under a single prefix this
+// is exactly the min the page has always promised; under holes it is the same
+// sentence, applied per range, and it is the only reading in which a shorter
+// file removes claims and never adds any.
+func clip(have Ranges, length int64) Ranges {
+	out := make(Ranges, 0, len(have))
+	for _, r := range have {
+		if r.Start >= length {
+			break
+		}
+		if r.End > length {
+			r.End = length
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // gapsFor turns a proven set into the requests still to make.

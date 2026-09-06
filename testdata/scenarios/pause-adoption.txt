@@ -1,0 +1,21 @@
+# requires: transfer
+#
+# An owner died between a pause being asked for and the pause being carried out.
+# The record is left RUNNING under a lapsed lease with want=pause, and the next
+# owner's first act must be to honour what was asked rather than to move bytes.
+#
+# The two halves only work as a pair: a sweep that will not offer the record
+# makes the state permanent, and a runner that adopts it and downloads anyway
+# restarts work a person deliberately stopped.
+submit A size=64 digest=good src=file
+claim A alpha 400
+intent A pause
+sleep 900
+orphans
+run A beta
+state A
+
+# expect 5: ok A [JOB-I12]
+# expect 6: ok state=pending [DL-R27]
+# expect 6: want=pause done=0 [JOB-I8] [DL-R25]
+# expect 7: state=pending

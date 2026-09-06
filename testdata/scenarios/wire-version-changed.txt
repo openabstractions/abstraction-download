@@ -1,0 +1,24 @@
+# requires: wire
+#
+# The artifact was replaced while a prefix of the old one sat on disk. The
+# server's range is honest and belongs to a file the prefix never came from, so
+# the splice has exactly the right length and the wrong contents, and no
+# transport error and no length check can see it.
+#
+# The only thing that can is If-Range: send the version the prefix came from and
+# the server answers 206 for the same file and 200 -- the whole new one -- for a
+# different one. An implementation that does not send it cannot be told from one
+# that does until the day a server changes a file.
+submit A size=64 digest=good src=http:etag
+claim A alpha 5000
+stage A 40 stale
+progress A alpha 40 {"verified_prefix":40,"validators":{"etag":"\"v1\""}}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-V1]
+# expect 6: done=64 err=none
+# expect 6: cp={"verified_prefix":64,"validators":{"etag":"\"v2\""}} [DL-V2]
+# expect 7: ok -

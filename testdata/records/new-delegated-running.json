@@ -1,0 +1,51 @@
+{
+  "content": [
+    "abstraction.job/base@1",
+    "abstraction.job/delegation@1",
+    "abstraction.job/step@1"
+  ],
+  "critical": [
+    "abstraction.job/base@1",
+    "abstraction.job/delegation@1"
+  ],
+  "id": "1788673445643-dfcd4f54ed654c5aac85",
+  "kind": "download",
+  "state": "running",
+  "spec": {
+    "artifact": {
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "size": 8192
+    },
+    "sources": [
+      {
+        "scheme": "https",
+        "locator": "https://example.invalid/v.gguf"
+      }
+    ],
+    "sink": {
+      "partial": "work/1788673445643-dfcd4f54ed654c5aac85",
+      "final": "models/v.gguf"
+    }
+  },
+  "progress": {
+    "done": 0,
+    "total": 8192,
+    "updated_at": "2026-09-06T05:44:05.643032Z",
+    "step": {
+      "name": "transferring",
+      "ordinal": 1,
+      "of": 2
+    }
+  },
+  "lease": {
+    "owner": "new-owner",
+    "epoch": 1,
+    "expires_at": "2026-09-06T05:44:05.684497Z"
+  },
+  "delegation": {
+    "system": "bits",
+    "external_id": "{GUID}"
+  },
+  "created_at": "2026-09-06T05:44:05.643032Z",
+  "updated_at": "2026-09-06T05:44:05.670499Z"
+}

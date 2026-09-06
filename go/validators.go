@@ -73,11 +73,73 @@ func StrongValidators(h http.Header) Validators {
 	}
 	if v.ETag == "" {
 		lm := strings.TrimSpace(h.Get("Last-Modified"))
-		if _, err := http.ParseTime(lm); err == nil {
+		if httpDate(lm) {
 			v.LastModified = lm
 		}
 	}
 	return v
+}
+
+// httpDate reports whether s is one of the three spellings of an HTTP-date RFC
+// 9110 requires a recipient to accept: IMF-fixdate, which is the only one a
+// sender may use, and the two obsolete forms a recipient still meets.
+//
+// This recognises a shape and does not parse a time, because the value is never
+// interpreted: it is echoed back verbatim as If-Range, which the origin server
+// evaluates by exact match. Written out rather than handed to http.ParseTime
+// because the three languages' date parsers accept three different sets — this
+// one took a three-letter timezone where the grammar says GMT, C++ took only
+// IMF-fixdate, Python took RFC 2822 — so "an HTTP date" implemented as
+// "whatever the standard library takes" is three rules wearing one name.
+func httpDate(s string) bool {
+	if shaped(s, "aaa, 99 aaa 9999 99:99:99 GMT") {
+		return monthAt(s, 8)
+	}
+	if shaped(s, "aaa aaa #9 99:99:99 9999") {
+		return monthAt(s, 4)
+	}
+	day, tail, ok := strings.Cut(s, ", ")
+	if !ok || day == "" {
+		return false
+	}
+	return shaped(day, strings.Repeat("a", len(day))) &&
+		shaped(tail, "99-aaa-99 99:99:99 GMT") && monthAt(tail, 3)
+}
+
+// shaped matches a fixed layout: `9` a digit, `a` a letter, `#` either a digit
+// or the space asctime pads a one-digit day with, anything else itself.
+func shaped(s, pattern string) bool {
+	if len(s) != len(pattern) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		digit := s[i] >= '0' && s[i] <= '9'
+		letter := (s[i]|0x20) >= 'a' && (s[i]|0x20) <= 'z'
+		switch pattern[i] {
+		case '9':
+			if !digit {
+				return false
+			}
+		case 'a':
+			if !letter {
+				return false
+			}
+		case '#':
+			if !digit && s[i] != ' ' {
+				return false
+			}
+		default:
+			if s[i] != pattern[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func monthAt(s string, at int) bool {
+	i := strings.Index("JanFebMarAprMayJunJulAugSepOctNovDec", s[at:at+3])
+	return i >= 0 && i%3 == 0
 }
 
 // strongETag reports whether s is an entity tag this layer will act on: quoted,
@@ -92,6 +154,45 @@ func strongETag(s string) bool {
 		return false
 	}
 	return len(s) >= 2 && strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)
+}
+
+// answersFrom reports whether a 206 is an answer to the request that was sent:
+// a single range, beginning at the offset the next byte will be written at.
+//
+// Both ways of failing put real artifact bytes at a place nobody asked about,
+// and neither is visible to a length check or a transport error. A
+// `multipart/byteranges` body is worse than misplaced — its MIME boundary and
+// per-part headers are content this layer would author into the artifact
+// itself. RFC 9110 allows a server to answer a single range that way and a
+// coalescing proxy does; we never send a multi-range request, so it is never an
+// answer to ours.
+func answersFrom(resp *http.Response, from int64) error {
+	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/") {
+		return fmt.Errorf("download: one range was answered with %s", ct)
+	}
+	start, err := contentRangeStart(resp.Header.Get("Content-Range"))
+	if err != nil {
+		return err
+	}
+	if start != from {
+		return fmt.Errorf("download: asked for bytes from %d, got a range starting at %d", from, start)
+	}
+	return nil
+}
+
+// unwantedCoding names a content coding the request did not ask for, or "".
+//
+// Every request this layer sends carries `Accept-Encoding: identity`, so any
+// other coding coming back is the server overriding what was asked. It matters
+// because a digest is over the artifact and a coding changes what "the bytes"
+// are: one transport decoded and completed, one hashed the envelope, one failed
+// a third way, and all three were reading the same legal response.
+func unwantedCoding(h http.Header) string {
+	v := strings.TrimSpace(h.Get("Content-Encoding"))
+	if v == "" || strings.EqualFold(v, "identity") {
+		return ""
+	}
+	return v
 }
 
 // contentRangeStart reads the first byte position out of a `Content-Range`
@@ -110,11 +211,11 @@ func contentRangeStart(s string) (int64, error) {
 	if !ok || !strings.EqualFold(unit, "bytes") {
 		return 0, fmt.Errorf("download: Content-Range %q is not in bytes", s)
 	}
-	span, _, ok := strings.Cut(strings.TrimSpace(rest), "/")
+	byteRange, _, ok := strings.Cut(strings.TrimSpace(rest), "/")
 	if !ok {
 		return 0, fmt.Errorf("download: Content-Range %q has no total", s)
 	}
-	first, _, ok := strings.Cut(span, "-")
+	first, _, ok := strings.Cut(byteRange, "-")
 	if !ok {
 		return 0, fmt.Errorf("download: Content-Range %q has no range", s)
 	}

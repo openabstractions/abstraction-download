@@ -1,0 +1,15 @@
+# requires: wire
+#
+# A resume against a server that does ranges properly. Everything the other wire
+# scenarios distort is correct here, so a divergence in this one is the harness
+# and not the contract.
+submit A size=64 digest=good src=http:plain
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+state A
+
+# expect 6: ok state=transferred
+# expect 6: done=64 err=none

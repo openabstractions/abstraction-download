@@ -1,0 +1,47 @@
+# Records as they were written, and what a reader must still make of them.
+#
+# Every change to this format was argued forward-only and none was tested
+# against a record written before it. These are those records: the `old-`
+# ones were produced by the published go/v0.1.0 tag, the `new-` ones by the
+# tree that follows it. A reader that no longer agrees with a line here has
+# broken somebody's store, and that is the finding rather than a line to
+# retune.
+#
+# by       which code wrote the record
+# resolve  ok, or the refusal Sink.Resolve now answers with
+#
+# new-complete-leased and new-complete-leased-terminal are the same record twice,
+# and the pair is the whole argument for naming a rule. Terminal enforcement went
+# out under an unchanged abstraction.job/base@1, so v0.1.0 reads the first one and
+# its lease holder writes the finished job back to `pending`. The second declares
+# abstraction.job/terminal@1 critical and v0.1.0 refuses it at decode instead.
+#
+# name by state partial final prefix verified resolve
+new-absolute-backslash-pending  tree   pending     C:/models/y.gguf.part                   C:/models/y.gguf         0    []                     ok
+new-absolute-no-partial         tree   pending     C:/models/big.gguf.part                 C:/models/big.gguf       0    []                     ok
+new-cancelled                   tree   cancelled   work/1788673445885-74a98f22898e7cddcf83 models/t.gguf            0    []                     ok
+new-cancelled-intent            tree   pending     work/1788673445697-0e062fa6f7727bed0c24 models/u.gguf            0    []                     ok
+new-complete                    tree   complete    work/1788673445782-e3bf8ca950de27df48a7 models/t.gguf            0    []                     ok
+new-complete-leased             tree   complete    work/1788673445949-d2dd7968af5de46a0249 models/s.gguf            0    []                     ok
+new-complete-leased-terminal    tree   complete    work/1788673445949-d2dd7968af5de46a0249 models/s.gguf            0    []                     ok
+new-delegated-running           tree   running     work/1788673445643-dfcd4f54ed654c5aac85 models/v.gguf            0    []                     ok
+new-failed                      tree   failed      work/1788673445828-6d421a4b575dd55f1d79 models/t.gguf            0    []                     ok
+new-relative-pending            tree   pending     work/1788673445494-d76944a8b5a24268cd6d models/x.gguf            0    []                     ok
+new-relative-running-checkpoint tree   running     work/1788673445528-c407108bdb72ff052e68 models/z.gguf            1024 [[0,1024)]             ok
+new-running-ranges-validators   tree   running     work/1788673445722-5689dd1ac825f7f385ce models/r.gguf            1024 [[0,1024);[4096,6144)] ok
+new-source-headers              tree   pending     work/1788673445772-899bcd381657735930c9 models/h.gguf            0    []                     ok
+new-transferred                 tree   transferred work/1788673445584-2809c7b4e662231fc90e models/w.gguf            4096 [[0,4096)]             ok
+old-absolute-backslash-pending  v0.1.0 pending     C:\models\y.gguf.part                   C:\models\y.gguf         0    []                     ok
+old-absolute-no-partial         v0.1.0 pending     work/1788673443463-719d3e721ee359cba98b C:\models\big.gguf       0    []                     ok
+old-cancelled                   v0.1.0 cancelled   work/1788673443336-ea074cd5e6e378ce6ca8 models/t.gguf            0    []                     ok
+old-cancelled-intent            v0.1.0 pending     work/1788673443229-4b7013690ff3377e14ad models/u.gguf            0    []                     ok
+old-complete                    v0.1.0 complete    work/1788673443247-49c70a418519e14695aa models/t.gguf            0    []                     ok
+old-complete-leased             v0.1.0 complete    work/1788673443390-8aba0462edcf3552f834 models/s.gguf            0    []                     ok
+old-delegated-running           v0.1.0 running     work/1788673443192-677b19487adf6dcdd905 models/v.gguf            0    []                     ok
+old-escaping-sink               v0.1.0 pending     work/1788673443436-59242c439b1cb86f8704 ../../outside/e.gguf     0    []                     escapes-root
+old-failed                      v0.1.0 failed      work/1788673443287-f399102ad2f4dda3dfb0 models/t.gguf            0    []                     ok
+old-posix-absolute-sink         v0.1.0 pending     work/1788673443423-dc6f790216ab6a1c4ea6 /mnt/store/models/p.gguf 0    []                     foreign
+old-relative-pending            v0.1.0 pending     work/1788673443070-ebf7f8e93e7d6066c4f0 models/x.gguf            0    []                     ok
+old-relative-running-checkpoint v0.1.0 running     work/1788673443098-6dda1e4c6927132579cf models/z.gguf            1024 [[0,1024)]             ok
+old-reserved-sink               v0.1.0 pending     work/1788673443451-19e2ae246ccb287f95f6 jobs/other.json          0    []                     reserved
+old-transferred                 v0.1.0 transferred work/1788673443146-339a74d4890295edb06b models/w.gguf            4096 [[0,4096)]             ok

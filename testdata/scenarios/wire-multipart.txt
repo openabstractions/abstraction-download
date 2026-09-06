@@ -1,0 +1,18 @@
+# requires: wire
+#
+# A single range answered as `multipart/byteranges`. RFC 9110 allows it and a
+# proxy coalescing requests produces it, and its body is MIME: a boundary line,
+# per-part headers, a blank line, then the bytes. Appended without being parsed,
+# the artifact gets the boundary written into the middle of it.
+submit A size=64 digest=good src=http:multipart
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-R8]
+# expect 6: done=64 err=none
+# expect 7: ok -

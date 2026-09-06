@@ -1,0 +1,28 @@
+# requires: transfer
+#
+# The confused deputy at the sink field, one spelling past the containment that
+# closed the relative case.
+#
+# A record on a store several machines can write names an ABSOLUTE sink -- on a
+# NAS, /etc/cron.d/<name>. Lexical containment never saw it: an absolute path is
+# never joined onto the store root, so it climbs out of nothing. The foreign-path
+# rule refuses only the OTHER platform's spelling, so a path in the fetching
+# machine's own convention passes every check and is written with that machine's
+# authority, at a destination a record somebody else wrote chose. The drop folder
+# already refuses this on its own input; the record door -- the one the runner
+# actually uses -- did not.
+#
+# A runner over a shared store refuses it (step 2), the bytes never land, and the
+# job is left adoptable rather than failed (step 3): the record is valid on the
+# machine whose filesystem the path names, so this is a machine's policy and not
+# a fault of the record. The driver spells the absolute path in the host's own
+# convention, because which spelling is native depends on the host and the
+# behaviour under test is the same on both.
+submit A size=64 digest=good src=file sink=abs
+runshared A alpha
+state A
+
+# expect 1: ok state=pending
+# expect 2: transfer-failed state=pending [DL-R30]
+# expect 2: done=0 err=set [DL-E1]
+# expect 3: ok state=pending

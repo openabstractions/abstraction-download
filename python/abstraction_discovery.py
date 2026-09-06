@@ -1,6 +1,7 @@
 """Discovery over local IPC, in Python — the client half only.
 
-`docs/discovery-ipc.md` and `docs/service-topology.md` are the contract. This
+https://github.com/openabstractions/abstractions/blob/main/docs/discovery-ipc.md
+and the service-topology document beside it are the contract. This
 file is written against those two documents and against nothing else: it does
 not read the Go client, and the C++ client in abstraction-job does not read
 this. If the two agree it is because the contract said enough, and where they

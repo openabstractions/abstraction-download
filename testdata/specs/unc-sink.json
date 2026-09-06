@@ -1,0 +1,1 @@
+{"artifact":{"size":1024},"sources":[{"scheme":"file","locator":"//nas/share/x.gguf"}],"sink":{"final":"//nas/share/models/x.gguf","partial":"//nas/share/models/x.gguf.part"}}

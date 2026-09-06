@@ -1,0 +1,16 @@
+# requires: wire
+#
+# `Content-Range: bytes 40-63/*` is legal and says the server will not commit to
+# a length. The bytes are right; the only question is what an implementation
+# writes into the progress a person is watching, and whether an unparsed `*`
+# becomes a zero, a negative, or a total smaller than the work already done.
+submit A size=64 digest=good src=http:star
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+state A
+
+# expect 6: ok state=transferred
+# expect 6: done=64 err=none

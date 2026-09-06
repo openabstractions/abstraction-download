@@ -1,0 +1,15 @@
+# requires: transfer
+#
+# A checkpoint claiming forty proven bytes, and a partial file that does not
+# exist. The resume point is the SMALLER of the two, always — trusting the
+# record alone produces a file of the right length and the wrong bytes, and
+# that failure is invisible until somebody hashes it.
+submit A size=64 digest=good src=file
+claim A alpha 5000
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+state A
+
+# expect 5: ok state=transferred [DL-R1]
+# expect 5: done=64 err=none

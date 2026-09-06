@@ -1,0 +1,19 @@
+# requires: wire
+#
+# A 206 that begins at zero when it was asked to begin at forty. The bytes are
+# the artifact's own, so nothing about them is corrupt and nothing about the
+# length is wrong -- written at the offset asked for, they put real content in
+# the wrong place, which no transport error and no length check can see. Only
+# Content-Range says so, and only if somebody reads it.
+submit A size=64 digest=good src=http:offset
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-R7]
+# expect 6: done=64 err=none
+# expect 7: ok - [DL-R10]

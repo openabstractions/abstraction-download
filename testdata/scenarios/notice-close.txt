@@ -1,0 +1,14 @@
+# requires: store
+#
+# After close a listener is told so, and nothing else, ever -- a change made
+# after close is not delivered to it.
+submit A size=64 digest=good src=file
+watch W 300
+next W
+close W
+claim A alpha 60000
+next W
+next W
+
+# expect 6: closed [WATCH-X1]
+# expect 7: closed [WATCH-X1]

@@ -1,0 +1,23 @@
+# requires: store
+#
+# The primitive nobody else furnishes: a listener is told that nothing has
+# happened. Quiet arrives once the budget passes with nothing visible, repeats
+# each budget while the silence lasts, and a change ends it. A lease renewal
+# is not a change: it moves nothing a person can see.
+submit A size=64 digest=good src=file
+watch W 200
+next W
+next W
+next W
+claim A alpha 60000
+next W
+renew A alpha 60000
+next W
+
+# expect 3: changed
+# expect 4: quiet [WATCH-Q1]
+# expect 5: quiet [WATCH-Q2]
+# expect 7: changed [WATCH-Q3]
+# expect 7: A=running/0
+# expect 9: quiet [JOB-N1] [WATCH-P2]
+# expect 9: A=running/0

@@ -29,53 +29,53 @@ type Resume interface {
 	// existing one if there is one. Call it instead of Submit whenever the
 	// caller identifies work by where the bytes land.
 	//
-	// It reports what it decided; see Continuation, and the rules below.
-	ResumeOrSubmit(spec Spec, requires ...string) (job.Job, Continuation, error)
+	// It reports what it decided; see Outcome, and the rules below.
+	ResumeOrSubmit(spec Spec, requires ...string) (Handle, Outcome, error)
 
 	// ResumeOrGet is ResumeOrSubmit for a caller holding a URL and a path, in
 	// the shape of Get. A destination that names a directory takes its filename
 	// from the source.
-	ResumeOrGet(source, destination string) (job.Job, Continuation, error)
+	ResumeOrGet(source, destination string) (Handle, Outcome, error)
 }
 
-// Disposition is what ResumeOrSubmit did.
-type Disposition string
+// Decision is what ResumeOrSubmit did.
+type Decision string
 
 const (
 	// Submitted: nothing in the store was working on this destination, so a new
-	// record was created. This is the only disposition that means no bytes
+	// record was created. This is the only decision that means no bytes
 	// survive from an earlier attempt.
-	Submitted Disposition = "submitted"
+	Submitted Decision = "submitted"
 
 	// Resumed: an unfinished record for this destination was adopted.
-	// Continuation.ResumeFrom says how many bytes of it survive.
-	Resumed Disposition = "resumed"
+	// Outcome.ResumeFrom says how many bytes of it survive.
+	Resumed Decision = "resumed"
 
 	// Delivered: the artifact is already at the destination and no bytes need to
 	// move. The returned job may still be waiting for TakeDelivery.
-	Delivered Disposition = "delivered"
+	Delivered Decision = "delivered"
 
 	// Busy: an unfinished record was adopted, and another owner holds its lease
 	// right now. The lease was not taken and no work was started here. The
 	// returned handle is that work — watch it. If the owner is dead its lease
 	// lapses within the runner's LeaseTTL and the ordinary reclamation path
 	// picks the job up.
-	Busy Disposition = "busy"
+	Busy Decision = "busy"
 
 	// Paused: an unfinished record was adopted, and somebody asked it to stop.
 	// Nothing was started; resume it through the job handle (job.Pausable)
 	// before expecting bytes to move.
-	Paused Disposition = "paused"
+	Paused Decision = "paused"
 )
 
-// Continuation is what ResumeOrSubmit decided, in a form a caller can print.
+// Outcome is what ResumeOrSubmit decided, in a form a caller can print.
 //
 // Nothing here is a branch a caller must take: the returned job.Job is correct
 // whatever this says. It exists because every decision below is one a person
 // running a command is entitled to see rather than have made silently.
-type Continuation struct {
-	// Disposition is which of the cases above applied.
-	Disposition Disposition
+type Outcome struct {
+	// Decision is which of the cases above applied.
+	Decision Decision
 
 	// ResumeFrom is the byte the next request will actually ask for, measured
 	// against the filesystem and not against the record. A record claiming a
@@ -129,10 +129,10 @@ type Continuation struct {
 }
 
 // ResumeOrGet implements Resume.
-func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation, error) {
+func (s *client) ResumeOrGet(source, destination string) (Handle, Outcome, error) {
 	spec, err := specFor(source, destination)
 	if err != nil {
-		return nil, Continuation{}, err
+		return nil, Outcome{}, err
 	}
 	return s.ResumeOrSubmit(spec)
 }
@@ -155,7 +155,7 @@ func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation
 //     to remove, so a caller that can hand over one spelling should.
 //
 //   - An unfinished record for that destination is continued, whatever its
-//     source. See Continuation.SourceChanged.
+//     source. See Outcome.SourceChanged.
 //
 //   - COMPLETE means the file is there, and that is checked rather than
 //     believed: a complete record whose file has been moved or deleted is
@@ -164,7 +164,7 @@ func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation
 //     one — and neither carries bytes forward, because nothing proved them.
 //
 //   - A lease held by another owner is left alone: nothing is claimed here, and
-//     the record comes back with Disposition Busy. This process offers to take
+//     the record comes back with Decision Busy. This process offers to take
 //     the work over only once that lease lapses of its own accord, which is what
 //     recovers a download whose owner was killed rather than stopped.
 //
@@ -180,67 +180,67 @@ func (s *service) ResumeOrGet(source, destination string) (job.Job, Continuation
 //     record id is derived from the destination and both store bindings refuse
 //     to create an id twice. The loser of the race loads the winner's record
 //     and continues it.
-func (s *service) ResumeOrSubmit(spec Spec, requires ...string) (job.Job, Continuation, error) {
+func (s *client) ResumeOrSubmit(spec Spec, requires ...string) (Handle, Outcome, error) {
 	if err := spec.Validate(); err != nil {
-		return nil, Continuation{}, err
+		return nil, Outcome{}, err
 	}
 	dest := s.destinationOf(spec.Sink)
 	if dest == "" {
-		return nil, Continuation{}, fmt.Errorf("download: ResumeOrSubmit needs a destination")
+		return nil, Outcome{}, fmt.Errorf("download: ResumeOrSubmit needs a destination")
 	}
 
 	live, done := s.recordsFor(dest)
 	if live != nil {
-		c := s.continuation(live, spec)
-		if c.Disposition == Resumed || c.Disposition == Busy {
+		c := s.outcome(live, spec)
+		if c.Decision == Resumed || c.Decision == Busy {
 			// begin never bypasses a lease: with a supervisor it only nudges,
 			// and without one it retries Claim until the current lease lapses of
-			// its own accord. See service.begin and service.runHere.
-			s.begin(live.ID)
+			// its own accord. See client.begin and client.runHere.
+			s.begin(live.ID, spec)
 		}
 		return s.Open(live.ID), c, nil
 	}
 	if done != nil {
-		return s.Open(done.ID), Continuation{
-			Disposition: Delivered,
-			Source:      firstLocator(done),
-			Note:        "already downloaded",
+		return s.Open(done.ID), Outcome{
+			Decision: Delivered,
+			Source:   firstLocator(done),
+			Note:     "already downloaded",
 		}, nil
 	}
 
 	spec = s.alreadyHere(spec)
 	id, created, err := s.claimDestination(dest, spec, requires)
 	if err != nil {
-		return nil, Continuation{}, err
+		return nil, Outcome{}, err
 	}
 	if !created {
 		// Somebody won the race between the scan above and the create. Their
 		// record is the one record for this destination, so continue it.
 		rec, lerr := s.runner.Store.Load(id)
 		if lerr != nil {
-			return nil, Continuation{}, lerr
+			return nil, Outcome{}, lerr
 		}
-		c := s.continuation(rec, spec)
-		if c.Disposition == Resumed || c.Disposition == Busy {
-			s.begin(id)
+		c := s.outcome(rec, spec)
+		if c.Decision == Resumed || c.Decision == Busy {
+			s.begin(id, spec)
 		}
 		return s.Open(id), c, nil
 	}
-	s.begin(id)
-	return s.Open(id), Continuation{
-		Disposition: Submitted,
-		Source:      spec.Sources[0].Locator,
-		Note:        "starting a new download",
+	s.begin(id, spec)
+	return s.Open(id), Outcome{
+		Decision: Submitted,
+		Source:   spec.Sources[0].Locator,
+		Note:     "starting a new download",
 	}, nil
 }
 
-// continuation decides what an existing unfinished record means for this call.
-func (s *service) continuation(rec *job.Record, want Spec) Continuation {
-	c := Continuation{Disposition: Resumed, Source: firstLocator(rec)}
+// outcome decides what an existing unfinished record means for this call.
+func (s *client) outcome(rec *job.Record, want Spec) Outcome {
+	c := Outcome{Decision: Resumed, Source: firstLocator(rec)}
 	c.SourceChanged = len(want.Sources) > 0 && c.Source != "" && c.Source != want.Sources[0].Locator
 
 	if rec.State == job.StateTransferred && s.destinationExists(rec) {
-		c.Disposition = Delivered
+		c.Decision = Delivered
 		c.Note = "already downloaded, waiting to be taken delivery of"
 		return c
 	}
@@ -248,24 +248,24 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 	c.ResumeFrom, c.Proven, c.Discarded = s.resumeFrom(rec)
 	switch {
 	case rec.Paused():
-		c.Disposition = Paused
+		c.Decision = Paused
 		c.Note = "an existing download to this path is paused"
 	case !s.runner.Store.Claimable(rec) && rec.Lease.Owner != s.runner.Owner:
-		c.Disposition = Busy
+		c.Decision = Busy
 		c.Note = fmt.Sprintf("%s is already downloading to this path", rec.Lease.Owner)
 	case c.ResumeFrom > 0:
 		c.Note = fmt.Sprintf("continuing an existing download from byte %d", c.ResumeFrom)
 	default:
 		c.Note = "continuing an existing download from the beginning"
 	}
-	if c.Proven > c.ResumeFrom && c.Disposition == Resumed {
+	if c.Proven > c.ResumeFrom && c.Decision == Resumed {
 		// The number a person needs when their download resumes from a low
 		// offset and is nonetheless nearly finished. Without it the display
 		// says "continuing from byte 0" for a transfer holding all but its
 		// first megabyte, which reads as starting over.
 		c.Note += fmt.Sprintf("; %d bytes past that are already proven and will be skipped", c.Proven-c.ResumeFrom)
 	}
-	if c.Discarded > 0 && c.Disposition == Resumed {
+	if c.Discarded > 0 && c.Decision == Resumed {
 		c.Note += fmt.Sprintf("; %d bytes on disk are unproven and will be fetched again", c.Discarded)
 	}
 	if c.SourceChanged {
@@ -291,7 +291,7 @@ func (s *service) continuation(rec *job.Record, want Spec) Continuation {
 // resume onto bytes nothing vouches for. That case has no resume point at all —
 // the partial is discarded and the transfer starts again — so this reports zero
 // proven and the whole file discarded.
-func (s *service) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
+func (s *client) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
 	spec, err := SpecOf(rec)
 	if err != nil {
 		return 0, 0, 0
@@ -300,7 +300,7 @@ func (s *service) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
 	if err != nil {
 		return 0, 0, 0
 	}
-	partial, _ := LocalSink(s.runner.Store, spec.Sink)
+	partial, _, _ := LocalSink(s.runner.Store, rec.ID, spec.Sink)
 	plan, err := planResume(partial, cp, spec.Artifact.Size)
 	if err != nil {
 		// No resume point. Whatever is on disk is going, and how much of it
@@ -314,12 +314,12 @@ func (s *service) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
 }
 
 // destinationExists reports whether the record's final path holds a file.
-func (s *service) destinationExists(rec *job.Record) bool {
+func (s *client) destinationExists(rec *job.Record) bool {
 	spec, err := SpecOf(rec)
 	if err != nil {
 		return false
 	}
-	_, final := LocalSink(s.runner.Store, spec.Sink)
+	_, final, _ := LocalSink(s.runner.Store, rec.ID, spec.Sink)
 	st, err := os.Stat(final)
 	return err == nil && !st.IsDir()
 }
@@ -331,7 +331,7 @@ func (s *service) destinationExists(rec *job.Record) bool {
 // might already be there. The scan is over every record rather than over ids
 // this package would have chosen, so a job submitted by an older version, by the
 // CLI, or by another implementation is still found.
-func (s *service) recordsFor(dest string) (live, complete *job.Record) {
+func (s *client) recordsFor(dest string) (live, complete *job.Record) {
 	all, err := s.runner.Store.List()
 	if err != nil {
 		return nil, nil
@@ -368,7 +368,7 @@ func (s *service) recordsFor(dest string) (live, complete *job.Record) {
 // The generation suffix is what keeps that compatible with "download it again":
 // a destination whose first record ended failed, cancelled, or complete-with-no
 // file needs a second record, and it cannot have the same id as the first.
-func (s *service) claimDestination(dest string, spec Spec, requires []string) (id string, created bool, err error) {
+func (s *client) claimDestination(dest string, spec Spec, requires []string) (id string, created bool, err error) {
 	base := destinationID(dest)
 	for gen := 1; gen <= 512; gen++ {
 		id = base
@@ -409,8 +409,12 @@ func destinationID(dest string) string {
 // A relative sink means "under the store's own area", so it is resolved the same
 // way the runner will resolve it — otherwise a record written as `out/x.bin` and
 // a call naming the absolute path of that same file would be two records.
-func (s *service) destinationOf(sink Sink) string {
-	_, final := LocalSink(s.runner.Store, sink)
+//
+// Asked on behalf of no job, because the id this answer produces is what the
+// job will be called: there is nothing to own the store's work area yet, so a
+// destination inside it has no identity and resolves to "".
+func (s *client) destinationOf(sink Sink) string {
+	_, final, _ := LocalSink(s.runner.Store, "", sink)
 	return canonicalPath(final)
 }
 

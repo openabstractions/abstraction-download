@@ -1,0 +1,1 @@
+{"artifact":{"size":1024},"sources":[{"scheme":"https","locator":"https://example.invalid/x.gguf"}],"sink":{"final":"../../../Users/victim/.ssh/authorized_keys","partial":"..\\..\\..\\Startup\\evil.bat"}}

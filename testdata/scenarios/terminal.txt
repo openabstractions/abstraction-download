@@ -1,0 +1,54 @@
+# requires: store
+#
+# What a terminal record refuses, and what it still allows. Nothing reopens
+# finished work, and an implementation that lets one operation through here is
+# one that can resurrect a cancelled job.
+#
+# job/README.md: "complete, failed and cancelled are terminal: no claim, no
+# update, no intent." Claim and intent were refused by all three. The update was
+# refused by none of them, and neither was `release`, which every implementation
+# builds on update: step 6 wrote progress onto a record the same page calls
+# history, step 7 walked a terminal job back to `pending`, and step 9 then
+# offered it to a sweep. Three identical transcripts and a green line for as
+# long as this scenario existed — the failure a harness that only compares
+# implementations to each other cannot have an opinion about.
+#
+# The rule is also DECLARED, which is the half that was missing. Everything
+# below shipped under an unchanged `abstraction.job/base@1`, so a reader
+# published before it reads these records happily and breaks the one rule they
+# are about: measured, research/wire-compat/RESULTS.txt §2. Step 2 carries no
+# such declaration and step 3 does, because a record becomes closed to its own
+# holder at the instant it becomes terminal and not before.
+#
+# Step 3 is the write that MAKES the record terminal, and it must land: the
+# refusal is judged on the state as read, never on what the write leaves behind,
+# because otherwise no job could ever finish. Step 8 is the consequence an owner
+# lives with — its own release is refused too, so a finished job keeps its lease
+# until it lapses. Nothing may claim it either, so there is nothing to hand it
+# back to.
+submit A size=64 digest=good src=file
+claim A alpha 5000
+finish A alpha failed
+intent A run
+claim A beta 5000
+progress A alpha 8 {"verified_prefix":8}
+finish A alpha pending
+release A alpha
+orphans
+state A
+
+# expect 2: content=abstraction.job/base@1
+# expect 3: ok [JOB-T3]
+# expect 3: state=failed [JOB-S2]
+# expect 3: content=abstraction.job/base@1,abstraction.job/terminal@1 [JOB-D6]
+# expect 3: crit=abstraction.job/base@1,abstraction.job/terminal@1 [JOB-D6]
+# expect 4: terminal [JOB-I5]
+# expect 5: terminal [JOB-T1]
+# expect 6: terminal [JOB-T1]
+# expect 6: done=0 [JOB-T4]
+# expect 6: cp=none
+# expect 7: terminal
+# expect 8: terminal [JOB-T5]
+# expect 9: ok -
+# expect 10: state=failed
+# expect 10: held=yes

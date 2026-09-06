@@ -2,9 +2,5 @@ github.com/openabstractions/abstraction-config/go v0.1.0 h1:IYdDmiGB6B0WLql5FLf2
 github.com/openabstractions/abstraction-config/go v0.1.0/go.mod h1:EdlstcQGY/Ud6+GlPn1662bSGogolwGDaqlqOeF3Pts=
 github.com/openabstractions/abstraction-job/go v0.1.0 h1:jHEsz4vHG+uJsLiKuJIjIW/0BE0XaTkOgZEdpYgQbkE=
 github.com/openabstractions/abstraction-job/go v0.1.0/go.mod h1:il67ICLWV1FF2D3ecrSeC/iE9GMCJNEg4ttF8y1+bWE=
-github.com/openabstractions/abstraction-job/go v0.1.1-0.20260905125313-a2f800c39c01 h1:oFHyjQI3CgWSslZd1DLj5/6fLA4LckI4BMVCKXcYobo=
-github.com/openabstractions/abstraction-job/go v0.1.1-0.20260905125313-a2f800c39c01/go.mod h1:il67ICLWV1FF2D3ecrSeC/iE9GMCJNEg4ttF8y1+bWE=
 github.com/openabstractions/abstraction-storage/go v0.1.0 h1:0kEJE/rTLlbeJxzpSJBHBEMQSQFdsE9U5ymwpIwSYr0=
 github.com/openabstractions/abstraction-storage/go v0.1.0/go.mod h1:PItn7cCxymHmeRpLp1nCb3nNc0NBJFVfbcMo4AGiOTE=
-golang.org/x/crypto/x509roots/fallback v0.0.0-20260902174831-a6cdac608407 h1:C04Y0kunmGhtrgcDCm1orQlM4SnR41Na5ysJUKOHGMI=
-golang.org/x/crypto/x509roots/fallback v0.0.0-20260902174831-a6cdac608407/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=

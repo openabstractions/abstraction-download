@@ -43,6 +43,19 @@ func localRoot(store job.Store) string {
 // record written by a PC and adopted by a NAS names one directory rather than
 // one machine's view of it. Absolute paths are left exactly as the caller wrote
 // them.
-func LocalSink(store job.Store, s Sink) (partial, final string) {
-	return s.Resolve(localRoot(store))
+//
+// It returns an error — rather than a best guess — for a path this machine must
+// not write. The record was written by another machine and the writing is done
+// with this one's authority, so the refusal happens here, at the boundary, and
+// is not carried any further: a path that climbs out of the root
+// (ErrEscapesRoot), one that aims at the store's own files (ErrReservedPath),
+// and one that is absolute in a convention this platform does not use
+// (ErrForeignPath).
+//
+// owner is the id of the job whose sink this is. work/<owner> is the store's
+// scratch for that job and the one reserved path it may write, so a caller that
+// passes the wrong id gets its own partial refused rather than someone else's
+// accepted.
+func LocalSink(store job.Store, owner string, s Sink) (partial, final string, err error) {
+	return s.Resolve(localRoot(store), owner)
 }

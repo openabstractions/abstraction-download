@@ -61,15 +61,15 @@ func prefixShaped(rs Ranges) bool {
 // thing: whether to spend the `verified` key.
 //
 //   - Prefix-shaped state is written exactly as it was written before ranges
-//     existed — `{"verified_prefix":N,...}`, no `verified`, no content model —
-//     and the model is withdrawn if an earlier write had declared it. A
+//     existed — `{"verified_prefix":N,...}`, no `verified`, no content feature —
+//     and the feature is withdrawn if an earlier write had declared it. A
 //     single-stream download therefore produces the same record bytes it has
 //     always produced, which is not politeness: it is what lets this change go
 //     out ahead of the other two bindings without any record they compare
 //     against moving underneath them.
 //
 //   - A set with a hole in it cannot be said any other way, so it is written in
-//     the job layer's canonical form and the model is declared.
+//     the job layer's canonical form and the feature is declared.
 //
 // The declaration is carried, not derived — the job layer cannot rediscover it,
 // because what it describes is inside a field that is opaque there — so a writer
@@ -112,7 +112,7 @@ func setCheckpoint(rr *job.Record, cp Checkpoint) error {
 	return rr.SetCheckpointRanges(rs)
 }
 
-// withdrawRanges takes the ranges model back off a record.
+// withdrawRanges takes the ranges feature back off a record.
 //
 // Only the declaration has to be removed: the caller has just replaced the
 // whole checkpoint with prefix-shaped JSON, so the `verified` key is already
@@ -121,12 +121,12 @@ func setCheckpoint(rr *job.Record, cp Checkpoint) error {
 // re-serialises the checkpoint from a map, which sorts `validators` in front of
 // `verified_prefix` and changes bytes nothing asked to change.
 func withdrawRanges(rr *job.Record) {
-	if !containsModel(rr.Content, job.ModelRanges) {
+	if !containsModel(rr.Content, job.FeatureRanges) {
 		return
 	}
 	kept := make([]string, 0, len(rr.Content))
 	for _, name := range rr.Content {
-		if name != job.ModelRanges {
+		if name != job.FeatureRanges {
 			kept = append(kept, name)
 		}
 	}

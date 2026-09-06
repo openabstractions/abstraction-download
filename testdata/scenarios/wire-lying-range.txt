@@ -1,0 +1,18 @@
+# requires: wire
+#
+# Content-Range names bytes 40-63 and the body holds bytes 0-23. Every header
+# agrees with every other header and the length is exactly right, so this is the
+# case where only the digest is left standing -- which is the argument for
+# hashing every transfer rather than trusting a source that answered politely.
+submit A size=64 digest=good src=http:lying
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: transfer-failed state=pending [DL-R15]
+# expect 6: done=0 err=set
+# expect 7: ok A

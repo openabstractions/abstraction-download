@@ -1,0 +1,19 @@
+# requires: transfer
+#
+# Cancel is the intent a PERSON presses, and it is the one where ignoring the
+# field costs the most: the job is not merely restarted, it runs to completion
+# and delivers bytes somebody said they did not want. Unlike pause it has a
+# terminal ending, so the two are separate branches of honouring and a runner
+# can get one right and the other wrong.
+submit A size=64 digest=good src=file
+claim A alpha 400
+intent A cancel
+sleep 900
+orphans
+run A beta
+state A
+
+# expect 5: ok A
+# expect 6: state=cancelled [DL-R26] [JOB-I9]
+# expect 6: done=0
+# expect 7: state=cancelled [JOB-S3]

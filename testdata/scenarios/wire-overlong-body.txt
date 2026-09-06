@@ -1,0 +1,10 @@
+# requires: wire
+#
+# Content-Length says sixty-four and the server sends seventy-two. The surplus
+# is somebody else's response if the connection were reused, and eight bytes of
+# rubbish on the end of the artifact if it is not. Nothing but the declared
+# length says so.
+submit A size=64 digest=good src=http:overlong
+run A alpha
+orphans
+state A

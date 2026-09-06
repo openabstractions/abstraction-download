@@ -1,0 +1,129 @@
+# requires: store
+#
+# Every operation the contract names, against every state a record can be in.
+#
+# The other scenarios each test a rule somebody thought of. This one is the
+# table itself, so a cell nobody thought of still gets driven — and the cells
+# the pages do not settle are marked `# undecided` and asserted about by nothing,
+# instead of being pinned to whatever the three implementations happened to do.
+# That is where `renew` was hiding: allowed on a terminal record in all five
+# stores, written down in none of them, and found by a person reading them side
+# by side rather than by any instrument here.
+#
+# One job per cell that would move the state, and one job for the cells that
+# cannot: a terminal record refuses everything but `renew`, so all six of its
+# operations run against the same record and leave it where they found it.
+#
+# Leases are 60s and there is no `sleep`, so nothing in this file depends on a
+# clock. Sweep-by-state lives in orphans.txt and is not repeated here; the one
+# `orphans` at the end is a cross-check that the states above are what they say.
+submit P size=64 digest=good src=file
+renew P ghost 60000
+progress P ghost 8 {"verified_prefix":8}
+release P ghost
+finish P ghost complete
+intent P pause
+submit Pc size=64 digest=good src=file
+claim Pc pc 60000
+submit R size=64 digest=good src=file
+claim R rw 60000
+claim R rival 60000
+renew R rw 60000
+progress R rw 8 {"verified_prefix":8}
+intent R pause
+submit Rl size=64 digest=good src=file
+claim Rl rl 60000
+release Rl rl
+submit Rf size=64 digest=good src=file
+claim Rf rf 60000
+finish Rf rf complete
+submit T size=64 digest=good src=file
+claim T tw 60000
+finish T tw transferred
+renew T tw 60000
+progress T tw 8 {"verified_prefix":8}
+intent T pause
+release T tw
+submit Tc size=64 digest=good src=file
+claim Tc tc 60000
+finish Tc tc transferred
+release Tc tc
+claim Tc tc2 60000
+submit Tf size=64 digest=good src=file
+claim Tf tf 60000
+finish Tf tf transferred
+finish Tf tf complete
+submit C size=64 digest=good src=file
+claim C cw 60000
+finish C cw complete
+claim C cw2 60000
+renew C cw 60000
+progress C cw 8 {"verified_prefix":8}
+release C cw
+finish C cw failed
+intent C pause
+submit F size=64 digest=good src=file
+claim F fw 60000
+finish F fw failed
+claim F fw2 60000
+renew F fw 60000
+progress F fw 8 {"verified_prefix":8}
+release F fw
+finish F fw complete
+intent F pause
+submit X size=64 digest=good src=file
+claim X xw 60000
+finish X xw cancelled
+claim X xw2 60000
+renew X xw 60000
+progress X xw 8 {"verified_prefix":8}
+release X xw
+finish X xw complete
+intent X pause
+orphans
+
+# expect 3: lease-expired [JOB-L5]
+# expect 4: lease-expired [JOB-L5]
+# expect 5: lease-expired [JOB-L5]
+# expect 6: ok
+# expect 6: want=pause [JOB-I3]
+# expect 8: ok state=running [JOB-S1]
+# expect 10: ok state=running [JOB-S1]
+# expect 11: lease-held
+# expect 13: ok
+# expect 13: done=8
+# expect 14: ok
+# expect 14: want=pause [JOB-I3]
+# expect 17: ok state=pending [JOB-L6]
+# expect 20: ok state=complete [JOB-S2]
+# expect 23: ok state=transferred [JOB-S2]
+# expect 32: ok state=transferred [JOB-T2]
+# expect 36: ok state=complete [JOB-S2]
+# expect 39: ok state=complete [JOB-T3]
+# expect 40: terminal [JOB-T1]
+# expect 41: ok [JOB-T6]
+# expect 42: terminal [JOB-T1]
+# expect 43: terminal [JOB-T5]
+# expect 44: terminal [JOB-T1]
+# expect 45: terminal [JOB-I5]
+# expect 48: ok state=failed [JOB-T3]
+# expect 49: terminal [JOB-T1]
+# expect 50: ok [JOB-T6]
+# expect 51: terminal [JOB-T1]
+# expect 52: terminal [JOB-T5]
+# expect 53: terminal [JOB-T1]
+# expect 54: terminal [JOB-I5]
+# expect 57: ok state=cancelled [JOB-S3]
+# expect 58: terminal [JOB-T1]
+# expect 59: ok [JOB-T6]
+# expect 60: terminal [JOB-T1]
+# expect 61: terminal [JOB-T5]
+# expect 62: terminal [JOB-T1]
+# expect 63: terminal [JOB-I5]
+# expect 64: ok Rl
+
+# undecided 2: renew against a record nobody has ever held — no page says
+# undecided 12: renew while the lease is live — no page says when renew succeeds, only that a terminal record still accepts it
+# undecided 25: update on transferred — the page says terminal refuses updates and that transferred is not terminal, and never closes the gap
+# undecided 26: intent on transferred — same gap, same sentence
+# undecided 27: release on transferred — the page states only that releasing turns running back into pending

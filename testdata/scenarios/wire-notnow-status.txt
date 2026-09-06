@@ -1,0 +1,34 @@
+# requires: wire
+#
+# The other side of the same list. A retryable status classed as a refusal
+# throws away a download this project exists to keep: 408, 425 and 429 say try
+# later, 409 and 423 are somebody else's lock, 5xx is the far end having a bad
+# moment, and an unrecognised 4xx is "not now" because being wrong that way
+# costs less. Every one of these must leave the record in the sweep.
+submit A size=64 digest=good src=http:status-408
+run A alpha
+submit B size=64 digest=good src=http:status-409
+run B alpha
+submit C size=64 digest=good src=http:status-418
+run C alpha
+submit D size=64 digest=good src=http:status-423
+run D alpha
+submit E size=64 digest=good src=http:status-425
+run E alpha
+submit F size=64 digest=good src=http:status-429
+run F alpha
+submit G size=64 digest=good src=http:status-500
+run G alpha
+submit H size=64 digest=good src=http:status-503
+run H alpha
+orphans
+
+# expect 2: transfer-failed state=pending [DL-E5]
+# expect 4: transfer-failed state=pending
+# expect 6: transfer-failed state=pending
+# expect 8: transfer-failed state=pending
+# expect 10: transfer-failed state=pending
+# expect 12: transfer-failed state=pending
+# expect 14: transfer-failed state=pending
+# expect 16: transfer-failed state=pending
+# expect 17: ok A B C D E F G H [DL-E6]

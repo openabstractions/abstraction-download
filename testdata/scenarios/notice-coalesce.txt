@@ -1,0 +1,18 @@
+# requires: store
+#
+# A listener that took nothing while several changes landed gets one notice
+# carrying the latest. The quiet after it is the proof: a backlog would have
+# been a second change.
+submit A size=64 digest=good src=file
+watch W 300
+next W
+claim A alpha 60000
+progress A alpha 10
+progress A alpha 20
+finish A alpha complete
+next W
+next W
+
+# expect 8: changed [WATCH-C1]
+# expect 8: A=complete/20
+# expect 9: quiet [WATCH-C1]

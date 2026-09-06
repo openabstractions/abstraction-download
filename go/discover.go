@@ -14,10 +14,7 @@ import (
 // AND reachable, and returns a Runner. A machine with a NAS set up delegates
 // there. A Windows machine without one delegates to BITS. A machine with neither
 // downloads in-process. The application branches on none of it and contains no
-// path, no hostname and no flag.
-//
-// Presence is the configuration. Lemonade chooses the NAS about as much as a
-// Java library chooses Logback.
+// path, no hostname and no flag. Presence is the configuration.
 func Discover() (*Runner, error) {
 	store, err := storeFor()
 	if err != nil {
@@ -31,6 +28,7 @@ func DiscoverIn(store job.Store) *Runner {
 	cfg := config.Load()
 	r := NewRunner(store, Owner())
 	r.Delegators = NewDelegators(available(cfg)...)
+	r.Reach = DefaultRefusals().Check
 	return r
 }
 
@@ -41,47 +39,4 @@ func (r *Runner) Tier() string {
 		return "here"
 	}
 	return r.Delegators.all[0].System()
-}
-
-// Handoff is what an application does with a job it has just submitted, and the
-// answer is one of two things.
-type Handoff int
-
-const (
-	// RunHere: nothing else on this machine will do it, so this process must.
-	RunHere Handoff = iota
-	// LeftToSupervisor: a system downloader is watching this store and will pick
-	// the job up. This process may exit.
-	LeftToSupervisor
-)
-
-func (h Handoff) String() string {
-	if h == LeftToSupervisor {
-		return "the system downloader"
-	}
-	return "here"
-}
-
-// Handoff decides what an application should do with a submitted job, and it is
-// deliberately the ONLY question an application gets to ask.
-//
-// It does not name BITS. It does not name a NAS. It answers "is there a system
-// downloader on this machine", and if there is, the job is already in the store
-// that service is watching, so there is nothing more to do — the supervisor
-// adopts it, and the supervisor decides whether that means a NAS, the OS
-// transfer service, or its own two hands.
-//
-// That is the delegation chain the project started with, and having applications
-// link every tier was a departure from it. A library that logs does not know
-// which sink is configured; an application that downloads should not know which
-// machine ends up doing it.
-func (r *Runner) Handoff() Handoff {
-	if _, live := SupervisorOf(r.Store); live {
-		// Tell it to look now rather than at its next sweep. Best effort: if the
-		// nudge goes nowhere the sweep still finds the job, and the only thing
-		// lost is the wait. See nudge.go.
-		Nudge(r.Store)
-		return LeftToSupervisor
-	}
-	return RunHere
 }

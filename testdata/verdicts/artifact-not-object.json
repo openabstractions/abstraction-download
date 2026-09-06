@@ -1,0 +1,1 @@
+{"artifact":"sha256","sources":[{"scheme":"https","locator":"https://example.invalid/a"}],"sink":{"final":"models/x.gguf"}}

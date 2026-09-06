@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	config "github.com/openabstractions/abstraction-config/go"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
@@ -454,5 +456,121 @@ func TestAdoptSkipsDelegatedJobs(t *testing.T) {
 	}
 	if _, err := os.Stat(finalOf(t, store, id)); err == nil {
 		t.Fatal("the file was delivered locally behind the delegate's back")
+	}
+}
+
+// A record naming a delegate this process cannot speak to must say so on the
+// record, once, and then be left alone.
+//
+// Reproduced from a browser handoff: a job delegated to BITS was swept by a
+// supervisor with no BITS binding in it, `done` stayed 0 while BITS held every
+// byte, and `no delegator for this job's sources: nothing here understands
+// "bits"` was written on every sweep for good. Three separate faults in one
+// line — it repeated, it counted the sweep as healthy anyway, and the record
+// itself said nothing at all, so the only way to learn a download was stuck was
+// to read a supervisor's log.
+func TestAStrandedDelegationIsSaidOnceOnTheRecord(t *testing.T) {
+	body, digest := payload(t, 4<<10)
+	r, store, _, root := newDelegatingRunner(t, body)
+	id := submit(t, store, root, digest, int64(len(body)),
+		Source{Scheme: "https", Locator: "https://example.invalid/x"})
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+
+	// The supervisor that comes along afterwards — another process, another
+	// build, or the same one started `--without` this tier — has no binding
+	// that can interpret the handle.
+	r.Delegators = NewDelegators()
+
+	n, err := r.ReconcileAll(context.Background())
+	if err != nil {
+		t.Fatalf("a job nothing here can move is not a sweep failure: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reconciled %d; nothing was reconciled and saying otherwise is the healthy-looking lie", n)
+	}
+
+	rec, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Error == "" {
+		t.Fatal("the record says nothing about being stuck; a person would have to read a log to find out")
+	}
+	if !strings.Contains(rec.Error, "fake-service") {
+		t.Fatalf("the record does not name the delegate nothing here understands: %q", rec.Error)
+	}
+	if rec.State.Terminal() {
+		t.Fatalf("state = %s; the delegate may be holding every byte, so this is waiting, not failure", rec.State)
+	}
+	if !rec.Delegated() {
+		t.Fatal("the handle was thrown away; a process that DOES understand it could no longer finish the job")
+	}
+
+	// Said once. Every sweep after the first must not touch the record at all —
+	// a supervisor installed as a scheduled task is a fresh process each time
+	// and can remember nothing, so the record is the only thing that can.
+	before := rec.Lease.Epoch
+	said := rec.Error
+	for i := 0; i < 3; i++ {
+		if _, err := r.ReconcileAll(context.Background()); err != nil {
+			t.Fatalf("sweep %d: %v", i, err)
+		}
+	}
+	rec, err = store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Lease.Epoch != before || rec.Error != said {
+		t.Fatalf("the record was written again on a later sweep: epoch %d->%d, error %q->%q",
+			before, rec.Lease.Epoch, said, rec.Error)
+	}
+
+	// And a caller that asks Reconcile directly is still told the truth.
+	err = r.Reconcile(context.Background(), id)
+	if !errors.Is(err, ErrStrandedHere) || !errors.Is(err, ErrNoDelegator) {
+		t.Fatalf("Reconcile = %v, want ErrStrandedHere wrapping ErrNoDelegator", err)
+	}
+}
+
+// The two ways to be stranded read differently, because what a person does next
+// differs: a tier that is linked and did not come up is something to fix on this
+// machine, and one that was never linked is a job for another process. That is
+// the distinction RegisteredTiers was added for, and until now nothing used it.
+func TestAStrandedRecordSaysWhichKindOfMissingItIs(t *testing.T) {
+	body, digest := payload(t, 1<<10)
+	r, store, _, root := newDelegatingRunner(t, body)
+	id := submit(t, store, root, digest, int64(len(body)),
+		Source{Scheme: "https", Locator: "https://example.invalid/x"})
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	r.Delegators = NewDelegators()
+
+	tiersMu.Lock()
+	saved := tiers
+	tiers = nil
+	tiersMu.Unlock()
+	t.Cleanup(func() { tiersMu.Lock(); tiers = saved; tiersMu.Unlock() })
+
+	if _, err := r.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := store.Load(id)
+	if !strings.Contains(rec.Error, "no such tier is linked") {
+		t.Fatalf("a build that never heard of the delegate should say so: %q", rec.Error)
+	}
+
+	// Now the tier is in the program but could not be built here — a probe that
+	// failed at startup, or an operator running `--without` it.
+	RegisterTier(Tier{Name: "fake-service", Priority: 10,
+		New: func(config.Config) (Delegator, error) { return nil, errors.New("switched off") }})
+	if _, err := r.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = store.Load(id)
+	if !strings.Contains(rec.Error, "linked here but did not come up") {
+		t.Fatalf("a tier that is present but unavailable should say so: %q", rec.Error)
 	}
 }

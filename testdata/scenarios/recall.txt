@@ -1,0 +1,80 @@
+# requires: store
+#
+# The issuer asking for the lease back. Ours expired and none could be revoked
+# early with a reason the holder could act on, which is the half WDDM and
+# Android both have and this design lacked: the residency broker could name a
+# model loaded twice and never evict either copy.
+#
+# A recall is addressed to one holding, so it presents the epoch the issuer
+# read, not one it holds: step 3 names an owner that never claimed and is
+# refused as stale, step 4 names the holder and no reason and is refused as
+# invalid. Step 5 lands: the reason is on the record, the intent is untouched,
+# the record declares the model, and the lease now ends at the deadline.
+#
+# What the holder may still do is the part a second implementer has to be
+# told. It may renew (6) and it may checkpoint (8), because winding down takes
+# time and a holder that cannot record what it proved on the way out loses it.
+# It may not shed the recall by re-claiming (7). And the renew at 6 asked for
+# five seconds and got the deadline, which is only visible when the deadline
+# passes: step 10 is refused, and without the cap it would have landed.
+#
+# Step 10 is the fallback. Nothing killed anything; the lease lapsed and the
+# holder's next write was refused exactly as a lapsed write always is. The
+# record still says who was asked and what they proved (12), and the job is
+# offered to a sweep (11). A claim starts a new holding with no recall on it
+# (13). Steps 14 to 16 are compliance: a holder that releases under recall
+# leaves a pending record that still says it was asked, which is the
+# difference between "nobody renewed" and "somebody was asked to stop" that
+# a later reader needs — and nobody holds it, so it cannot be recalled again.
+# Step 19: a finished job has nothing to give back.
+submit A size=64 digest=good src=file
+claim A alpha 5000
+recall A beta 800 yield
+recall A alpha 800
+recall A alpha 800 yield
+renew A alpha 5000
+claim A alpha 5000
+progress A alpha 8 {"verified_prefix":8}
+sleep 1000
+progress A alpha 16 {"verified_prefix":16}
+orphans
+state A
+claim A beta 5000
+recall A beta 5000 make room
+release A beta
+recall A beta 500 yield
+claim A gamma 5000
+finish A gamma complete
+recall A gamma 500 yield
+
+# expect 3: stale-epoch [JOB-R1]
+# expect 3: recall=none
+# expect 4: invalid [JOB-R2]
+# expect 5: ok [JOB-R3]
+# expect 5: recall=yield
+# expect 5: held=yes
+# expect 5: want=run [JOB-R8]
+# expect 5: content=abstraction.job/base@1,abstraction.job/recall@1 [JOB-D9]
+# expect 5: crit=abstraction.job/base@1,abstraction.job/recall@1 [JOB-D9]
+# expect 6: ok
+# expect 7: lease-held [JOB-R5]
+# expect 8: ok
+# expect 8: done=8
+# expect 10: lease-expired [JOB-R4]
+# expect 10: done=8 [JOB-R3]
+# expect 10: held=no
+# expect 11: ok A [JOB-R6]
+# expect 12: recall=yield
+# expect 12: state=running
+# expect 12: epoch=1
+# expect 13: ok [JOB-R7]
+# expect 13: epoch=2
+# expect 13: recall=none
+# expect 13: content=abstraction.job/base@1
+# expect 14: ok
+# expect 15: ok [JOB-R6]
+# expect 15: state=pending
+# expect 15: held=no
+# expect 15: recall=make room
+# expect 16: lease-expired [JOB-R2]
+# expect 19: terminal [JOB-R2]

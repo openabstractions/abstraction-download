@@ -1,0 +1,15 @@
+# requires: wire
+#
+# 206 answering a request that carried no Range at all. The span happens to be
+# the whole artifact, so nothing is lost -- but an implementation that reads
+# "206" as "this is the range I asked for" is deriving an offset from a request
+# it never made, and one that requires 200 for a first fetch refuses a download
+# that was going to work.
+submit A size=64 digest=good src=http:unranged206
+run A alpha
+orphans
+state A
+
+# expect 2: ok state=transferred [DL-R9]
+# expect 2: done=64 err=none
+# expect 3: ok -

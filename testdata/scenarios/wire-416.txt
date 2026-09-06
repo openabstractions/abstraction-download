@@ -1,0 +1,18 @@
+# requires: wire
+#
+# The server answers a resume with 416: the offset on disk is past the end of
+# what it holds, and the whole file is still there for the asking. Nothing about
+# the record changes between attempts, so classing this as "not now" produces
+# the same 416 on every sweep until a person deletes the partial by hand.
+submit A size=64 digest=good src=http:range416
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: ok state=transferred [DL-E7]
+# expect 6: done=64 err=none
+# expect 7: ok -

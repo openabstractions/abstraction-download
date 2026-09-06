@@ -1,0 +1,19 @@
+# requires: wire
+#
+# `bytes=40-` asked for the tail and the answer was `bytes 40-47/64`: eight
+# bytes, correctly labelled, and the connection closed. A CDN serving fixed
+# chunks does this on every request. The transfer is not finished and nothing in
+# the response is wrong, so an implementation that reads the end of a body as
+# the end of an artifact delivers a truncated file under the final name.
+submit A size=64 digest=good src=http:subspan
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+orphans
+state A
+
+# expect 6: transfer-failed state=pending
+# expect 6: done=48 err=set [DL-R14]
+# expect 7: ok A

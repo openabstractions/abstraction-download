@@ -1,0 +1,17 @@
+# requires: wire
+#
+# The server was asked for bytes from 40 and sent the whole file from zero.
+# Appending that to the prefix gives a file of plausible length and impossible
+# content, which is what `curl -C -` does. download/README.md has said the
+# runner never does it since the first day and no scenario could reach HTTP to
+# find out, which is METHOD.md §8 exactly: a MUST nobody can fail.
+submit A size=64 digest=good src=http:norange
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+state A
+
+# expect 6: ok state=transferred [DL-R5]
+# expect 6: done=64 err=none [DL-R6]

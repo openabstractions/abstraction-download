@@ -41,14 +41,14 @@ func TestBytesAnotherToolAlreadyHasAreNotDownloaded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(theirs, "sha256-"+hex.EncodeToString(sum[:])), payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stores := storage.New(storage.NewForeign("ollama", theirs, "sha256-"))
+	stores := storage.New(storage.NewForeignStore("ollama", theirs, "sha256-"))
 
 	store, err := job.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := NewRunner(store, "worker@host:1")
-	svc := NewService(r, WithStorage(stores))
+	svc := NewClient(r, WithStorage(stores))
 
 	dest := filepath.Join(t.TempDir(), "model.gguf")
 	h, err := svc.Submit(Spec{
@@ -105,8 +105,8 @@ func TestWithoutADigestItStillFetches(t *testing.T) {
 	defer srv.Close()
 
 	store, _ := job.NewFileStore(t.TempDir())
-	svc := NewService(NewRunner(store, "worker@host:1"),
-		WithStorage(storage.New(storage.NewForeign("ollama", t.TempDir(), "sha256-"))))
+	svc := NewClient(NewRunner(store, "worker@host:1"),
+		WithStorage(storage.New(storage.NewForeignStore("ollama", t.TempDir(), "sha256-"))))
 
 	dest := filepath.Join(t.TempDir(), "thing.bin")
 	h, err := svc.Submit(Spec{
