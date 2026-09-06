@@ -1,0 +1,12 @@
+github.com/openabstractions/abstraction-cas/go v0.0.0-20260906174855-1e71bb92cfdc h1:+1VHHeOf6ufHJcIi6oZabf3nYFEyhUiVSWQecLEoBs8=
+github.com/openabstractions/abstraction-cas/go v0.0.0-20260906174855-1e71bb92cfdc/go.mod h1:uCqBVttRdaxJX8BgB2SiuvWds/at5N5A20QBE3IK8S4=
+github.com/openabstractions/abstraction-config/go v0.1.1-0.20260906205949-41db0942fd58 h1:XCoaVrGlMCTJ/lWvgaUmtrfeXWFIxxpI2bofP9KDB20=
+github.com/openabstractions/abstraction-config/go v0.1.1-0.20260906205949-41db0942fd58/go.mod h1:6GFf+8FjRLMPKHMcLaEDQj/XI4EQA3L2YgK3OJ2L1l8=
+github.com/openabstractions/abstraction-download/go v0.1.1-0.20260906210806-714c0d4e02ce h1:hDyZq9KMgGx7XfL44gSh24GZkqdUe41/74P1/9XRe2o=
+github.com/openabstractions/abstraction-download/go v0.1.1-0.20260906210806-714c0d4e02ce/go.mod h1:gGzpLgBRtRKiB/zdOSVJaMlncHR8LE8ASb3Z9HKeuIw=
+github.com/openabstractions/abstraction-job/go v0.1.1-0.20260906210115-f9637b11ed8c h1:zrYNaG3jo/fEbqgz+XFWEnYd47dQ+iThGMIlp1hog0E=
+github.com/openabstractions/abstraction-job/go v0.1.1-0.20260906210115-f9637b11ed8c/go.mod h1:16GKaITbcqzngGGxkR93u6S/B+dDNFOwcyxbH789QeU=
+github.com/openabstractions/abstraction-storage/go v0.1.1-0.20260906175707-b650246931fd h1:vayVWw3OUIXCEaTm/d+s0PCzrBdu+aOHbfTHN4mhb+o=
+github.com/openabstractions/abstraction-storage/go v0.1.1-0.20260906175707-b650246931fd/go.mod h1:PItn7cCxymHmeRpLp1nCb3nNc0NBJFVfbcMo4AGiOTE=
+github.com/openabstractions/abstraction-watch/go v0.0.0-20260906180147-40e6e6ff482f h1:nWgqaKPwU0sBJdUFGCPVjUEyTZPQR8lNsmuV0Pojbsg=
+github.com/openabstractions/abstraction-watch/go v0.0.0-20260906180147-40e6e6ff482f/go.mod h1:RF56LZfdbxZj/UU7fKbOAOGIHPeLJlIQxPrX+EN0Rj4=
