@@ -1,0 +1,1 @@
+{"artifact":{"digest":"sha256:2fc237e65e1f963310e9c961d8e71e932734a72f90e3216a972d83edd1feb756"},"sources":[{"scheme":"https","locator":"https://example.invalid/x.gguf"}],"sink":{"final":"models/x.gguf"},"group_id":"model:Whisper","display_name":"Whisper","file_index":1,"total_files":2,"invented":{"nested":[1,2,3]}}

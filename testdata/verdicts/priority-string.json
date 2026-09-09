@@ -1,0 +1,1 @@
+{"artifact":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"sources":[{"scheme":"https","locator":"h","priority":"1"}],"sink":{"final":"models/x.gguf"}}

@@ -1,0 +1,8 @@
+abstraction-download
+Copyright 2026 the openabstractions contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Third-party components compiled into this software are recorded in
+THIRD_PARTY_NOTICES.md in the abstractions repository:
+https://github.com/openabstractions/abstractions/blob/main/THIRD_PARTY_NOTICES.md

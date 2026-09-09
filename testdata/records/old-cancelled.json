@@ -1,0 +1,39 @@
+{
+  "content": [
+    "abstraction.job/base@1"
+  ],
+  "critical": [
+    "abstraction.job/base@1"
+  ],
+  "id": "1788673443336-ea074cd5e6e378ce6ca8",
+  "kind": "download",
+  "state": "cancelled",
+  "spec": {
+    "artifact": {
+      "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "size": 4096
+    },
+    "sources": [
+      {
+        "scheme": "https",
+        "locator": "https://example.invalid/t.gguf"
+      }
+    ],
+    "sink": {
+      "partial": "work/1788673443336-ea074cd5e6e378ce6ca8",
+      "final": "models/t.gguf"
+    }
+  },
+  "progress": {
+    "done": 0,
+    "total": 4096,
+    "updated_at": "2026-09-06T05:44:03.336902Z"
+  },
+  "lease": {
+    "owner": "old-owner",
+    "epoch": 1,
+    "expires_at": "2026-09-06T05:44:03.378653Z"
+  },
+  "created_at": "2026-09-06T05:44:03.336902Z",
+  "updated_at": "2026-09-06T05:44:03.367989Z"
+}

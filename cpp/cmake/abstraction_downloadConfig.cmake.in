@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+@ABSTRACTION_DOWNLOAD_DEPS@
+include("${CMAKE_CURRENT_LIST_DIR}/abstraction_downloadTargets.cmake")
+
+check_required_components(abstraction_download)

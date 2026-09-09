@@ -1,0 +1,202 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '47 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        module: [go, reachwall]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      # The macOS arm64 image carries Go in the tool cache only, so it is on
+      # PATH on ubuntu and windows and absent here until an action places it.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+
+      - name: state
+        run: |
+          printf 'a hosted runner, %s logical CPUs, %s %s, on mains\n' \
+            "$(getconf _NPROCESSORS_ONLN)" "$RUNNER_OS" "$RUNNER_ARCH"
+          go version
+          go env CGO_ENABLED GOTOOLCHAIN GOFLAGS
+
+      # No go.work here on purpose. The requires resolve from the module proxy
+      # at the versions this repository pins, which is the only route a
+      # stranger has. If a pin is older than the API these sources call, or if
+      # go.sum is missing an entry the workspace used to supply, this step is
+      # where that shows.
+      - name: build and test
+        working-directory: ${{ matrix.module }}
+        run: |
+          go build ./...
+          n=$(go list -f '{{if .TestGoFiles}}x{{end}}' ./... | grep -c x || true)
+          if [ "$n" -lt 1 ]; then
+            printf 'FAIL  no package in this module has a test file, and go test calls that a pass\n'
+            exit 1
+          fi
+          go test -count=1 ./...
+          printf '%s: %s/%s, %s go packages with tests, resolved as an adopter resolves them\n' \
+            "$RUNNER_OS" "$GITHUB_REPOSITORY" "${{ matrix.module }}" "$n" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: race
+        working-directory: ${{ matrix.module }}
+        run: |
+          if [ "$(go env CGO_ENABLED)" != "1" ]; then
+            printf 'UNPROVEN  race detector — CGO_ENABLED=0, no C compiler for go env CC=%s\n' "$(go env CC)"
+            printf '%s: UNPROVEN race detector, CGO_ENABLED=0\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          go test -race -count=1 ./...
+          printf '%s: %s under the race detector\n' "$RUNNER_OS" "${{ matrix.module }}" >> "$GITHUB_STEP_SUMMARY"
+
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The python and c++ of this layer import the layers below it by relative
+      # path, so the runner is laid out the way a reader lays out clones: this
+      # repository beside its siblings, each at its default branch. A break in
+      # abstraction-job turns this red, which is the point.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: abstraction-download
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-job
+          path: abstraction-job
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-cas
+          path: abstraction-cas
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-watch
+          path: abstraction-watch
+
+      - name: test
+        working-directory: abstraction-download/python
+        run: |
+          PY="$(command -v python3 || command -v python || true)"
+          if [ -z "$PY" ]; then
+            printf 'UNPROVEN  python on %s — no interpreter on PATH, nothing was run\n' "$RUNNER_OS"
+            printf '%s: UNPROVEN python, no interpreter on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          "$PY" --version
+          sep=':'
+          [ "$RUNNER_OS" = Windows ] && sep=';'
+          export PYTHONPATH="$GITHUB_WORKSPACE/abstraction-job/python${sep}$GITHUB_WORKSPACE/abstraction-cas/python${sep}$GITHUB_WORKSPACE/abstraction-watch/python"
+          "$PY" -m unittest discover -p 'test_*.py' 2>&1 | tee out.txt
+          if grep -q '^Ran 0 tests' out.txt; then
+            printf 'FAIL  discovery found no test to run, and unittest calls that a pass\n'
+            exit 1
+          fi
+          printf '%s: python, %s tests, with job, cas and watch beside it\n' \
+            "$RUNNER_OS" "$(sed -n 's/^Ran \([0-9]*\) tests\?.*/\1/p' out.txt | tail -1)" >> "$GITHUB_STEP_SUMMARY"
+
+  cpp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: abstraction-download
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-job
+          path: abstraction-job
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-cas
+          path: abstraction-cas
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-watch
+          path: abstraction-watch
+
+      # The file list, not a build file. research/truth92 measured this exact
+      # route under g++ and MSVC; the published CMakeLists.txt was dropped
+      # because it fetched a dependency these sources no longer use.
+      #
+      # fetchers.cpp compiles everywhere and registers an https fetcher only
+      # where there is a WinHTTP to register it against, which is why the link
+      # line grows a library on Windows and nowhere else.
+      - name: compile and run
+        working-directory: abstraction-download
+        run: |
+          CXX="$(command -v g++ || command -v clang++ || true)"
+          if [ -z "$CXX" ]; then
+            printf 'UNPROVEN  c++ on %s — neither g++ nor clang++ is on PATH, nothing was compiled\n' "$RUNNER_OS"
+            printf '%s: UNPROVEN c++, no g++ or clang++ on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          "$CXX" --version | head -1
+          out=testbin
+          link=""
+          if [ "$RUNNER_OS" = Windows ]; then
+            out=testbin.exe
+            link="-lwinhttp"
+          fi
+          "$CXX" -std=c++17 -I cpp/include \
+            -I ../abstraction-job/cpp/include -I ../abstraction-cas/cpp/include \
+            -I ../abstraction-watch/cpp/include \
+            cpp/test/test_runner.cpp cpp/src/runner.cpp cpp/src/spec.cpp \
+            cpp/src/wanted.cpp cpp/src/sha256.cpp cpp/src/fetchers.cpp \
+            ../abstraction-job/cpp/src/json.cpp ../abstraction-job/cpp/src/record.cpp \
+            ../abstraction-job/cpp/src/ranges.cpp ../abstraction-job/cpp/src/store.cpp \
+            ../abstraction-job/cpp/src/awake.cpp \
+            ../abstraction-cas/cpp/src/cas.cpp -o "$out" $link
+          "./$out" | tee out.txt
+          n=$(grep -c PASS out.txt || true)
+          if [ "$n" -lt 1 ]; then
+            printf 'FAIL  the test binary printed no PASS line, and an empty run is not a pass\n'
+            exit 1
+          fi
+          printf '%s: c++ %s, %s assertions\n' \
+            "$RUNNER_OS" "$("$CXX" --version | head -1)" "$n" >> "$GITHUB_STEP_SUMMARY"
+
+  unproven:
+    needs: [go, python, cpp]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: what this workflow did not run
+        run: |
+          {
+            printf '\n### UNPROVEN\n\nThis workflow builds what this repository contains, and nothing else. It ran none of:\n\n'
+            printf -- '- the cross-language conformance harnesses, which compare bytes across all three languages and live in the private tree\n'
+            printf -- '- MSVC. The c++ job takes whichever of g++ or clang++ is on PATH; research/truth92 measured MSVC by hand and this does not re-measure it\n'
+            printf -- '- any real transfer. Nothing here reaches a network, so no https fetcher is exercised on any platform\n'
+            printf -- '- delegation to a real BITS, launchd or NAS tier, and no signed or installed artefact\n'
+            printf -- '- the siblings at any pinned revision. python and c++ take job, cas and watch at their default branch, so this is a statement about today.\n'
+          } >> "$GITHUB_STEP_SUMMARY"

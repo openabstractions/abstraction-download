@@ -1,0 +1,69 @@
+# requires: store
+#
+# The stop button, and what it records. `intent` had twelve rules on the page
+# and scenarios for four: the sweep exception, check-before-starting, cancel is
+# universal, and a paused job is not an orphan. The five below were the whole of
+# the rest that anything can reach, and none of them could fail.
+#
+# They are one section on purpose. `intent` is the one write that presents no
+# epoch, which makes it the only way a person stops a job they do not own — and
+# every rule here decides what happens between somebody pressing stop and the
+# owner noticing. A divergence anywhere in it is a stop button that works on one
+# platform.
+#
+# Step 2 is a record that has never had an intent, and it must read `want=run`
+# [JOB-I2]: nobody asked and somebody asked for it to run are the same answer,
+# which is what keeps a record written before intent existed readable. `content`
+# is asserted exactly, so the same line also says the record declares no intent
+# model — the pair at step 8 is the discriminator, and neither half means
+# anything alone.
+#
+# Step 3 is the dangerous one and it is why this scenario is ranked first.
+# `halt` is not a word, and the two honest answers are `invalid` and *treat it
+# as run*. The second is the failure that costs somebody their download: a
+# caller asks for a stop the reader does not understand and the job carries on.
+# Step 4 proves nothing was written on the way past.
+#
+# Steps 6 and 7 are the same ask twice, because an owner checks intent at least
+# as often as it checkpoints, so a supervisor asking again is the normal case
+# and not a mistake [JOB-I4].
+#
+# Step 8 is `run` after a pause. `want` reads `run` exactly as it did at step 2
+# and the record is not the record it was: the intent model stays declared in
+# both lists from then on [JOB-I7], so a reader too old to know that model
+# refuses the record instead of working on a job somebody may have asked to
+# stop. An implementation that deleted the field on resume would print step 2's
+# line here and pass every other check in this file.
+#
+# Step 10 asks a transferred job to pause, which its owner cannot do — the bytes
+# are already delivered. That is not an error [JOB-I6]: only the owner knows
+# what it can do, and a store that second-guesses it is a store that refuses a
+# cancel it should have recorded.
+submit A size=64 digest=good src=file
+state A
+intent A halt
+state A
+claim A alpha 5000
+intent A pause
+intent A pause
+intent A run
+finish A alpha transferred
+intent A pause
+
+# expect 2: want=run ... [JOB-I2]
+# expect 2: content=abstraction.job/base@1 ... [JOB-I2]
+# expect 3: invalid ... [JOB-I1]
+# expect 4: want=run ... [JOB-I1]
+# expect 4: content=abstraction.job/base@1 ... [JOB-I1]
+# expect 6: ok ...
+# expect 6: want=pause ...
+# expect 6: content=abstraction.job/base@1,abstraction.job/intent@1 ...
+# expect 7: ok ... [JOB-I4]
+# expect 7: want=pause ... [JOB-I4]
+# expect 8: ok ...
+# expect 8: want=run ... [JOB-I7]
+# expect 8: content=abstraction.job/base@1,abstraction.job/intent@1 ... [JOB-I7]
+# expect 8: crit=abstraction.job/base@1,abstraction.job/intent@1 ... [JOB-I7]
+# expect 9: state=transferred ...
+# expect 10: ok ... [JOB-I6]
+# expect 10: want=pause ... [JOB-I6]

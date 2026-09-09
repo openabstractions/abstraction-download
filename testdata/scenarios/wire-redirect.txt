@@ -1,0 +1,13 @@
+# requires: wire
+#
+# A 302 in front of an ordinary server. Nothing here is exotic; every mirror
+# list and every release page is one. It is in the roster because a client that
+# does not follow it reports a refusal for a URL that works, and a resume that
+# drops its Range across the hop silently restarts the download.
+submit A size=64 digest=good src=http:redirect
+claim A alpha 5000
+stage A 40
+progress A alpha 40 {"verified_prefix":40}
+release A alpha
+run A beta
+state A
