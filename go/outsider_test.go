@@ -27,7 +27,7 @@ func withDelegate(t *testing.T) (*Runner, job.Store, string) {
 
 func watching(t *testing.T, store job.Store, tier string) {
 	t.Helper()
-	if err := Heartbeat(store, "test-supervisor@host:1", tier, time.Minute); err != nil {
+	if err := Heartbeat(store, "test-supervisor@host:1", tier, "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -8,6 +8,7 @@ with one reader.
 import hashlib
 import http.server
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -1241,5 +1242,360 @@ class HostAuthorityTests(unittest.TestCase):
             del os.environ["ABSTRACTION_CRED_HF_HOSTS"]
 
 
+class SinkAuthorityTests(unittest.TestCase):
+    """Who may be handed a job whose sink only one filesystem has.
+
+    The same five rules the Go side pins in authority_test.go, asserted here
+    because a predicate that differs between the two is a conformance
+    divergence rather than a fix -- and it was one: Go asked whether the
+    supervisor shared this filesystem and Python asked nothing at all, so every
+    absolute sink was worked in the submitting process however local the
+    supervisor was.
+
+        A1  a supervisor on this machine and this account is handed it
+        A2  a supervisor on this machine under another account is not
+        A3  a supervisor that does not say which account it runs as is not
+        A4  a supervisor on another machine is not
+        A5  the account the heartbeat carries survives being read
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileStore(os.path.join(self.dir.name, "store"))
+        self.svc = dl.Client(self.store)
+        self.addCleanup(lambda: [t.join(timeout=30) for t in self.svc._workers])
+
+    def watching(self, **over):
+        """A supervisor with a live heartbeat, on this machine and under this
+        account unless the case under test says otherwise."""
+        import json
+        import socket
+        from datetime import datetime, timezone
+
+        beat = {
+            "owner": "jobd@%s:1" % socket.gethostname(),
+            "host": socket.gethostname(),
+            "pid": 1,
+            "seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "every": "30s",
+            "tier": "here",
+            "user": dl.account(),
+        }
+        beat.update(over)
+        root = dl.local_root(self.store)
+        with open(os.path.join(root, dl.HEARTBEAT), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(beat, fh)
+
+    def submit_absolute(self):
+        """A ComfyUI-shaped job: an absolute path in an application's own models
+        tree, and a source that would fail on the first packet if anything here
+        tried to fetch it."""
+        return self.svc.submit(
+            dl.Spec(
+                artifact=dl.Artifact(digest="", size=0),
+                sources=[dl.Source(scheme="http", locator="http://127.0.0.1:1/m.safetensors")],
+                sink=dl.Sink(final=os.path.join(self.dir.name, "models", "m.safetensors")),
+            )
+        )
+
+    def test_a5_the_account_the_heartbeat_carries_is_read_back(self):
+        self.watching(user="S-1-5-21-example-1001")
+        sup, live = dl.supervisor_of(self.store)
+        self.assertTrue(live)
+        self.assertEqual(sup.user, "S-1-5-21-example-1001")
+
+    def test_a1_a_supervisor_here_under_this_account_is_handed_an_absolute_sink(self):
+        self.watching()
+        self.submit_absolute()
+        self.assertEqual(
+            self.svc._workers,
+            [],
+            "this process started the transfer itself; the download dies with it",
+        )
+
+    def test_a2_a_supervisor_under_another_account_is_not_handed_it(self):
+        # The spelling a Windows service account has, and never this process's.
+        self.watching(user="S-1-5-18")
+        self.submit_absolute()
+        self.assertEqual(len(self.svc._workers), 1)
+
+    def test_a3_a_supervisor_that_names_no_account_is_not_handed_it(self):
+        self.watching(user="")
+        self.submit_absolute()
+        self.assertEqual(len(self.svc._workers), 1)
+
+    def test_a4_a_supervisor_on_another_machine_is_not_handed_it(self):
+        self.watching(host="a-machine-that-is-not-this-one")
+        self.submit_absolute()
+        self.assertEqual(len(self.svc._workers), 1)
+
+    def test_a_portable_sink_still_goes_to_any_supervisor(self):
+        """The refusal is about the path, not about the supervisor. A sink every
+        machine resolves is handed over to whoever is watching."""
+        self.watching(host="a-machine-that-is-not-this-one", user="S-1-5-18")
+        self.svc.submit(
+            dl.Spec(
+                artifact=dl.Artifact(digest="", size=0),
+                sources=[dl.Source(scheme="http", locator="http://127.0.0.1:1/m.safetensors")],
+                sink=dl.Sink(final="models/m.safetensors"),
+            )
+        )
+        self.assertEqual(self.svc._workers, [])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- the bus ---
+
+_IS_WINDOWS = sys.platform == "win32"
+
+if _IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    # Declared here rather than borrowed from the module: a test that shares
+    # the client's prototypes cannot catch a wrong prototype.
+    _srv32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _srv32.CreateNamedPipeW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+    ]
+    _srv32.CreateNamedPipeW.restype = wintypes.HANDLE
+    _srv32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    _srv32.ConnectNamedPipe.restype = wintypes.BOOL
+    _srv32.ReadFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    _srv32.ReadFile.restype = wintypes.BOOL
+    _srv32.WriteFile.argtypes = _srv32.ReadFile.argtypes
+    _srv32.WriteFile.restype = wintypes.BOOL
+    _srv32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    _srv32.CreateFileW.restype = wintypes.HANDLE
+    for _name in ("FlushFileBuffers", "DisconnectNamedPipe", "CloseHandle"):
+        getattr(_srv32, _name).argtypes = [wintypes.HANDLE]
+        getattr(_srv32, _name).restype = wintypes.BOOL
+    _PIPE_ACCESS_DUPLEX = 3
+    _PIPE_TYPE_BYTE = 0
+    _PIPE_UNLIMITED_INSTANCES = 255
+    _ERROR_PIPE_CONNECTED = 535
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class FakeBus:
+    """A supervisor's end of the bus, for as many callers as arrive: a real
+    named pipe on Windows, a real unix socket elsewhere. ``reply`` of None
+    accepts, reads, and never writes; b"" hangs up without answering."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.requests = []
+        self.stop = threading.Event()
+        if _IS_WINDOWS:
+            self.endpoint = r"\\.\pipe\bus145-test-%d-%d" % (os.getpid(), id(self))
+            self.handle = self._instance()
+        else:
+            self.dir = tempfile.mkdtemp()
+            self.endpoint = os.path.join(self.dir, "bus.sock")
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.bind(self.endpoint)
+            self.sock.listen(4)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _instance(self):
+        h = _srv32.CreateNamedPipeW(
+            self.endpoint, _PIPE_ACCESS_DUPLEX, _PIPE_TYPE_BYTE,
+            _PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, None,
+        )
+        assert h != _INVALID_HANDLE_VALUE, ctypes.get_last_error()
+        return h
+
+    def _serve(self):
+        while not self.stop.is_set():
+            if _IS_WINDOWS:
+                self._serve_pipe_once()
+            else:
+                self._serve_socket_once()
+
+    def _serve_pipe_once(self):
+        h = self.handle or self._instance()
+        self.handle = None
+        try:
+            if not _srv32.ConnectNamedPipe(h, None) and ctypes.get_last_error() != _ERROR_PIPE_CONNECTED:
+                return
+            if self.stop.is_set():
+                return
+            buf = ctypes.create_string_buffer(4096)
+            moved = wintypes.DWORD(0)
+            if _srv32.ReadFile(h, buf, 4096, ctypes.byref(moved), None):
+                self.requests.append(buf.raw[: moved.value])
+            if self.reply is None:
+                self.stop.wait()
+            elif self.reply:
+                out = ctypes.create_string_buffer(self.reply, len(self.reply))
+                _srv32.WriteFile(h, out, len(self.reply), ctypes.byref(moved), None)
+                _srv32.FlushFileBuffers(h)
+            _srv32.DisconnectNamedPipe(h)
+        finally:
+            _srv32.CloseHandle(h)
+
+    def _serve_socket_once(self):
+        try:
+            conn, _ = self.sock.accept()
+        except OSError:
+            return
+        with conn:
+            self.requests.append(conn.recv(4096))
+            if self.reply is None:
+                self.stop.wait()
+            elif self.reply:
+                try:
+                    conn.sendall(self.reply)
+                except OSError:
+                    pass
+
+    def close(self):
+        self.stop.set()
+        if _IS_WINDOWS:
+            h = _srv32.CreateFileW(self.endpoint, 0x80000000, 0, None, 3, 0, None)
+            if h != _INVALID_HANDLE_VALUE:
+                _srv32.CloseHandle(h)
+            self.thread.join(timeout=2)
+            if self.handle:
+                _srv32.CloseHandle(self.handle)
+                self.handle = None
+        else:
+            self.sock.close()
+            self.thread.join(timeout=2)
+            try:
+                os.unlink(self.endpoint)
+            except OSError:
+                pass
+
+
+ANSWER = b'{"owner":"jobd@x:1","tier":"here","caller":{"bound":true,"path":"p","user":"u"}}\n'
+REFUSAL = b'{"caller":{"bound":false,"why":"identity: no binding"},"error":"jobd: refused, identity: no binding"}\n'
+
+
+class BusTests(unittest.TestCase):
+    """The same rules the Go side pins in bus_test.go, over the same wire.
+
+        B1  a look from an identified caller is answered, framed as one line
+        B3  who returns the supervisor's answer, caller included
+        B4  a refusal is not absence: the sweep is the channel, nothing runs here
+        B5  nothing announced is nobody, answered without dialling
+        B6  an announced bus nobody serves is nobody, however fresh the heartbeat
+        B7  a supervisor without a bus, or elsewhere, is reached through the store
+        B8  the heartbeat predicts and the connection decides
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileStore(os.path.join(self.dir.name, "store"))
+        self.svc = dl.Client(self.store)
+        self.addCleanup(lambda: [t.join(timeout=30) for t in self.svc._workers])
+
+    def bus(self, reply):
+        b = FakeBus(reply)
+        self.addCleanup(b.close)
+        return b
+
+    def announce(self, endpoint, **over):
+        import json
+        import socket
+        from datetime import datetime, timezone
+
+        beat = {
+            "owner": "jobd@%s:1" % socket.gethostname(),
+            "host": socket.gethostname(),
+            "pid": 1,
+            "seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "every": "30s",
+            "tier": "here",
+            "user": dl.account(),
+            "endpoint": endpoint,
+        }
+        beat.update(over)
+        root = dl.local_root(self.store)
+        with open(os.path.join(root, dl.HEARTBEAT), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(beat, fh)
+
+    def submit_portable(self):
+        return self.svc.submit(
+            dl.Spec(
+                artifact=dl.Artifact(digest="", size=0),
+                sources=[dl.Source(scheme="http", locator="http://127.0.0.1:1/m.safetensors")],
+                sink=dl.Sink(final="models/m.safetensors"),
+            )
+        )
+
+    def test_b1_a_look_is_answered_and_framed_as_one_line(self):
+        b = self.bus(ANSWER)
+        self.announce(b.endpoint)
+        self.assertEqual(dl.nudge(self.store), dl.ANSWERED)
+        self.assertEqual(b.requests, [b'{"op":"look"}\n'])
+
+    def test_b3_who_returns_the_answer_caller_included(self):
+        b = self.bus(ANSWER)
+        self.announce(b.endpoint)
+        verdict, answer = dl.who(self.store)
+        self.assertEqual(verdict, dl.ANSWERED)
+        self.assertEqual(answer["owner"], "jobd@x:1")
+        self.assertEqual(answer["caller"]["path"], "p")
+        self.assertEqual(b.requests, [b'{"op":"who"}\n'])
+
+    def test_b4_a_refusal_is_not_absence(self):
+        b = self.bus(REFUSAL)
+        self.announce(b.endpoint)
+        self.assertEqual(dl.nudge(self.store), dl.REFUSED)
+        self.submit_portable()
+        self.assertEqual(self.svc._workers, [], "a refused caller ran the job itself; the sweep is the channel")
+
+    def test_b5_nothing_announced_is_nobody_without_dialling(self):
+        start = time.monotonic()
+        self.assertEqual(dl.nudge(self.store), dl.NOBODY)
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_b6_an_announced_bus_nobody_serves_is_nobody(self):
+        b = FakeBus(b"")
+        b.close()
+        self.announce(b.endpoint)
+        self.assertEqual(dl.nudge(self.store), dl.NOBODY)
+        self.assertTrue(dl.supervisor_of(self.store)[1], "the heartbeat still says live; the bus says otherwise")
+
+    def test_b6_a_bus_that_accepts_and_never_writes_is_nobody_within_the_deadline(self):
+        b = self.bus(None)
+        self.announce(b.endpoint)
+        start = time.monotonic()
+        self.assertEqual(dl.nudge(self.store), dl.NOBODY)
+        self.assertLess(time.monotonic() - start, dl.BUS_DEADLINE + 1.0)
+
+    def test_b7_without_a_bus_or_elsewhere_is_reached_through_the_store(self):
+        self.announce("")
+        self.assertEqual(dl.nudge(self.store), dl.UNREACHABLE)
+        b = self.bus(ANSWER)
+        self.announce(b.endpoint, host="a-machine-that-is-not-this-one")
+        self.assertEqual(dl.nudge(self.store), dl.UNREACHABLE)
+        self.assertEqual(b.requests, [])
+
+    def test_b8_a_submit_is_worked_here_when_the_announced_supervisor_does_not_answer(self):
+        b = FakeBus(b"")
+        b.close()
+        self.announce(b.endpoint)
+        self.submit_portable()
+        self.assertEqual(len(self.svc._workers), 1)
+
+    def test_b8_a_submit_is_handed_to_a_supervisor_that_answers(self):
+        b = self.bus(ANSWER)
+        self.announce(b.endpoint)
+        self.submit_portable()
+        self.assertEqual(self.svc._workers, [])
+        self.assertEqual(b.requests, [b'{"op":"look"}\n'])

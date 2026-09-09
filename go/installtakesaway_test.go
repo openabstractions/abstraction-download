@@ -35,7 +35,7 @@ func TestASupervisorKeepsAnAbsoluteDestination(t *testing.T) {
 	}
 	// A supervisor on this machine, which is what `jobd install` produces. The
 	// client hands it the work and this process does none of it.
-	if err := Heartbeat(store, "jobd@host:1", "here", time.Minute); err != nil {
+	if err := Heartbeat(store, "jobd@host:1", "here", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "model.gguf")
@@ -116,7 +116,7 @@ func TestARelativeDestinationMeansTheCallersDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Heartbeat(store, "jobd@host:1", "here", time.Minute); err != nil {
+	if err := Heartbeat(store, "jobd@host:1", "here", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewClient(NewRunner(store, "app"))

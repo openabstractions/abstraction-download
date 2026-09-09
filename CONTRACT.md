@@ -504,15 +504,30 @@ program can write.
 
 ### Authority is designation, not identity
 
-`supervisor.sock` is where a process reaches this supervisor, and **it carries
-no authority in either direction**: a nudge is five bytes meaning "look now", no
-job id, no payload, nothing granted. That is not modesty about the feature. It
-is the design consequence of a measurement — **we cannot tell who is on the
-other end of a local socket**, so nothing here is decided by who a caller is.
+The bus is where a process reaches this supervisor: a local transport whose name
+the supervisor invents at startup and publishes in its heartbeat, never a path
+in the store, because two spellings of one path would be two names. Every
+request on it arrives with its caller bound and checked by the `identity` layer
+first, and a caller the machine cannot name is answered with the refusal and
+nothing else — no wakeup, no owner, no tier.
 
-That is a deliberate divergence from how local IPC on these platforms is
-normally secured (`SO_PEERCRED`, macOS `LOCAL_PEERTOKEN` plus a code-signing
-requirement, `GetNamedPipeClientProcessId`). Measured on macOS 15.7.4,
+**It carries no authority in either direction**: two requests, `look` meaning
+"look now" and `who` meaning "who is there, and who do you take me for", one
+JSON line each way, no job id, no payload, nothing granted. Being named is a
+floor a stranger fails, never a grant. That is not modesty about the feature. It
+is the design consequence of a measurement — **what a platform says about the
+other end of a local socket can name the wrong process**, so nothing here is
+decided by who a caller is.
+
+A machine where the identity layer cannot name a caller at all gets no bus. The
+supervisor says why, announces no endpoint, and is reached through the store
+alone, sweeping on its timer; nothing that worked without a bus stops working.
+
+Those platform facilities — `SO_PEERCRED`, macOS `LOCAL_PEERTOKEN` plus a
+code-signing requirement, `GetNamedPipeClientProcessId` — are how local IPC here
+is normally secured, and this layer asks for all of them through `identity`. The
+deliberate divergence is in what their answer is allowed to do: it may refuse a
+caller, and it may never authorise one. Measured on macOS 15.7.4,
 2026-09-05,
 [`probe-evidence.txt`](https://github.com/openabstractions/abstraction-identity/blob/main/probe-evidence.txt):
 a helper forked *before* the connection existed, then `exec`ed `/bin/cat` while
@@ -562,9 +577,9 @@ rather than transport. `Find` (`download/go/nas/find.go`) sends SSDP and mDNS
 multicast to look for a host that might hold a store, and `Check` writes and
 re-reads one probe byte to prove the share is writable; both run when a person
 is choosing a store, carry no job and no record, and a configured delegate never
-calls either. `Nudge` — the supervisor's `supervisor.sock` — does not cross a
-share, so a delegate learns of new work from its own sweep and from nothing
-else.
+calls either. The supervisor's bus is a local transport by construction and does
+not cross a share, so a delegate learns of new work from its own sweep and from
+nothing else.
 
 **What the requester writes.** A record of kind `download`, submitted with a
 fresh id in the remote store, holding a spec that differs from the local one in
@@ -870,7 +885,11 @@ Measured from the store root, with `.` and `..` resolved first:
 | `jobs`, and anything under it | the record, its claim tokens, its temporaries |
 | `work`, and anything under it except `work/<this job's id>` | another job's scratch |
 | `services.json` at the root | the discovery registry |
-| `supervisor.json`, `supervisor.json.tmp`, `supervisor.sock` at the root | this layer's heartbeat and nudge socket |
+| `supervisor.json`, `supervisor.json.tmp`, `supervisor.sock` at the root | this layer's heartbeat, and one name it reserves that nothing binds |
+
+`supervisor.sock` is that name. The bus is not a file in the store, so nothing
+opens it any more; it stays reserved because a name two implementations of three
+refuse is a divergence, and a store written under an older one may hold it.
 
 `work/<id>` and everything below it is **not** reserved against job
 `<id>` [DL-S10] — that is where its own partial goes, and a blanket ban on

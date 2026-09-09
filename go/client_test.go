@@ -31,7 +31,7 @@ func clientOn(t *testing.T) (Client, job.Store) {
 	// The sinks in these tests are relative for the same reason: an absolute one
 	// names a path only this machine has, so Submit works it here whatever is
 	// watching. See TestAnAbsoluteSinkIsNotHandedToASupervisor.
-	if err := Heartbeat(store, "test-supervisor@host:1", "here", time.Minute); err != nil {
+	if err := Heartbeat(store, "test-supervisor@host:1", "here", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	return NewClient(r), store
@@ -133,7 +133,7 @@ func TestDeliverEndsWhenNobodyIsWorkingTheJob(t *testing.T) {
 	// A supervisor that answers the heartbeat and then does nothing, which is
 	// exactly what a killed jobd leaves behind for as long as its last beat
 	// stays fresh.
-	if err := Heartbeat(store, "gone@host:1", "here", time.Minute); err != nil {
+	if err := Heartbeat(store, "gone@host:1", "here", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewClient(r)

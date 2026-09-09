@@ -271,7 +271,7 @@ func (s *client) performer(spec Spec) (name string, runsHere bool) {
 		}
 		return supervising(sup), false
 	}
-	if !live || (boundHere(spec) && !onThisMachine(sup)) {
+	if !live || (boundHere(spec) && !couldDeliverHere(sup)) {
 		return "here", true
 	}
 	return supervising(sup), false
@@ -465,9 +465,11 @@ func (s *client) begin(id string, spec Spec) {
 		go s.runHere(id)
 		return
 	}
-	// Ask the supervisor to look now rather than at its next sweep. Best effort:
-	// if the nudge goes nowhere the sweep still finds the work.
-	Nudge(s.runner.Store)
+	// The heartbeat predicts and the connection decides: a beat outlives the
+	// process that wrote it, an endpoint does not.
+	if err := Nudge(s.runner.Store); errors.Is(err, ErrNoSupervisor) && s.opts.Execution != ExecuteDelegated {
+		go s.runHere(id)
+	}
 }
 
 // unknownCapability refuses a word nothing here has ever heard of.
@@ -632,18 +634,35 @@ func (s *client) clearLastError(id string) {
 // contract change and is written up in feedback/2026-09-05-python-service.md.
 func boundHere(spec Spec) bool { return !relativeEverywhere(spec.Sink.Final) }
 
-// onThisMachine reports whether a supervisor shares this filesystem, which is
-// what makes it able to deliver an absolute sink after all.
+// couldDeliverHere reports whether a supervisor could write a sink only this
+// machine's filesystem has: it shares the filesystem, and it runs as the account
+// whose tree the path is in.
 //
-// Without this the fence was drawn one step too wide: a supervisor running HERE
-// was refused work it could obviously finish, and the submitting process ran it
-// itself instead — two owners offering to do the same job, and the one holding
-// the lease was the one nobody was watching. A supervisor that does not name a
-// host is treated as elsewhere, because the question is being answered about
-// somebody else's process and a missing answer is not a yes.
-func onThisMachine(sup Supervisor) bool {
-	host, err := os.Hostname()
-	return err == nil && sup.Host != "" && strings.EqualFold(sup.Host, host)
+// The fence was drawn one step too wide twice, in opposite directions, and both
+// were the same mistake — a correct statement about one tier generalised into a
+// rule about every tier.
+//
+// Too wide: a supervisor running HERE was refused work it could obviously
+// finish, because the reason the rule was written down was a NAS. The submitting
+// process ran it itself instead, so a ComfyUI download did not survive ComfyUI
+// closing, which is the headline this project makes.
+//
+// Not wide enough: "same machine" answers a question about the filesystem and
+// the question is about authority. A machine-wide supervisor running as
+// LocalSystem shares this filesystem and does not share this account's rights,
+// so a job whose sink is in a person's own models tree would be written — if it
+// were written at all — by a service reaching into user space. That is refused
+// here rather than discovered at the write. See Supervisor.User.
+//
+// Only the per-user case is admitted, and only when the supervisor says which it
+// is. A supervisor that names no host, or no account, is somebody else's process
+// answering nothing, and a missing answer is not a yes.
+func couldDeliverHere(sup Supervisor) bool {
+	if !announcedHere(sup) {
+		return false
+	}
+	me := Account()
+	return me != "" && sup.User != "" && strings.EqualFold(sup.User, me)
 }
 
 // runHere works the job in this process, waiting out a dead owner's lease.

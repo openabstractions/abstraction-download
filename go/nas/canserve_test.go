@@ -69,6 +69,47 @@ func TestASelectiveDelegateIsNotOfferedWorkItRefused(t *testing.T) {
 	}
 }
 
+// A6. The other half of the same rule, and the one that must not weaken when a
+// local supervisor is allowed to take absolute sinks after all.
+//
+// A ComfyUI sink is an absolute path in ComfyUI's own models tree. A jobd on
+// this machine can write it; a box on the other end of a share cannot — it would
+// resolve `C:\ComfyUI\models\x.safetensors` against its own filesystem and write
+// somewhere useless, or nowhere, while the application waits for a file that was
+// never coming. That is worse than the download running in the wrong process,
+// so the two spellings are pinned here rather than left to the sink code.
+func TestTheNasRefusesSinksOnlyTheSubmittersMachineHas(t *testing.T) {
+	d := &Delegator{Root: `//nas/share/store`, Dir: DefaultDir}
+	public := download.Source{Scheme: "https", Locator: "https://huggingface.co/x/resolve/main/m.safetensors"}
+
+	local := []string{
+		`C:\ComfyUI\models\checkpoints\m.safetensors`,
+		"/home/somebody/ComfyUI/models/checkpoints/m.safetensors",
+	}
+	for _, final := range local {
+		spec := download.Spec{
+			Sources: []download.Source{public},
+			Sink:    download.Sink{Final: final},
+		}
+		if d.CanServe(spec) {
+			t.Errorf("accepted a job delivering to %s, a path the far side does not have", final)
+		}
+		if _, ok := download.NewDelegators(d).ForSpec(spec, public, nil); ok {
+			t.Errorf("a job delivering to %s was still offered to the NAS", final)
+		}
+	}
+
+	// And it must not become squeamish: a sink the far side can resolve is the
+	// ordinary case, and refusing it would be a worse bug than the one above.
+	portable := download.Spec{
+		Sources: []download.Source{public},
+		Sink:    download.Sink{Final: "files/m.safetensors"},
+	}
+	if !d.CanServe(portable) {
+		t.Error("refused a sink relative to the store, which every machine resolves")
+	}
+}
+
 // The refinement above has a cost worth pinning: when the store is a local
 // directory, the far side IS this machine, and loopback must be accepted.
 //

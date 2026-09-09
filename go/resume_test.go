@@ -28,7 +28,7 @@ func resumeClient(t *testing.T) (Client, *Runner, job.Store, string) {
 	// A supervisor is pretended to be watching for the same reason service_test
 	// does it: Submit and ResumeOrSubmit then hand the work over instead of
 	// starting a goroutine no test can stop. Every run below is explicit.
-	if err := Heartbeat(store, "test-supervisor@host:1", "here", time.Minute); err != nil {
+	if err := Heartbeat(store, "test-supervisor@host:1", "here", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	return NewClient(r), r, store, root

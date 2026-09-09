@@ -124,11 +124,10 @@ RESOLVED_HEADERS = frozenset(
 )
 
 # What this layer keeps in the store root, beside the store's own jobs/ and
-# work/. The heartbeat says a supervisor is alive; the socket is where a nudge
-# is delivered. Named once, because reserved_sink protects exactly these names
-# and a second spelling of either would leave one of them unprotected.
+# work/. The heartbeat says a supervisor is alive and where its bus is. Named
+# once, because reserved_sink protects exactly this name and a second spelling
+# would leave one of them unprotected.
 HEARTBEAT = "supervisor.json"
-NUDGE = "supervisor.sock"
 
 
 class DownloadError(Exception):
@@ -1026,7 +1025,10 @@ def escapes_root(p: str) -> str:
 # work/ and services.json. Spelled from the constants the writers use rather
 # than beside them, so a heartbeat that gets renamed cannot leave this list
 # pointing at a file nobody writes any more.
-_BESIDE_THE_STORE = frozenset({HEARTBEAT, HEARTBEAT + ".tmp", NUDGE})
+# supervisor.sock is bound by nothing since the bus, but CONTRACT.md and the
+# C++ reader still reserve it, and a name reserved in two languages out of
+# three is a conformance divergence.
+_BESIDE_THE_STORE = frozenset({HEARTBEAT, HEARTBEAT + ".tmp", "supervisor.sock"})
 
 
 def reserved_sink(owner: str, p: str) -> str:
@@ -1390,6 +1392,17 @@ class Supervisor:
     seen: Optional[datetime] = None
     every: str = ""
     tier: str = ""
+    user: str = ""
+    endpoint: str = ""
+    """The account the supervisor runs as, spelled the way the platform spells
+    it: the SID on Windows, the numeric uid elsewhere.
+
+    "The same machine" is not the question an application with an absolute sink
+    is asking. A sink inside a person's own tree is that person's to write, and
+    a machine-wide supervisor running as a service account shares the filesystem
+    and not the rights. Empty means the supervisor did not say, which is "I
+    cannot tell" and never a match.
+    """
 
 
 def supervisor_of(store) -> Tuple[Supervisor, bool]:
@@ -1420,6 +1433,8 @@ def supervisor_of(store) -> Tuple[Supervisor, bool]:
         pid=int(d.get("pid", 0) or 0),
         every=d.get("every", ""),
         tier=d.get("tier", "") or "",
+        user=d.get("user", "") or "",
+        endpoint=d.get("endpoint", "") or "",
     )
     try:
         s.seen = _parse_time(d["seen"])
@@ -1460,6 +1475,116 @@ def owner(program: Optional[str] = None) -> str:
         if program.endswith(".py"):
             program = program[:-3]
     return f"{program}@{socket.gethostname()}:{os.getpid()}"
+
+
+def account() -> str:
+    """The account this process runs as, in the one spelling every
+    implementation of this layer uses: the SID on Windows, the numeric uid
+    elsewhere.
+
+    The platform's own identifier rather than a name, because the two sides of
+    the comparison are written by different programs in different languages and
+    a name is spelled differently by each of them -- ``COMPANY\\bob``, ``bob``,
+    ``Bob`` -- while a SID and a uid are one string both can produce. The Go
+    side reads the same value out of the same Win32 call. A false negative costs
+    a download performed in the wrong process; a false positive sends bytes to a
+    path the writer cannot write.
+
+    Returns "" when the platform will not say, which is unknown rather than
+    nobody, and every reader of it must refuse rather than assume.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    try:
+        return _windows_sid()
+    except Exception:
+        return ""
+
+
+def _windows_sid() -> str:
+    """The current process token's user SID, as ``S-1-5-21-...``.
+
+    ctypes rather than a package: this layer takes nothing from a registry, and
+    the alternative spellings Python offers without it -- ``getpass.getuser``,
+    ``%USERNAME%`` -- are names read out of the environment, which is not what
+    the supervisor wrote down and not something two accounts cannot share.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_QUERY = 0x0008
+    TOKEN_USER = 1
+
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                     ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetTokenInformation.restype = wintypes.BOOL
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_wchar_p)]
+    adv.ConvertSidToStringSidW.restype = wintypes.BOOL
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+        return ""
+    try:
+        need = wintypes.DWORD(0)
+        adv.GetTokenInformation(token, TOKEN_USER, None, 0, ctypes.byref(need))
+        if not need.value:
+            return ""
+        buf = ctypes.create_string_buffer(need.value)
+        if not adv.GetTokenInformation(token, TOKEN_USER, buf, need.value, ctypes.byref(need)):
+            return ""
+        # TOKEN_USER is a SID_AND_ATTRIBUTES: the SID pointer is its first field.
+        psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = ctypes.c_wchar_p()
+        if not adv.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+            return ""
+        try:
+            return text.value or ""
+        finally:
+            k32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        k32.CloseHandle(token)
+
+
+def could_deliver_here(sup: Supervisor) -> bool:
+    """Could this supervisor write a sink only this machine's filesystem has?
+
+    It shares the filesystem, and it runs as the account whose tree the path is
+    in. Both, and said by the supervisor rather than assumed about it.
+
+    The fence was drawn wrong twice, in opposite directions, and both were the
+    same mistake -- a correct statement about one tier generalised into a rule
+    about every tier.
+
+    Too wide: the reason the refusal was written down was a NAS, and a NAS
+    genuinely cannot resolve ``C:\\ComfyUI\\models\\x.safetensors``. A jobd on
+    this machine can. Under the wide rule the submitting process ran the
+    transfer itself, so a ComfyUI download did not survive ComfyUI closing --
+    which is the claim this project makes.
+
+    Not wide enough: "same machine" answers a question about the filesystem, and
+    the question is about authority. A machine-wide supervisor running as a
+    service account shares this filesystem and not this account's rights, so a
+    sink in somebody's own models tree would be written by a service reaching
+    into user space. Refused here rather than discovered at the write.
+
+    Only the per-user case is admitted, and only when the supervisor says which
+    it is. A supervisor that names no host, or no account, is answering nothing,
+    and a missing answer is not a yes.
+    """
+    if not announced_here(sup):
+        return False
+    mine = account()
+    return bool(mine) and bool(sup.user) and sup.user.lower() == mine.lower()
 
 
 class Runner:
@@ -2060,25 +2185,239 @@ class _Reaching(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def nudge(store) -> None:
+# The bus is the one connection a process has to a supervisor, on the transport
+# the identity layer binds: a named pipe on Windows, a unix socket elsewhere.
+# Every request arrives with the program that made it, and a caller the kernel
+# cannot name is refused. The store stays the truth; the bus carries "look" and
+# "who" and nothing that would be a second copy of it.
+
+ANSWERED = "answered"
+REFUSED = "refused"
+NOBODY = "nobody"
+UNREACHABLE = "unreachable"
+
+# A supervisor that has not answered a one-line request in this long is not one
+# a submit waits for: the sweep is still coming. The same figure as Go's busWait.
+BUS_DEADLINE = 2.0
+_BUS_LINE = 64 * 1024
+
+
+def nudge(store) -> str:
     """Ask the supervisor watching this store to sweep now.
 
-    Best effort by construction. Every failure -- no supervisor, a stale socket,
-    a platform without unix sockets -- is silently fine, because the sweep is
-    still coming. It carries no job id and no payload: a notification that
-    carried state would be a second source of truth beside the store.
+    ANSWERED: an identified caller was heard. REFUSED: this caller was not.
+    NOBODY: the announced supervisor does not answer. UNREACHABLE: it can only
+    be reached through the store, which the sweep already is.
     """
-    root = local_root(store)
-    if not root or not hasattr(socket, "AF_UNIX"):
-        return
+    return ask(store, "look")[0]
+
+
+def who(store) -> Tuple[str, dict]:
+    """Ask the supervisor who it is and who it takes this process for."""
+    return ask(store, "who")
+
+
+def ask(store, op: str) -> Tuple[str, dict]:
+    sup, live = supervisor_of(store)
+    if not live:
+        return NOBODY, {}
+    if not sup.endpoint or not announced_here(sup):
+        return UNREACHABLE, {}
+    request = json.dumps({"op": op}, separators=(",", ":")).encode("utf-8") + b"\n"
+    line = _exchange(sup.endpoint, request, time.monotonic() + BUS_DEADLINE)
+    if line is None:
+        return NOBODY, {}
     try:
-        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        c.settimeout(0.25)
-        c.connect(os.path.join(root, NUDGE))
-        c.sendall(b"look\n")
-        c.close()
+        answer = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return NOBODY, {}
+    if not isinstance(answer, dict):
+        return NOBODY, {}
+    if answer.get("error"):
+        return REFUSED, answer
+    return ANSWERED, answer
+
+
+def announced_here(sup: Supervisor) -> bool:
+    return bool(sup.host) and sup.host.lower() == socket.gethostname().lower()
+
+
+def _exchange(endpoint: str, request: bytes, deadline: float) -> Optional[bytes]:
+    """Connect, send one line, read one line. None means nobody answered."""
+    if sys.platform == "win32":
+        return _win_exchange(endpoint, request, deadline)
+    return _unix_exchange(endpoint, request, deadline)
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _line_from(chunks: List[bytes]) -> Optional[bytes]:
+    buf = b"".join(chunks)
+    cut = buf.find(b"\n")
+    if cut < 0 or cut > _BUS_LINE:
+        return None
+    return buf[:cut]
+
+
+def _unix_exchange(path: str, request: bytes, deadline: float) -> Optional[bytes]:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(_remaining(deadline))
+        sock.connect(path)
+        sock.settimeout(_remaining(deadline))
+        sock.sendall(request)
+        chunks: List[bytes] = []
+        total = 0
+        while total <= _BUS_LINE:
+            left = _remaining(deadline)
+            if left <= 0:
+                return None
+            sock.settimeout(left)
+            chunk = sock.recv(4096)
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            total += len(chunk)
+            line = _line_from(chunks)
+            if line is not None:
+                return line
+        return None
     except OSError:
-        pass
+        return None
+    finally:
+        sock.close()
+
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_OVERLAPPED = 0x40000000
+    # Identification level: the supervisor may learn who we are and cannot act
+    # as us.
+    _SECURITY_SQOS_PRESENT = 0x00100000
+    _SECURITY_IDENTIFICATION = 0x00010000
+    _INVALID_HANDLE = ctypes.c_void_p(-1).value
+    _ERROR_PIPE_BUSY = 231
+    _ERROR_IO_PENDING = 997
+    _WAIT_OBJECT_0 = 0
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    _LPOVERLAPPED = ctypes.POINTER(_OVERLAPPED)
+    # Without argtypes ctypes truncates a 64-bit HANDLE to an int.
+    _k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    _k32.CreateFileW.restype = wintypes.HANDLE
+    _k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    _k32.CreateEventW.restype = wintypes.HANDLE
+    _k32.WriteFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), _LPOVERLAPPED,
+    ]
+    _k32.WriteFile.restype = wintypes.BOOL
+    _k32.ReadFile.argtypes = _k32.WriteFile.argtypes
+    _k32.ReadFile.restype = wintypes.BOOL
+    _k32.GetOverlappedResult.argtypes = [
+        wintypes.HANDLE, _LPOVERLAPPED, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+    ]
+    _k32.GetOverlappedResult.restype = wintypes.BOOL
+    _k32.CancelIoEx.argtypes = [wintypes.HANDLE, _LPOVERLAPPED]
+    _k32.CancelIoEx.restype = wintypes.BOOL
+    _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _k32.WaitForSingleObject.restype = wintypes.DWORD
+    _k32.WaitNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    _k32.WaitNamedPipeW.restype = wintypes.BOOL
+    _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.CloseHandle.restype = wintypes.BOOL
+
+    def _open_pipe(path: str, deadline: float, sqos: int = _SECURITY_IDENTIFICATION):
+        flags = _FILE_FLAG_OVERLAPPED | _SECURITY_SQOS_PRESENT | sqos
+        for attempt in (0, 1):
+            h = _k32.CreateFileW(path, _GENERIC_READ | _GENERIC_WRITE, 0, None, _OPEN_EXISTING, flags, None)
+            if h != _INVALID_HANDLE:
+                return h
+            # Busy is not absent: every instance is talking to somebody. One
+            # wait, inside the budget.
+            if ctypes.get_last_error() != _ERROR_PIPE_BUSY or attempt == 1:
+                return None
+            left = int(_remaining(deadline) * 1000)
+            if left <= 0 or not _k32.WaitNamedPipeW(path, left):
+                return None
+        return None
+
+    def _overlapped_io(fn, handle, buf, nbytes: int, deadline: float) -> Optional[int]:
+        # A synchronous read on a pipe cannot be interrupted, so the deadline is
+        # FILE_FLAG_OVERLAPPED plus CancelIoEx, and the cancelled operation is
+        # waited for before its buffer goes out of scope: the kernel may still
+        # be writing into it.
+        ov = _OVERLAPPED()
+        event = _k32.CreateEventW(None, True, False, None)
+        if not event:
+            return None
+        ov.hEvent = event
+        moved = wintypes.DWORD(0)
+        try:
+            if not fn(handle, buf, nbytes, ctypes.byref(moved), ctypes.byref(ov)):
+                if ctypes.get_last_error() != _ERROR_IO_PENDING:
+                    return None
+                if _k32.WaitForSingleObject(event, int(_remaining(deadline) * 1000)) != _WAIT_OBJECT_0:
+                    _k32.CancelIoEx(handle, ctypes.byref(ov))
+                    _k32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(moved), True)
+                    return None
+                if not _k32.GetOverlappedResult(handle, ctypes.byref(ov), ctypes.byref(moved), False):
+                    return None
+            return moved.value
+        finally:
+            _k32.CloseHandle(event)
+
+    def _win_exchange(path: str, request: bytes, deadline: float, sqos: int = _SECURITY_IDENTIFICATION) -> Optional[bytes]:
+        handle = _open_pipe(path, deadline, sqos)
+        if handle is None:
+            return None
+        try:
+            out = ctypes.create_string_buffer(request, len(request))
+            sent = 0
+            while sent < len(request):
+                n = _overlapped_io(_k32.WriteFile, handle, ctypes.byref(out, sent), len(request) - sent, deadline)
+                if not n:
+                    return None
+                sent += n
+            chunks: List[bytes] = []
+            total = 0
+            inbuf = ctypes.create_string_buffer(4096)
+            while total <= _BUS_LINE:
+                n = _overlapped_io(_k32.ReadFile, handle, inbuf, 4096, deadline)
+                if not n:
+                    return None
+                chunks.append(inbuf.raw[:n])
+                total += n
+                line = _line_from(chunks)
+                if line is not None:
+                    return line
+            return None
+        finally:
+            _k32.CloseHandle(handle)
+
+else:
+
+    def _win_exchange(path: str, request: bytes, deadline: float, sqos: int = 0) -> Optional[bytes]:
+        raise NotImplementedError
 
 
 class Client:
@@ -2276,10 +2615,10 @@ class Client:
 
         A job nobody else could deliver is not offered to anybody else. A
         relative sink resolves against whichever store adopts the job, so any
-        machine watching can finish it; an ABSOLUTE one names this filesystem,
-        and a supervisor on a NAS handed that job would write to a directory
-        that exists here and not there -- the bytes land somewhere useless, or
-        nowhere, and the application waits for a file that was never coming.
+        machine watching can finish it; an ABSOLUTE one names one filesystem,
+        and only a supervisor that shares it -- and runs as the account whose
+        tree it is in -- can deliver it. ``could_deliver_here`` is that
+        question, and it is the same one the Go client asks.
 
         It is not the whole fence. A supervisor sweeping a shared store still
         finds this job as an orphan if this process dies mid-transfer, and
@@ -2288,11 +2627,12 @@ class Client:
         """
         self._clear_last_error(job_id)
         bound_here = not _relative_everywhere(spec.sink.final)
-        if not bound_here and supervisor_of(self.store)[1]:
-            # Ask it to look now rather than at its next sweep. Best effort: if
-            # the nudge goes nowhere the sweep still finds the work.
-            nudge(self.store)
-            return
+        sup, live = supervisor_of(self.store)
+        if live and (not bound_here or could_deliver_here(sup)):
+            # The heartbeat predicts and the connection decides: a beat outlives
+            # the process that wrote it, an endpoint does not.
+            if nudge(self.store) != NOBODY:
+                return
         worker = threading.Thread(target=self._run_here, args=(job_id,), daemon=True)
         self._workers.append(worker)
         worker.start()

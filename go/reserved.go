@@ -57,7 +57,10 @@ var ErrForeignPath = errors.New("download: sink path names another platform's fi
 var besideTheStore = map[string]bool{
 	heartbeatName:          true,
 	heartbeatName + ".tmp": true,
-	nudgeName:              true,
+	// Nothing binds it since the bus replaced the socket, but CONTRACT.md and
+	// the C++ reader still reserve it, and a name reserved in two languages out
+	// of three is a conformance divergence.
+	"supervisor.sock": true,
 }
 
 // ReservedSink refuses a sink that names the store's own layout, or this
