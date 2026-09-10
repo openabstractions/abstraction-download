@@ -99,6 +99,10 @@ jobs:
         with:
           repository: openabstractions/abstraction-watch
           path: abstraction-watch
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-config
+          path: abstraction-config
 
       - name: test
         working-directory: abstraction-download/python
@@ -112,13 +116,13 @@ jobs:
           "$PY" --version
           sep=':'
           [ "$RUNNER_OS" = Windows ] && sep=';'
-          export PYTHONPATH="$GITHUB_WORKSPACE/abstraction-job/python${sep}$GITHUB_WORKSPACE/abstraction-cas/python${sep}$GITHUB_WORKSPACE/abstraction-watch/python"
+          export PYTHONPATH="$GITHUB_WORKSPACE/abstraction-job/python${sep}$GITHUB_WORKSPACE/abstraction-cas/python${sep}$GITHUB_WORKSPACE/abstraction-watch/python${sep}$GITHUB_WORKSPACE/abstraction-config/python"
           "$PY" -m unittest discover -p 'test_*.py' 2>&1 | tee out.txt
           if grep -q '^Ran 0 tests' out.txt; then
             printf 'FAIL  discovery found no test to run, and unittest calls that a pass\n'
             exit 1
           fi
-          printf '%s: python, %s tests, with job, cas and watch beside it\n' \
+          printf '%s: python, %s tests, with job, cas, watch and config beside it\n' \
             "$RUNNER_OS" "$(sed -n 's/^Ran \([0-9]*\) tests\?.*/\1/p' out.txt | tail -1)" >> "$GITHUB_STEP_SUMMARY"
 
   cpp:
