@@ -162,6 +162,15 @@ jobs:
       # this proves is the wheel itself: that pip accepts it, and that what
       # lands is the module and its .dist-info and nothing else. Importing it
       # needs those siblings and is left UNPROVEN below.
+      #
+      # Nothing on this runner can lift that. On the first batch the index has
+      # none of the siblings, so no arrangement of this job imports the module,
+      # and one that could not be imported would be uploaded green. The check
+      # that can decide it belongs where every package is built from one clone:
+      # install each wheel and resolve its declared graph out of the others
+      # with no index at all. That runs before a tag exists, which is the only
+      # moment a version is still free. A green run here does not say the
+      # module imports.
       - name: the wheel installs
         run: |
           python3 -m venv "$RUNNER_TEMP/try"
@@ -221,7 +230,10 @@ jobs:
             printf -- '  present, never true. The floor is measured in the private tree.\n'
             printf -- '- **Importing it.** The wheel is installed here with `--no-deps` and\n'
             printf -- '  never imported: the siblings it requires are in this same batch and\n'
-            printf -- '  are not on the index yet.\n'
+            printf -- '  are not on the index yet, and nothing on this runner can change\n'
+            printf -- '  that. The check that decides it belongs where every package is\n'
+            printf -- '  built from one clone and the declared graph resolves with no\n'
+            printf -- '  index, before the tag. This job cannot be that check.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The only job that can spend an identity, and the only one that changes
