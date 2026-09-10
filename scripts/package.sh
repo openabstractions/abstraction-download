@@ -118,13 +118,14 @@ done
 
 has_apache_text() { grep -q 'Apache License' "$1" 2>/dev/null && [ "$(wc -c < "$1")" -gt 10000 ]; }
 
-newest_tag() {   # $1 repo $2 prefix ("python/", "cpp/", "go/") -> newest vX.Y.Z after the prefix, or empty
+newest_tag() {   # $1 repo $2 prefix ("python/", "cpp/", "go/") -> newest vX.Y.Z, v kept for the Go proxy, or empty
     git ls-remote --tags "https://github.com/$ORG/$1.git" "$2v[0-9]*.[0-9]*.[0-9]*" 2>/dev/null \
         | awk '{print $2}' | sed 's#refs/tags/##' | grep -v '\^{}$' | sort -V | tail -1 | sed "s#^$2##"
 }
 
 tag_check() {   # $1 label $2 repo $3 prefix $4 version inside the artifact
-    tag=$(newest_tag "$2" "$3")
+    # A wheel and a CMake package spell the version without the v a tag carries.
+    tag=$(newest_tag "$2" "$3"); tag=${tag#v}
     if [ -z "$tag" ]; then
         record ABSENT "$1: no ${3}vX.Y.Z tag on github.com/$ORG/$2 — version $4 inside the artifact matches nothing yet"
     elif [ "$tag" = "$4" ]; then
@@ -306,7 +307,17 @@ while IFS=' ' read -r repo short; do
         (cd "$b/src" && "$PY" -c 'import sys, setuptools.build_meta as m; getattr(m, sys.argv[1])(sys.argv[2])' "$hook" "$b/dist") >> "$b/build.log" 2>&1 || built=0
     done
     if [ "$built" = 0 ]; then
-        record FAIL "$repo: setuptools refused to build from $src — $(grep -E 'Error|error:' "$b/build.log" | tail -1)"
+        why=$(grep -E 'Error|error:' "$b/build.log" | tail -1)
+        # A limit of the filesystem is not a package failing its contract. The
+        # egg-info sits about ninety characters below the build directory, so on
+        # Windows it is the first path to cross MAX_PATH and the longest package
+        # name breaks first (research/red186/RESULTS.md §9, research/whl214).
+        # A bare WinError 3 stays a FAIL: a missing path is not only ever this.
+        case "$why" in
+            *"WinError 206"*|*"path longer than allowed"*|*egg-info*dependency_links.txt*)
+                record UNPROVEN "$repo: the build directory is deeper than this filesystem's path limit — setuptools could not write the egg-info; point TMPDIR at a short directory and rerun" ;;
+            *)  record FAIL "$repo: setuptools refused to build from $src — $why" ;;
+        esac
         continue
     fi
     whl=$(ls "$b"/dist/*.whl 2>/dev/null | head -1); sdist=$(ls "$b"/dist/*.tar.gz 2>/dev/null | head -1)
