@@ -51,6 +51,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from datetime import datetime, timezone
 
+try:
+    import abstraction_config as _config
+except ImportError:
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "config", "python"))
+    import abstraction_config as _config
+
 from abstraction_job import (
     Invalid,
     KeepAwake,
@@ -1365,16 +1371,15 @@ def headers_for(src: Source) -> Dict[str, str]:
 
 
 def store_root() -> str:
-    """Where jobs live on this machine, matching the Go implementation."""
-    for name in ("ABSTRACTION_STORE", "MODELGET_STORE"):
-        v = os.environ.get(name)
-        if v:
-            return v
-    home = os.path.expanduser("~")
-    legacy = os.path.join(home, ".modelget")
-    if os.path.isdir(legacy):
-        return legacy
-    return os.path.join(home, ".abstraction")
+    """Where jobs live on this machine.
+
+    The config layer answers, in one place, for every language: the machine
+    file an administrator wrote, then this user's file, then the environment
+    for one run. This module used to carry its own four rungs and read no file
+    at all, so a store chosen in the control panel was invisible here and work
+    was submitted into a directory nobody was watching.
+    """
+    return _config.job_store()[0]
 
 
 @dataclass

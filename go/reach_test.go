@@ -231,3 +231,84 @@ func TestRefusalsCoverSubdomainsAndFailClosedOnAnUnreadableFile(t *testing.T) {
 		t.Fatal("an unreadable list let a connection through")
 	}
 }
+
+func TestRefuseTrailingDot(t *testing.T) {
+	f := Refusals{Path: filepath.Join(t.TempDir(), "refused.json")}
+	if err := f.Refuse("example.com.", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Check(HostOf("https://example.com./payload")); err == nil {
+		t.Fatal("Refuse succeeded but equivalent request host is allowed")
+	}
+}
+
+func TestRefusalSpellingsAgree(t *testing.T) {
+	f := Refusals{Path: filepath.Join(t.TempDir(), "refused.json")}
+	if err := f.Refuse("Example.COM.", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	for _, locator := range []string{
+		"https://example.com/payload",
+		"https://example.com./payload",
+		"https://EXAMPLE.com:8443/payload",
+		"https://cdn.example.com./payload",
+	} {
+		if err := f.Check(HostOf(locator)); err == nil {
+			t.Fatalf("%s was allowed by a list that refuses example.com", locator)
+		}
+	}
+	if err := f.Allow("example.com."); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Check(HostOf("https://example.com/payload")); err != nil {
+		t.Fatalf("allowing the host left it refused: %v", err)
+	}
+}
+
+func TestRefusalRejectsWhatNoRequestCanName(t *testing.T) {
+	f := Refusals{Path: filepath.Join(t.TempDir(), "refused.json")}
+	if err := f.Refuse("https://example.com/x", "blocked"); err == nil {
+		t.Fatal("a locator was saved as a host name")
+	}
+	if err := f.Refuse("", "blocked"); err == nil {
+		t.Fatal("an empty host was saved as a refusal")
+	}
+	if hosts, err := f.List(); err != nil || len(hosts) != 0 {
+		t.Fatalf("a refused write still changed the list: %v %v", hosts, err)
+	}
+}
+
+func TestStoredNoncanonicalKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "refused.json")
+	f := Refusals{Path: path}
+	if err := os.WriteFile(path, []byte(`{"Example.COM.":"older","example.com":"newer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hosts, err := f.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || hosts["example.com"] != "older" {
+		t.Fatalf("two spellings of one host did not collapse to one deterministic entry: %v", hosts)
+	}
+	if err := f.Check("example.com"); err == nil {
+		t.Fatal("a host stored only in a noncanonical spelling was allowed")
+	}
+	if err := f.Refuse("other.example", "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "Example.COM.") {
+		t.Fatalf("editing the list left a key no request can name: %s", raw)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"https://example.com/x":"blocked"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Check("example.com"); err == nil {
+		t.Fatal("a refusal nothing can match was dropped instead of reported")
+	}
+}

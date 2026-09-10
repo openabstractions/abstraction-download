@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -143,6 +144,10 @@ func (f Refusals) Check(host string) error {
 	if err != nil {
 		return fmt.Errorf("%s is unreadable: %w", f.Path, err)
 	}
+	host, err = plainHost(host)
+	if err != nil {
+		return err
+	}
 	for name, why := range hosts {
 		if host == name || strings.HasSuffix(host, "."+name) {
 			return errors.New(why)
@@ -151,6 +156,10 @@ func (f Refusals) Check(host string) error {
 	return nil
 }
 
+// List answers in the spelling a request is asked about, so a name written by
+// hand, by an older version, or by a person who typed the DNS root's dot still
+// refuses the host it names. A stored key no request could ever name is not
+// dropped quietly: an unreadable line stops a list whose whole job is to say no.
 func (f Refusals) List() (map[string]string, error) {
 	raw, err := os.ReadFile(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -159,18 +168,59 @@ func (f Refusals) List() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	hosts := map[string]string{}
-	return hosts, json.Unmarshal(raw, &hosts)
+	stored := map[string]string{}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, err
+	}
+	return canonical(stored)
+}
+
+// Two stored keys can spell one host, and then only the reason shown is in
+// doubt, never the refusal. The first key in order wins so that two readers of
+// one file print the same sentence.
+func canonical(stored map[string]string) (map[string]string, error) {
+	keys := make([]string, 0, len(stored))
+	for key := range stored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	hosts := make(map[string]string, len(stored))
+	for _, key := range keys {
+		name, err := plainHost(key)
+		if err != nil {
+			return nil, fmt.Errorf("%q is refused, and no request can name it: %w", key, err)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("%w: a refusal names no host", ErrUnreachable)
+		}
+		if _, taken := hosts[name]; !taken {
+			hosts[name] = stored[key]
+		}
+	}
+	return hosts, nil
 }
 
 func (f Refusals) Refuse(host, reason string) error {
-	return f.edit(func(hosts map[string]string) { hosts[strings.ToLower(host)] = reason })
+	name, err := plainHost(host)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("%w: a refusal names no host", ErrUnreachable)
+	}
+	return f.edit(func(hosts map[string]string) { hosts[name] = reason })
 }
 
 func (f Refusals) Allow(host string) error {
-	return f.edit(func(hosts map[string]string) { delete(hosts, strings.ToLower(host)) })
+	name, err := plainHost(host)
+	if err != nil {
+		return err
+	}
+	return f.edit(func(hosts map[string]string) { delete(hosts, name) })
 }
 
+// edit writes back what List read, so the first change to a list carrying
+// noncanonical keys respells the whole file the way a request is asked about.
 func (f Refusals) edit(change func(map[string]string)) error {
 	hosts, err := f.List()
 	if err != nil {
