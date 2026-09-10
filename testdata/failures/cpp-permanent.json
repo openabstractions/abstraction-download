@@ -1,0 +1,49 @@
+{
+  "content": [
+    "abstraction.job/base@1",
+    "abstraction.job/terminal@1",
+    "download.failure/v1"
+  ],
+  "critical": [
+    "abstraction.job/base@1",
+    "abstraction.job/terminal@1"
+  ],
+  "id": "1789025270339-7000f99994fc60f9d140",
+  "kind": "download",
+  "state": "failed",
+  "spec": {
+    "artifact": {
+      "size": 64,
+      "digest": "sha256:fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108"
+    },
+    "sources": [
+      {
+        "scheme": "gopher",
+        "locator": "gopher://example.invalid/x"
+      }
+    ],
+    "sink": {
+      "final": "models/A.bin",
+      "partial": "work/1789025270339-7000f99994fc60f9d140"
+    }
+  },
+  "progress": {
+    "done": 0,
+    "total": 64,
+    "updated_at": "2026-09-10T07:27:50.341149Z"
+  },
+  "lease": {
+    "owner": "alpha",
+    "epoch": 1,
+    "expires_at": "2026-09-10T07:27:55.360696Z"
+  },
+  "error": "download: no fetcher for this job's sources: scheme \"gopher\"",
+  "extensions": {
+    "download.failure/v1": {
+      "error": "download: no fetcher for this job's sources: scheme \"gopher\"",
+      "permanent": true
+    }
+  },
+  "created_at": "2026-09-10T07:27:50.341149Z",
+  "updated_at": "2026-09-10T07:27:50.380575Z"
+}

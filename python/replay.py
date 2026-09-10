@@ -147,6 +147,8 @@ class Replay:
             return self.recall(f[1], f[2], int(f[3]), " ".join(f[4:]))
         if op == "state":
             return self.show(f[1], None)
+        if op == "failure":
+            return self.failure(f[1])
         if op == "orphans":
             return self.orphans()
         if op == "run":
@@ -250,6 +252,26 @@ class Replay:
             return outcome(e)
         self.holds[rec.id] = KeepAwake(self.store, rec)
         return self.show(alias, None)
+
+    def failure(self, alias):
+        """The class a reader recovers from the record, and the one thing about
+        a failed job that must mean the same in three languages.
+
+        The transcript carries the class and never the sentence, for the same
+        reason it has never carried an error message: the wording is each
+        implementation's and pinning it makes every improved message a
+        cross-language breakage, while the class is what a successor branches
+        on. ``err=set`` says a failure was recorded; only this says which of the
+        two endings it was.
+        """
+        try:
+            rec = self.store.load(self.ids[alias])
+        except JobError as e:
+            return outcome(e)
+        exc = dl.last_failure(rec)
+        if exc is None:
+            return "ok class=none"
+        return "ok class=" + ("permanent" if dl.permanent(exc) else "retryable")
 
     def show(self, alias, exc):
         """The verdict, then what the record looks like from outside. Printed

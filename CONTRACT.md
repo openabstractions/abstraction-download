@@ -287,6 +287,41 @@ it. The class rides beside the sentence, and a reader that does not know how to
 read it sees an unclassed failure and treats it as *not now*, which is the safe
 half.
 
+**The class crosses a process, a provider and a language in one shape, and what
+it means does not depend on a service being up** [DL-E16]. It rides in
+`extensions["download.failure/v1"]`, and that payload is defined once, in
+[download.thrift](download.thrift), as `error` and `permanent` — `permanent`
+written only when it is true, so a *not now* is the shorter document. Four
+consequences, and none of them optional:
+
+- **The key is the version.** An incompatible change to the payload is a new
+  key, never an edit to this one, which is what lets the payload refuse a field
+  it has never heard of instead of granting it.
+- **A payload a reader cannot make sense of is a payload that is not there.** An
+  unknown field, a missing `error`, a `permanent` that is not a boolean: the
+  reader falls back to the record's sentence and the job is *not now*. An
+  unreadable class and an absent class are one answer, because a reader that
+  kept the half it understood would be inventing the other half.
+- **The payload and its declaration are the library's, never the
+  application's.** An application asks a failed job what it means and is given
+  a classed error; it does not add, remove or compare `extensions` or `content`.
+  `content` is derived by the job layer from what the record carries on every
+  write, and extension keys are appended to it sorted — the job page's rules,
+  not this one's — so the name appears there because the payload is there and
+  for no other reason.
+- **Both modes, one meaning.** A store this process owns and a store it reaches
+  over a socket carry the same record, so they recover the same class. Service
+  availability may change coordination and isolation; it may not change what a
+  failure means.
+
+**An older record keeps its meaning, and says less than it looks like it does.**
+A record written before this key existed carries a sentence and no class. It
+loads, its `error` is intact, and it is *not now* — which is not a downgrade but
+the only answer available, and the answer every reader gave before the key
+existed. A reader must not infer a class from the sentence, and must not infer
+one from `state`: `failed` is where a *no* leaves a record [DL-E2], and a record
+can also be `failed` because a person cancelled a doomed job by hand.
+
 *No* is: the source refused, nothing registered can serve the job's sources, the
 sink escapes the store root, the sink names the store's own layout, and the job
 layer says the record is invalid [DL-E4]. Everything else, including a sink
@@ -309,12 +344,12 @@ same record unchanged. See
 
 **A host this machine will not reach is *not now*** [DL-E8]. Before a source is
 handed to a fetcher — the same last moment a credential is resolved — the runner
-asks its `Reach` seat about the host the source would open a connection to, and
+asks its `Reach` interface about the host the source would open a connection to, and
 a refusal is recorded with the reason the policy gave, so an application can
 show it in its own words. The job is left adoptable: the refusal is this
 machine's policy, not the job's fault, and the same record runs unchanged on a
 machine that may reach the host, or here once a person turns it back on. What
-sits in the seat is a binding: `Discover` wires the hosts switched off in the
+implements `Reach` is the machine's choice: `Discover` wires the hosts switched off in the
 window; a bare runner reaches everything.
 
 Over HTTP, **the source refused** is exactly these:
@@ -489,7 +524,7 @@ the share. The destination is inside the store, contained, not the store's own
 layout and not the drop folder itself. No header and no credential name: a
 credential is resolved on the fetching machine, and a request from a share could
 point it at any host. Which hosts the supervisor will open a connection to at
-all is the `Reach` seat's answer, not the folder's. Every refusal is a line in
+all is the `Reach` interface's answer, not the folder's. Every refusal is a line in
 the file, never a crash and never silence.
 
 **Once every job a request named has delivered, the request is `.done`**
@@ -664,10 +699,11 @@ them on this page rather than in a defect:
 - `wanted/` is not reserved. `job.Reserved` covers `jobs/`, `work/` and
   `services.json`, and this layer adds `supervisor.json` and `supervisor.sock`;
   the drop folder is in neither list, so `DL-R22` does not reach it.
-- A failure crosses as a sentence. The remote record carries its class in
-  `extensions["download.failure/v1"]`, `Status` has no field for it, and the
-  requester rebuilds the error from `record.error` alone — which is what
-  `DL-E14` says not to do.
+- A failure crosses with its class. The remote record carries it where
+  [DL-E16] says, the delegate's status report carries it beside the sentence,
+  and the requester writes both onto the local record. A delegate that cannot
+  tell the two endings apart reports *not now* and says so where it decides —
+  it does not read a class out of the words, which is what `DL-E14` forbids.
 
 **A record written from two hosts.** Both sides write this record: the requester
 submits it, sets intent on it without a lease to pause or cancel, and claims it

@@ -566,7 +566,7 @@ func TestAStrandedRecordSaysWhichKindOfMissingItIs(t *testing.T) {
 
 	// Now the tier is in the program but could not be built here — a probe that
 	// failed at startup, or an operator running `--without` it.
-	RegisterTier(Tier{Name: "fake-service", Priority: 10,
+	RegisterTier(Tier{Name: "fake-service", Priority: 10, Over: OverOurs,
 		New: func(config.Config) (Delegator, error) { return nil, errors.New("switched off") }})
 	if _, err := r.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)

@@ -12,6 +12,9 @@ import (
 func init() {
 	download.RegisterTier(download.Tier{
 		Name: System,
+		// Windows' own transfer service, which is why nothing is configured.
+		Over:     download.OverPlatform,
+		Facility: "BITS",
 		// After the NAS. BITS survives this process and a reboot, but not the
 		// machine being asleep.
 		Priority: 20,

@@ -221,7 +221,18 @@ func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Statu
 		// its sources and checkpoint intact.
 		return download.Status{State: download.DelegateGone}, nil
 	}
-	st := download.Status{Done: rec.Progress.Done, Total: rec.Progress.Total, Err: rec.Error}
+	// The class comes off the remote record rather than out of the sentence.
+	// This delegate is the one that can answer honestly: the far side is our own
+	// runner writing our own record, so the payload [DL-E16] defines is right
+	// there, and a requester rebuilding the error from `rec.Error` alone would
+	// call every refusal on the appliance retryable and re-fetch a 404 on every
+	// sweep for as long as the store exists.
+	st := download.Status{
+		Done:      rec.Progress.Done,
+		Total:     rec.Progress.Total,
+		Err:       rec.Error,
+		Permanent: download.Permanent(download.LastFailure(rec)),
+	}
 	// Whether the far side has been asked to stop, which State deliberately
 	// does not say: to a supervisor deciding whether to take work back, a
 	// suspended job is neither failed nor finished, so it maps to Running.

@@ -25,7 +25,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "watch", "python")
 )
 
-from abstraction_job import FileStore, TRANSFERRED, COMPLETE, FAILED
+from abstraction_job import FileStore, Record, TRANSFERRED, COMPLETE, FAILED
 import abstraction_download as dl
 
 
@@ -1599,3 +1599,81 @@ class BusTests(unittest.TestCase):
         self.submit_portable()
         self.assertEqual(self.svc._workers, [])
         self.assertEqual(b.requests, [b'{"op":"look"}\n'])
+
+
+CORPUS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "testdata", "failures"
+)
+
+
+def corpus():
+    """The corpus and what each record must still MEAN, read off the table that
+    ships beside it rather than restated here: a second copy of the answers is a
+    second thing to keep true."""
+    want = {}
+    with open(os.path.join(CORPUS, "expect.txt"), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, cls = line.split()[:2]
+            want[name] = cls
+    assert want, "the corpus table names no record, so this test asserts nothing"
+    return want
+
+
+def failure_class(exc):
+    if exc is None:
+        return "none"
+    return "permanent" if dl.permanent(exc) else "retryable"
+
+
+class FailureCorpus(unittest.TestCase):
+    """A failure written by any of the three implementations, recovered here.
+
+    This is the half of a failure that no exception carries across a process.
+    ``Record.error`` is prose; rebuilding from it alone answers "retryable"
+    about every refusal this layer declares forever, and a job that stays
+    adoptable is fetched again on every sweep for as long as the store exists.
+    """
+
+    def test_a_failure_from_any_language_keeps_its_class(self):
+        for name, want in corpus().items():
+            with open(os.path.join(CORPUS, name + ".json"), "rb") as f:
+                rec = Record.from_json(f.read())
+            self.assertEqual(failure_class(dl.last_failure(rec)), want, name)
+
+    def test_the_corpus_table_names_every_record_in_the_directory(self):
+        want = corpus()
+        for entry in os.listdir(CORPUS):
+            if entry.endswith(".json"):
+                self.assertIn(entry[: -len(".json")], want, entry)
+        for name in want:
+            self.assertTrue(os.path.exists(os.path.join(CORPUS, name + ".json")), name)
+
+    def test_the_payload_is_spelled_the_way_the_definition_says(self):
+        """The shipped module against the generated reader of the same
+        definition.
+
+        py/rec.py is generated from download/download.thrift and is NOT in the
+        wheel -- ``py-modules`` ships one file, and adding the generated one
+        would claim the top-level import name ``py``, which belongs to somebody
+        else on PyPI. So it is the authority rather than the implementation, and
+        this is where the authority is applied: what this module writes into a
+        record is what the generated codec reads back, field for field.
+        """
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from py import rec as wire
+
+        self.assertEqual(dl.FAILURE_EXTENSION, wire.FAILURE_NAMES[0])
+        for exc, is_permanent in ((dl.RefusedBySource("gated"), True),
+                                  (dl.DigestMismatch("bytes differ"), False)):
+            r = Record(id="i", kind=dl.KIND, spec={})
+            dl._set_failure(r, exc)
+            payload = r.extensions[dl.FAILURE_EXTENSION]
+            self.assertEqual(
+                list(payload), ["error", "permanent"] if is_permanent else ["error"])
+            back = wire.decode(wire.encode(wire.Failure(
+                error=payload["error"], permanent=payload.get("permanent", False))))
+            self.assertEqual(back.error, str(exc))
+            self.assertEqual(back.permanent, is_permanent)

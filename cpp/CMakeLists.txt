@@ -130,6 +130,14 @@ if(ABSTRACTION_BUILD_TESTS)
     add_executable(test_wanted test/test_wanted.cpp)
     target_link_libraries(test_wanted PRIVATE abstraction_download_runner)
     add_test(NAME DownloadWanted COMMAND test_wanted)
+
+    # The corpus is beside the source and never beside the build, so its path is
+    # handed in rather than guessed at from the working directory ctest happens
+    # to choose.
+    add_executable(test_failure test/test_failure.cpp)
+    target_link_libraries(test_failure PRIVATE abstraction_download_runner)
+    add_test(NAME DownloadFailure COMMAND test_failure
+             ${CMAKE_CURRENT_SOURCE_DIR}/../testdata/failures)
 endif()
 
 if(ABSTRACTION_DOWNLOAD_STANDALONE)

@@ -157,6 +157,8 @@ func (p *replay) do(f []string) string {
 		return p.recall(f[1], f[2], atoi(f[3]), rest(f, 4))
 	case "state":
 		return p.state(f[1])
+	case "failure":
+		return p.failure(f[1])
 	case "orphans":
 		return p.orphans()
 	case "run":
@@ -590,6 +592,32 @@ func (p *replay) recall(alias, owner string, graceMS int64, reason string) strin
 }
 
 func (p *replay) state(alias string) string { return p.show(alias, nil) }
+
+// failure is the class a reader recovers from the record, and it is the one
+// thing about a failed job that must mean the same in three languages.
+//
+// The transcript carries the class and never the sentence, for the same reason
+// it has never carried an error message: the wording is each implementation's
+// and pinning it makes every improved message a cross-language breakage, while
+// the class is what a successor branches on. `err=set` in the line above says a
+// failure was recorded; only this says which of the two endings it was.
+func (p *replay) failure(alias string) string {
+	rec, err := p.store.Load(p.ids[alias])
+	if err != nil {
+		return outcome(err)
+	}
+	return "ok class=" + failureClass(dl.LastFailure(rec))
+}
+
+func failureClass(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case dl.Permanent(err):
+		return "permanent"
+	}
+	return "retryable"
+}
 
 func (p *replay) watch(name string, budgetMillis int64) string {
 	p.subs[name] = job.WatchQuiet(p.store, dl.Kind, time.Duration(budgetMillis)*time.Millisecond)

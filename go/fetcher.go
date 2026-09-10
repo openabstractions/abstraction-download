@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	job "github.com/openabstractions/abstraction-job/go"
+
+	"github.com/openabstractions/abstraction-download/go/rec"
 )
 
 // Capability is something a Fetcher can promise. Fetchers differ enormously and
@@ -259,7 +261,7 @@ var (
 // this function consults, because the list is the part that drifts: this layer
 // kept one here and one in Python, they disagreed by a row for as long as both
 // existed, and neither language could see it because each only ever read its
-// own. See download/README.md § Two endings.
+// own. See download/CONTRACT.md § Two endings.
 type permanent struct{ error }
 
 func forever(text string) error { return permanent{errors.New(text)} }
@@ -294,7 +296,11 @@ func Permanent(err error) bool {
 // implementations' contract and this is one layer's. It is not critical: a
 // reader that does not know the key sees a failed job and treats it as
 // retryable, which is exactly what every reader did before the key existed.
-const FailureExtension = "download.failure/v1"
+//
+// The name is the definition's, not a second copy of it, because the key IS the
+// payload's version: a change to the shape is a change to both, and two places
+// holding the string is how the two would part company.
+var FailureExtension = rec.FailureNames[0]
 
 // setFailure records why an attempt ended AND whether trying again could ever
 // help. Both, together, because the caller reads them back as one thing.
@@ -304,14 +310,10 @@ func setFailure(rr *job.Record, err error) error {
 		return nil
 	}
 	rr.Error = err.Error()
-	raw, merr := json.Marshal(FailureOf(err))
-	if merr != nil {
-		return merr
-	}
 	if rr.Extensions == nil {
 		rr.Extensions = map[string]json.RawMessage{}
 	}
-	rr.Extensions[FailureExtension] = raw
+	rr.Extensions[FailureExtension] = EncodeFailure(FailureOf(err))
 	return nil
 }
 
@@ -327,15 +329,19 @@ func clearFailure(rr *job.Record) {
 //
 // A record written before this key existed, or by a writer that does not know
 // it, yields a retryable error — the same answer that record has always given.
-func LastFailure(rec *job.Record) error {
-	if rec == nil || rec.Error == "" {
+// So does a payload this reader cannot decode, which is why the key refuses an
+// unknown field rather than granting it: an unreadable class and an absent one
+// are the same answer, and one of them is a diagnostic somebody can act on.
+func LastFailure(r *job.Record) error {
+	if r == nil || r.Error == "" {
 		return nil
 	}
-	var f Failure
-	if raw, ok := rec.Extensions[FailureExtension]; ok && json.Unmarshal(raw, &f) == nil && f.Text != "" {
-		return f.Err()
+	if raw, ok := r.Extensions[FailureExtension]; ok {
+		if f, err := DecodeFailure(raw); err == nil && f.Error != "" {
+			return f.Err()
+		}
 	}
-	return errors.New(rec.Error)
+	return errors.New(r.Error)
 }
 
 // RangeRequest is one bounded piece of an artifact, fetched out of order.

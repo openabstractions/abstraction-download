@@ -50,6 +50,17 @@ type Tier struct {
 	// published by whoever published the program, and offers() fills that in.
 	Publisher Publisher
 
+	// Over is what this tier is a provider over — the thing underneath it that
+	// existed before it did — and Facility names that thing where it has a
+	// name: "BITS", "curl", the engine an adopter already runs.
+	//
+	// Publisher says who wrote a tier; this says what they wrote it on top of,
+	// and the two are independent: a tier somebody else published over a
+	// platform facility is normal. Nothing here is filled in from a zero value,
+	// because the one thing worth knowing is exactly what a default would hide.
+	Over     Over
+	Facility string
+
 	// Priority orders the chain, lowest first. A NAS outranks the local OS
 	// service because it is always on and this machine is not; the OS service
 	// outranks in-process because it survives this process exiting.
@@ -63,6 +74,32 @@ type Tier struct {
 	// must not be registered, because a job written into a directory nobody is
 	// watching looks exactly like a download that started.
 	New func(config.Config) (Delegator, error)
+}
+
+// Over is what a tier is a provider over.
+//
+// Three values, because they are the three that change what somebody should do
+// about a tier: our own code, a facility the machine already has, or an engine
+// somebody else runs. A tier registered from outside this repository sets it
+// like any other field, which makes it a claim — read it with Publisher.Proof
+// beside it, the way every other claim in this layer is read.
+type Over string
+
+const (
+	OverOurs     Over = "ours"
+	OverPlatform Over = "platform"
+	OverForeign  Over = "foreign"
+	// OverUndeclared is the zero value, and it is what a tier that did not say
+	// reports. It is not a synonym for ours: guessing is what stops the answer
+	// being an answer.
+	OverUndeclared Over = ""
+)
+
+func (o Over) String() string {
+	if o == OverUndeclared {
+		return "undeclared"
+	}
+	return string(o)
 }
 
 var (
@@ -207,6 +244,11 @@ type Offer struct {
 	// from is entitled to read "served by nas, published by someone else"
 	// rather than a name that looks exactly like ours.
 	By Publisher `json:"by"`
+	// Over and Facility are what this tier is a provider over. They are here so
+	// that which adoption level a provider occupies is a query over the
+	// registration seat rather than somebody reading the tree by hand.
+	Over     Over   `json:"over"`
+	Facility string `json:"facility,omitempty"`
 	// Usable is whether work could be handed here now: linked, configured,
 	// reachable, and not switched off.
 	Usable bool `json:"usable"`
@@ -266,7 +308,8 @@ func offers(cfg config.Config) ([]Offer, []Delegator) {
 	out := make([]Offer, 0, len(snapshot))
 	var usable []Delegator
 	for _, t := range snapshot {
-		o := Offer{System: t.Name, Priority: t.Priority, By: t.publisher(), Disbelieved: Disbelieved(t.Name)}
+		o := Offer{System: t.Name, Priority: t.Priority, By: t.publisher(),
+			Over: t.Over, Facility: t.Facility, Disbelieved: Disbelieved(t.Name)}
 		if why, off := cfg.Off[t.Name]; off {
 			o.Off, o.Why = true, why
 			out = append(out, o)

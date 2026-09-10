@@ -80,6 +80,8 @@ func TestAPluginThatClaimedResumeAndRestartedFromZeroIsCaughtAndDisbelieved(t *t
 	RegisterTier(Tier{
 		Name:      liarSystem,
 		Priority:  5,
+		Over:      OverForeign,
+		Facility:  "acme",
 		Publisher: Publisher{Name: "acme", Proof: identity.ProofClaimed},
 		New:       func(config.Config) (Delegator, error) { return liar, nil },
 	})
@@ -215,6 +217,7 @@ func TestAProbeThatNeverAnswersDoesNotFreezeOffers(t *testing.T) {
 	RegisterTier(Tier{
 		Name:     "silent",
 		Priority: 7,
+		Over:     OverOurs,
 		New: func(config.Config) (Delegator, error) {
 			<-answer
 			return &lateDelegate{closed: closed}, nil

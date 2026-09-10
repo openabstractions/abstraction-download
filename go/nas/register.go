@@ -11,6 +11,9 @@ import (
 func init() {
 	download.RegisterTier(download.Tier{
 		Name: System,
+		// Our own supervisor on the far end of a share, not a facility the
+		// machine came with and not somebody else's engine.
+		Over: download.OverOurs,
 		// First. A NAS is always on and the machine asking usually is not, which
 		// is the entire reason to prefer it.
 		Priority: 10,

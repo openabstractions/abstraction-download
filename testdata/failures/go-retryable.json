@@ -1,0 +1,50 @@
+{
+  "content": [
+    "abstraction.job/base@1",
+    "download.failure/v1"
+  ],
+  "critical": [
+    "abstraction.job/base@1"
+  ],
+  "id": "1789025269433-852b24b021114daaa07a",
+  "kind": "download",
+  "state": "pending",
+  "spec": {
+    "artifact": {
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 64
+    },
+    "sources": [
+      {
+        "scheme": "file",
+        "locator": "/store/artifact.bin"
+      }
+    ],
+    "sink": {
+      "partial": "work/1789025269433-852b24b021114daaa07a",
+      "final": "models/C.bin"
+    }
+  },
+  "checkpoint": {
+    "verified_prefix": 0,
+    "validators": {}
+  },
+  "progress": {
+    "done": 0,
+    "total": 64,
+    "updated_at": "2026-09-10T07:27:49.433492Z"
+  },
+  "lease": {
+    "owner": "",
+    "epoch": 1,
+    "expires_at": "2026-09-10T07:27:49.497749Z"
+  },
+  "error": "download: digest mismatch: got sha256:fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108, want sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "extensions": {
+    "download.failure/v1": {
+      "error": "download: digest mismatch: got sha256:fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108, want sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "created_at": "2026-09-10T07:27:49.433492Z",
+  "updated_at": "2026-09-10T07:27:49.497749Z"
+}

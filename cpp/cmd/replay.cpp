@@ -4,6 +4,7 @@
 // The C++ third of scripts/behaviour-conformance.sh. Same scenario file, same
 // transcript, no knowledge of any other implementation.
 
+#include <abstraction/download/failure.h>
 #include <abstraction/download/runner.h>
 #include <abstraction/download/sink.h>
 #include <abstraction/download/wanted.h>
@@ -139,6 +140,7 @@ public:
         if (op == "intent") return intent(f[1], f[2]);
         if (op == "recall") return recall(f[1], f[2], std::stoll(f[3]), rest(f, 4));
         if (op == "state") return show(f[1], nullptr);
+        if (op == "failure") return failure(f[1]);
         if (op == "orphans") return orphans();
         if (op == "run") return run(f[1], f[2], false);
         if (op == "credential") return credential(f[1], f.size() > 2 ? f[2] : "-");
@@ -232,6 +234,25 @@ private:
         if (it == g_subs.end()) return "not-found";
         it->second->close();
         return "ok";
+    }
+
+    // The class a reader recovers from the record, and the one thing about a
+    // failed job that must mean the same in three languages.
+    //
+    // The transcript carries the class and never the sentence, for the same
+    // reason it has never carried an error message: the wording is each
+    // implementation's and pinning it makes every improved message a
+    // cross-language breakage, while the class is what a successor branches on.
+    // `err=set` says a failure was recorded; only this says which of the two
+    // endings it was.
+    std::string failure(const std::string& alias) {
+        try {
+            const auto last = abstraction::download::last_failure(store_.load(g_ids[alias]));
+            if (!last) return "ok class=none";
+            return std::string("ok class=") + (last->permanent() ? "permanent" : "retryable");
+        } catch (const abstraction::job::JobError& e) {
+            return outcome(&e);
+        }
     }
 
     std::string show(const std::string& alias, const abstraction::job::JobError* e) {

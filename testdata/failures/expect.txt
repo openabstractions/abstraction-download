@@ -1,0 +1,49 @@
+# A failure produced in one language, and what every other language must still
+# make of it.
+#
+# The behaviour scenarios ask whether three implementations do the same thing to
+# their own stores. Nothing asked whether one can read what another WROTE, and a
+# failure is where that question bites: the class is the whole retry model, it
+# does not survive a process in an error object, and for as long as only one
+# language wrote it down the other two silently answered "retryable" about
+# refusals nobody will ever satisfy.
+#
+# So each language reads all of these, including the two it did not write. What
+# is compared is the MEANING -- the class a reader recovers -- and never the
+# sentence: three implementations word an error three ways, always will, and
+# pinning wording would make every improved message a cross-language breakage.
+#
+# name        the file, without .json
+# class       what last_failure must recover: permanent, retryable, or none
+# by          what produced the record
+#
+# HOW THE FIRST SIX WERE MADE. Each language's own replay driver was run over
+# scenarios/failure-endings.txt and the records it left in its store were taken
+# as they were, with ONE edit: `spec.sources[].locator` in the three retryable
+# records held the absolute path of the machine that ran them, and a corpus in a
+# published repository may not carry one. The spec is not what this corpus
+# tests. Every byte of `error` and of `extensions` is the language's own.
+#
+# legacy-no-key is not forged either: it is records/old-failed.json, written by
+# the published go/v0.1.0 tag before the key existed, and it is here because
+# stores hold records like it today. It carries a sentence and no class, so
+# `retryable` is not a guess about it -- it is the only answer available, and it
+# is the answer every reader gave before the key existed.
+#
+# forged-unknown-field is the one record no conforming writer can produce: the
+# payload carries a field this version has never heard of. The definition
+# refuses it rather than granting it ([DEF-A7]), so the reader falls back to the
+# sentence and the record means what a record with no class means. That is the
+# whole compatibility rule in one fixture -- an unreadable class and an absent
+# class are ONE answer, and a reader that guessed at the half it understood
+# would be inventing the other half.
+#
+# name                  class      by
+go-permanent            permanent  download/go, ErrNoFetcher
+go-retryable            retryable  download/go, ErrDigestMismatch
+python-permanent        permanent  download/python, NoSource
+python-retryable        retryable  download/python, DigestMismatch
+cpp-permanent           permanent  download/cpp, Error(permanent)
+cpp-retryable           retryable  download/cpp, Error(not permanent)
+legacy-no-key           retryable  go/v0.1.0, before the key existed
+forged-unknown-field    retryable  forged: a payload from a newer writer

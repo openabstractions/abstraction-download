@@ -2,6 +2,7 @@
 
 #include <abstraction/download/credential.h>
 #include <abstraction/download/digest.h>
+#include <abstraction/download/failure.h>
 #include <abstraction/download/sink.h>
 #include <abstraction/job/awake.h>
 #include <abstraction/job/ranges.h>
@@ -168,13 +169,6 @@ void deliver(const fs::path& partial, const fs::path& final_path) {
     fs::remove(partial, ec);
 }
 
-bool is_permanent(const std::exception& e) {
-    if (const auto* mine = dynamic_cast<const Error*>(&e)) {
-        return mine->permanent();
-    }
-    return dynamic_cast<const job::Invalid*>(&e) != nullptr;
-}
-
 }  // namespace
 
 std::string vouch_host(const std::string& locator, std::string& host) {
@@ -227,7 +221,7 @@ void Runner::run(const std::string& id) {
         const bool permanent = is_permanent(e);
         try {
             store_.update(id, epoch, [&](job::Record& r) {
-                r.error = e.what();
+                set_failure(r, e);
                 // A refusal that stays adoptable is fetched again on every sweep
                 // for as long as the store exists, and nothing waiting on the
                 // record can ever stop waiting.
@@ -317,7 +311,7 @@ void Runner::execute(const job::Record& rec, std::int64_t epoch) {
         r.progress.done = got.total;
         r.progress.updated_at = job::Clock::now();
         r.state = job::state::kTransferred;
-        r.error.clear();
+        clear_failure(r);
         set_prefix_checkpoint(r, got.total, got.validators);
     });
 }
@@ -373,7 +367,7 @@ void Runner::honour(const std::string& want, const std::string& id, std::int64_t
     if (want == job::want::kCancel) {
         store_.update(id, epoch, [](job::Record& r) {
             r.state = job::state::kCancelled;
-            r.error.clear();
+            clear_failure(r);
         });
         return;
     }

@@ -2,8 +2,6 @@ package download
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +33,44 @@ var (
 	ErrNoSupervisor  = errors.New("download: no supervisor answers for this store")
 	ErrNoBus         = errors.New("download: the supervisor is reachable through the store only")
 	ErrCallerRefused = errors.New("download: the supervisor refused this caller")
+	ErrNoName        = errors.New("download: this bus has no name to listen at")
 )
+
+// Scope is the population one supervisor serves, and the endpoint is named
+// after it.
+//
+// The name used to be invented per run and published in the heartbeat, which
+// made the heartbeat the only way to reach a supervisor. Nothing else can
+// address a name that changes: not a Windows service trigger, not a launchd
+// MachServices key, not a systemd socket unit, not a security descriptor
+// written by an installer. Fixed names, one per scope, are what let a
+// supervisor be started by the platform rather than found by a file
+// (research/guar198/SPEC.md § 3.1).
+//
+// One holder per name is the platform's answer, not ours: a second listener at
+// a held name is refused with listen.ErrTaken.
+type Scope string
+
+const (
+	// UserScope is one supervisor for one account. It is what this project
+	// installs, and what a sink inside a person's own tree needs: a supervisor
+	// running as somebody else shares the filesystem and not the rights.
+	UserScope Scope = "user"
+	// MachineScope is one supervisor for every account on the machine.
+	MachineScope Scope = "machine"
+)
+
+// Endpoint is where a supervisor of this scope listens, spelled the way the
+// identity layer spells an endpoint on this platform.
+//
+// Empty means the platform would not say which account this is. That is
+// unknown rather than nobody, and ListenBus refuses it: every process that
+// could not name its account would otherwise agree on one name.
+func (s Scope) Endpoint() string { return endpointOf(s) }
+
+// DefaultEndpoint is where a supervisor listens unless it was told otherwise,
+// the way asks, rights and router each name theirs.
+func DefaultEndpoint() string { return UserScope.Endpoint() }
 
 type busRequest struct {
 	Op string `json:"op"`
@@ -61,18 +96,20 @@ type Bus struct {
 	wg       sync.WaitGroup
 }
 
-// ListenBus opens the supervisor's end. The name is invented and published in
-// the heartbeat, never derived from the store path: two spellings of one path
-// would be two names, and the heartbeat is already the rendezvous.
-func ListenBus(owner string, tier func() string) (*Bus, error) {
+// ListenBus opens the supervisor's end at the given endpoint, which is
+// DefaultEndpoint for a supervisor nobody told otherwise. The caller supplies
+// it — as asks, rights and router each do — so that a test, or a second store
+// on one account, has a name of its own rather than a random one.
+//
+// The name is never derived from the store path: two spellings of one path
+// would be two names.
+func ListenBus(endpoint, owner string, tier func() string) (*Bus, error) {
 	if err := identity.CanEver(listen.Program); err != nil {
 		return nil, fmt.Errorf("download: a supervisor names who calls it, and this machine cannot say which program is calling: %w", err)
 	}
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return nil, err
+	if endpoint == "" {
+		return nil, ErrNoName
 	}
-	endpoint := listen.Endpoint("jobd-" + hex.EncodeToString(suffix[:]))
 	l, err := listen.Listen(endpoint)
 	if err != nil {
 		return nil, err

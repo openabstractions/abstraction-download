@@ -44,6 +44,8 @@ func register(t *testing.T, d Declaration) (asked, closed, live *int) {
 	RegisterTier(Tier{
 		Name:      "outsider",
 		Priority:  -1,
+		Over:      OverForeign,
+		Facility:  "an engine of their own",
 		Publisher: Publisher{Name: "someone else", Proof: identity.ProofClaimed},
 		New: func(config.Config) (Delegator, error) {
 			*live++

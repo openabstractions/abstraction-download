@@ -28,7 +28,7 @@ func TestDiscoverPicksTheTierTheMachineHas(t *testing.T) {
 
 	// Now a tier registers itself, exactly as a binding's init would.
 	RegisterTier(Tier{
-		Name: "pretend-nas", Priority: 10,
+		Name: "pretend-nas", Priority: 10, Over: OverOurs,
 		New: func(config.Config) (Delegator, error) { return &fakeDelegate{jobs: map[string]*fakeJob{}}, nil },
 	})
 	r = DiscoverIn(store)
@@ -46,14 +46,57 @@ func TestTiersAreOfferedWorkInPriorityOrder(t *testing.T) {
 	tiersMu.Unlock()
 	t.Cleanup(func() { tiersMu.Lock(); tiers = saved; tiersMu.Unlock() })
 
-	RegisterTier(Tier{Name: "second", Priority: 20,
+	RegisterTier(Tier{Name: "second", Priority: 20, Over: OverOurs,
 		New: func(config.Config) (Delegator, error) { return &fakeDelegate{jobs: map[string]*fakeJob{}}, nil }})
-	RegisterTier(Tier{Name: "first", Priority: 10,
+	RegisterTier(Tier{Name: "first", Priority: 10, Over: OverOurs,
 		New: func(config.Config) (Delegator, error) { return &fakeDelegate{jobs: map[string]*fakeJob{}}, nil }})
 
 	got := RegisteredTiers()
 	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Fatalf("registration order = %v, want [first second] regardless of when each registered", got)
+	}
+}
+
+// What a tier is a provider over reaches the offer, so which adoption level it
+// occupies is a query rather than somebody reading the tree by hand.
+func TestAnOfferSaysWhatTheTierIsAProviderOver(t *testing.T) {
+	tiersMu.Lock()
+	saved := tiers
+	tiers = nil
+	tiersMu.Unlock()
+	t.Cleanup(func() { tiersMu.Lock(); tiers = saved; tiersMu.Unlock() })
+
+	RegisterTier(Tier{Name: "over-something", Priority: 10, Over: OverPlatform, Facility: "BITS",
+		New: func(config.Config) (Delegator, error) { return nil, errNotHere }})
+
+	got := Offers(config.Config{})
+	if len(got) != 1 {
+		t.Fatalf("offers = %+v", got)
+	}
+	if got[0].Over != OverPlatform || got[0].Facility != "BITS" {
+		t.Fatalf("the offer says %s/%q", got[0].Over, got[0].Facility)
+	}
+}
+
+// A tier that did not say says so. A default here would answer "what is this a
+// provider over" with a guess wearing a fact's clothes, and the whole reason
+// the field exists is that the guess was wrong by hand four times.
+func TestATierThatDidNotSayIsUndeclaredAndNotOurs(t *testing.T) {
+	tiersMu.Lock()
+	saved := tiers
+	tiers = nil
+	tiersMu.Unlock()
+	t.Cleanup(func() { tiersMu.Lock(); tiers = saved; tiersMu.Unlock() })
+
+	RegisterTier(Tier{Name: "silent-about-itself", Priority: 10,
+		New: func(config.Config) (Delegator, error) { return nil, errNotHere }})
+
+	got := Offers(config.Config{})
+	if len(got) != 1 {
+		t.Fatalf("offers = %+v", got)
+	}
+	if got[0].Over != OverUndeclared || got[0].Over.String() != "undeclared" {
+		t.Fatalf("a tier that said nothing reports %q", got[0].Over)
 	}
 }
 
@@ -68,7 +111,7 @@ func TestUnavailableTierIsNotOffered(t *testing.T) {
 	tiersMu.Unlock()
 	t.Cleanup(func() { tiersMu.Lock(); tiers = saved; tiersMu.Unlock() })
 
-	RegisterTier(Tier{Name: "switched-off", Priority: 10,
+	RegisterTier(Tier{Name: "switched-off", Priority: 10, Over: OverOurs,
 		New: func(config.Config) (Delegator, error) {
 			return nil, errNotHere
 		}})

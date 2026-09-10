@@ -304,7 +304,7 @@ func (h HTTP) Ranged(ctx context.Context, src Source, headers map[string]string)
 
 // refused reports whether a status is the source saying no, as against the
 // transport having a bad moment. See Permanent: the first ends the job, the
-// second leaves it adoptable, and download/README.md § Two endings is the list
+// second leaves it adoptable, and download/CONTRACT.md § Two endings is the list
 // every implementation answers to.
 //
 // Listed rather than ranged, because the two mistakes do not cost the same: an

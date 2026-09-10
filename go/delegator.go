@@ -11,6 +11,8 @@ import (
 	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
+
+	"github.com/openabstractions/abstraction-download/go/rec"
 )
 
 // A Delegator hands the whole job to something outside this process and then
@@ -129,6 +131,17 @@ type Status struct {
 	Done  int64
 	Total int64
 	Err   string
+	// Permanent is Err's class, and it is the same question [DL-E16] asks of a
+	// record: is trying this again pointless. A delegate is another process and
+	// usually another vendor's, so nothing about the error it reports survives
+	// except the words — and the words are not a class.
+	//
+	// False is the safe half and the default: a delegate that says nothing about
+	// the class gets *not now*, which is what every delegate got before this
+	// field existed. A delegate SETS it only from something that actually
+	// distinguishes the two endings; guessing from the sentence would be the
+	// prose-to-class rebuild [DL-E14] exists to forbid.
+	Permanent bool
 	// Suspended distinguishes "stopped because somebody asked" from "running",
 	// which State deliberately does not: to a supervisor deciding whether to
 	// take work back, a suspended job is not failed and not finished, so it maps
@@ -589,28 +602,38 @@ func (d *Delegators) Close() error {
 //
 // The identity of the far side's error does not cross and is not meant to. What
 // crosses is its class and its words, which is what a successor acts on.
-type Failure struct {
-	Text      string `json:"error"`
-	Permanent bool   `json:"permanent,omitempty"`
-}
+//
+// The shape is download/download.thrift's, so the bytes are the generated
+// codec's in every language rather than each language's own JSON writer.
+type Failure rec.Failure
 
 // FailureOf describes an error for the wire. It returns nil for nil.
 func FailureOf(err error) *Failure {
 	if err == nil {
 		return nil
 	}
-	return &Failure{Text: err.Error(), Permanent: Permanent(err)}
+	return &Failure{Error: err.Error(), Permanent: Permanent(err)}
+}
+
+// EncodeFailure and DecodeFailure are the payload as bytes, and they are the
+// only way this layer writes or reads one. A caller reaching for its own JSON
+// writer gets a document the other two languages did not agree to.
+func EncodeFailure(f *Failure) []byte { return rec.Encode((*rec.Failure)(f)) }
+
+func DecodeFailure(b []byte) (*Failure, error) {
+	f, err := rec.Decode(b)
+	return (*Failure)(f), err
 }
 
 // Err rebuilds the error on this side, class intact.
 func (f *Failure) Err() error {
-	if f == nil || f.Text == "" {
+	if f == nil || f.Error == "" {
 		return nil
 	}
 	if f.Permanent {
-		return permanent{errors.New(f.Text)}
+		return permanent{errors.New(f.Error)}
 	}
-	return errors.New(f.Text)
+	return errors.New(f.Error)
 }
 
 // BySystem finds the delegator that can interpret a recorded handle. Without
@@ -1069,7 +1092,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			// prints from what Reconcile returns. A delegate that tried and
 			// failed is the opposite, and keeps its reason.
 			if st.Err != "" {
-				return setFailure(rr, errors.New(st.Err))
+				return setFailure(rr, (&Failure{Error: st.Err, Permanent: st.Permanent}).Err())
 			}
 			return nil
 		})

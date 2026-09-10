@@ -451,6 +451,13 @@ func (d *Delegator) Poll(ctx context.Context, externalID string) (download.Statu
 		Suspended: strings.EqualFold(strings.TrimSpace(pr.State), "suspended"),
 	}
 	if st.State == download.DelegateFailed {
+		// Err only, and deliberately no class. BITS already told us the one
+		// thing it knows about the two endings by putting the job in
+		// TRANSIENTERROR rather than ERROR, and stateOf reads that: a transient
+		// error never reaches here. What is left is BG_JOB_STATE_ERROR, which
+		// covers a 404 and a full disk alike, and the cmdlet answer this parses
+		// carries no field that separates them. So Permanent stays false --
+		// *not now*, the safe half -- rather than being guessed from the words.
 		st.Err = failureText(pr)
 	}
 	return st, nil

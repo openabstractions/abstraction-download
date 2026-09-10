@@ -4,22 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	"github.com/openabstractions/abstraction-identity/listen"
 	job "github.com/openabstractions/abstraction-job/go"
 )
+
+// endpoint is one test's own name for a bus, the way asks and rights each give
+// their services one: the process and the test are the scope, so two runs of
+// this binary — and two of these tests — never ask for one name.
+func endpoint(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return filepath.Join(t.TempDir(), "bus")
+	}
+	return fmt.Sprintf(`\\.\pipe\jobs-test-%d-%s`, os.Getpid(), t.Name())
+}
 
 // announce is a supervisor that answers: a bus this test serves, named in the
 // heartbeat the way jobd names it.
 func announce(t *testing.T, store job.Store, owner, tier string) *Bus {
 	t.Helper()
-	b, err := ListenBus(owner, func() string { return tier })
+	b, err := ListenBus(endpoint(t), owner, func() string { return tier })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +43,103 @@ func announce(t *testing.T, store job.Store, owner, tier string) *Bus {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// N1. The name is the same in another process. Everything the service work
+// waits on — a trigger, a socket unit, a security descriptor, an installer —
+// is written once by one program and used by another, so a name this process
+// invented for itself is no name at all.
+func TestTheNameIsTheSameInAnotherProcess(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(self, "-test.run=^"+childName+"$", "-test.v").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	i := strings.Index(string(out), childSays)
+	if i < 0 {
+		t.Fatalf("the child said nothing about its endpoint:\n%s", out)
+	}
+	there := strings.TrimSpace(strings.SplitN(string(out[i+len(childSays):]), "\n", 2)[0])
+	if there != DefaultEndpoint() {
+		t.Fatalf("this process listens at %q and another one would listen at %q", DefaultEndpoint(), there)
+	}
+}
+
+const (
+	childName = "TestTheEndpointThisProcessWouldListenAt"
+	childSays = "endpoint="
+)
+
+// The other half of N1: N1 runs this in a second process and compares what it
+// prints with the name this process would listen at.
+func TestTheEndpointThisProcessWouldListenAt(t *testing.T) {
+	if DefaultEndpoint() == "" {
+		t.Fatal("this process has no name to listen at")
+	}
+	fmt.Println(childSays + DefaultEndpoint())
+}
+
+// N2. One holder per name. Two supervisors sharing an address would each hear
+// half the callers, and neither could say so.
+func TestASecondSupervisorAtOneNameIsRefused(t *testing.T) {
+	at := endpoint(t)
+	first, err := ListenBus(at, "jobd@test:1", func() string { return "here" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := ListenBus(at, "jobd@test:2", func() string { return "here" })
+	if err == nil {
+		second.Close()
+		t.Fatal("two supervisors took one name")
+	}
+	if !errors.Is(err, listen.ErrTaken) {
+		t.Fatalf("a held name was refused for the wrong reason: %v", err)
+	}
+}
+
+// N3. The scopes are different names, so a machine service and a user runtime
+// on one machine do not fight over one.
+func TestTheScopesAreDifferentNames(t *testing.T) {
+	if UserScope.Endpoint() == MachineScope.Endpoint() {
+		t.Fatalf("both scopes listen at %s", UserScope.Endpoint())
+	}
+}
+
+// N3, the half that matters on a machine with two people on it: one account's
+// user-scope name is not another's. A pipe name is machine-wide, so on Windows
+// the account is in the name; elsewhere the runtime directory is already one
+// per account and the name sits inside it.
+func TestTwoAccountsDoNotShareTheUserScopeName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if Account() == "" || !strings.Contains(UserScope.Endpoint(), Account()) {
+			t.Fatalf("the name %q does not say whose account it is (%q)", UserScope.Endpoint(), Account())
+		}
+		return
+	}
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "one"))
+	mine := UserScope.Endpoint()
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "two"))
+	if theirs := UserScope.Endpoint(); theirs == mine {
+		t.Fatalf("two accounts both listen at %s", mine)
+	}
+}
+
+// N4. A bus with no name refuses to listen. Scope.Endpoint is empty when the
+// platform would not say which account this is, and every process that could
+// not say would otherwise agree on one name.
+func TestABusWithNoNameRefusesToListen(t *testing.T) {
+	b, err := ListenBus("", "jobd@test:1", func() string { return "here" })
+	if err == nil {
+		b.Close()
+		t.Fatal("a bus with no name listened")
+	}
+	if !errors.Is(err, ErrNoName) {
+		t.Fatalf("got %v", err)
+	}
 }
 
 // B1. A look from an identified caller wakes the supervisor, and the caller
@@ -90,7 +202,7 @@ func (unbound) Bind() (*identity.Binding, error) { return nil, identity.ErrNoBin
 // B4. A caller the kernel cannot name is refused on every op, is told why, and
 // wakes nothing.
 func TestACallerTheKernelCannotNameIsRefused(t *testing.T) {
-	b, err := ListenBus("jobd@test:1", func() string { return "here" })
+	b, err := ListenBus(endpoint(t), "jobd@test:1", func() string { return "here" })
 	if err != nil {
 		t.Fatal(err)
 	}

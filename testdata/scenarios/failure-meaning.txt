@@ -1,0 +1,31 @@
+# requires: transfer
+#
+# What a failure MEANS, recovered from the record by a reader that did not see
+# the error object.
+#
+# failure-endings.txt beside this file asks what the store did about a failure:
+# which state it left the job in, whether it stayed adoptable. This asks the
+# other half, and it is the half no transcript could see -- `err=set` is one
+# bit, and it says a failure was recorded, never which of the two endings it
+# was. A reader rebuilding the error from `error` alone gets a bare string, so
+# the refusals this layer declares forever come back retryable and the job is
+# fetched again on every sweep for as long as the store exists.
+#
+# The class and not the sentence, deliberately. Three implementations word an
+# error three ways and always will; the class is what a successor branches on
+# and it is the same in all three or the layer is not one layer.
+submit A size=64 digest=good src=nofetcher
+run A alpha
+failure A
+submit B size=64 digest=good src=missing
+run B beta
+failure B
+submit C size=64 digest=good src=file
+run C gamma
+failure C
+
+# expect 2: transfer-failed state=failed ...
+# expect 3: ok class=permanent [DL-E16]
+# expect 5: transfer-failed state=pending ...
+# expect 6: ok class=retryable [DL-E16]
+# expect 9: ok class=none [DL-E16]
