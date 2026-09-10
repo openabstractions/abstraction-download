@@ -28,6 +28,14 @@
 #   own code only   nothing vendored. A wheel's top level is abstraction_*;
 #                   a Go zip has no vendor/; an install's include/ holds only
 #                   abstraction/.
+#   it imports      Python only. A dependency list is a promise and opening the
+#                   archive cannot read it: every check above passed a wheel
+#                   that raised ModuleNotFoundError on import
+#                   (research/red186/RESULTS.md). The publish workflow cannot
+#                   answer this — on a first batch every sibling a wheel
+#                   declares is in that same batch and on no index. Here they
+#                   are built together, so pip resolves the declared graph out
+#                   of this run's wheels with no index and imports the module.
 #
 # Where each artifact comes from, because a check that builds from the wrong
 # place passes for the wrong reason:
@@ -94,6 +102,13 @@ if [ -z "$PY" ]; then
 fi
 SETUPTOOLS=""
 [ -n "$PY" ] && SETUPTOOLS=$("$PY" -c 'import setuptools; print(setuptools.__version__)' 2>/dev/null || true)
+# ensurepip dominates the cost of a venv and the import pass below builds one
+# per package; pip 22.3's --python installs into a venv built without one
+# (research/imp188/RESULTS.md). Probed against pip's own help, because a pip
+# that does not know the option must not be mistaken for a wheel whose
+# dependencies do not resolve.
+PIP_TARGETS_A_VENV=""
+[ -n "$PY" ] && "$PY" -m pip --help 2>/dev/null | grep -q -- '--python' && PIP_TARGETS_A_VENV=yes
 
 CMAKE="${ABSTRACTION_CMAKE:-$(command -v cmake 2>/dev/null || true)}"
 for c in "/c/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" \
@@ -262,12 +277,14 @@ if want python; then
 printf '\033[1mPython — wheel and sdist built from the published image\033[0m\n'
 py_pkgs='
 abstraction-cas cas
+abstraction-config config
 abstraction-download download
 abstraction-job job
 abstraction-model model
 abstraction-watch watch
 '
 printf '%s\n' "$py_pkgs" > "$WORK/py_pkgs"
+WHEELHOUSE="$WORK/wheelhouse"; mkdir -p "$WHEELHOUSE"
 while IFS=' ' read -r repo short; do
     [ -n "$repo" ] || continue
     src="$SPLIT/$repo/python"
@@ -297,10 +314,54 @@ while IFS=' ' read -r repo short; do
         record FAIL "$repo: build finished but produced $(ls "$b/dist" | tr '\n' ' ') — expected one .whl and one .tar.gz"
         continue
     fi
+    cp "$whl" "$WHEELHOUSE/"
     check_wheel "$whl"; verdict "$repo wheel $(basename "$whl")"
     wheel_version=$VERSION
     check_sdist "$sdist"; verdict "$repo sdist $(basename "$sdist")"
     tag_check "$repo python" "$repo" "python/" "$wheel_version"
+done < "$WORK/py_pkgs"
+
+printf '\n\033[1mPython — the declared graph resolved from this run'"'"'s wheels, and the module imported\033[0m\n'
+while IFS=' ' read -r repo short; do
+    [ -n "$repo" ] || continue
+    proj="$SPLIT/$repo/python/pyproject.toml"
+    whl=$(ls "$WHEELHOUSE"/"$(printf '%s' "$repo" | tr - _)"-*.whl 2>/dev/null | head -1)
+    if [ -z "$whl" ]; then
+        if [ -f "$proj" ]; then
+            record UNPROVEN "$repo python: no wheel came out of this run — the build above says why; nothing to import"
+        else
+            record ABSENT "$repo python: not in the published image — no wheel to import"
+        fi
+        continue
+    fi
+    mods=$(sed -n 's/^py-modules = \[\(.*\)\]/\1/p' "$proj" | tr -d '" ' | tr , ' ')
+    if [ -z "$mods" ]; then
+        record UNPROVEN "$repo python: pyproject.toml declares no py-modules on one line — nothing names what has to import"
+        continue
+    fi
+    if [ -z "$PIP_TARGETS_A_VENV" ]; then
+        record UNPROVEN "$repo python: this pip has no --python (pip 22.3 and later) — the import was not attempted"
+        continue
+    fi
+    v="$WORK/import-$short"
+    rm -rf "$v"
+    if ! "$PY" -m venv --without-pip "$v" > "$v.log" 2>&1; then
+        record UNPROVEN "$repo python: python -m venv refused — $(tail -1 "$v.log" | tr -d '\r')"
+        continue
+    fi
+    vpy="$v/bin/python"; [ -x "$vpy" ] || vpy="$v/Scripts/python.exe"
+    if ! "$PY" -m pip --python "$vpy" install -q --disable-pip-version-check \
+            --no-index --find-links "$WHEELHOUSE" "$whl" > "$v.log" 2>&1; then
+        record FAIL "$repo python: the declared graph does not resolve from the wheels this run built — $(tail -1 "$v.log" | tr -d '\r')"
+        continue
+    fi
+    for m in $mods; do
+        if "$vpy" -c "import $m" > "$v.log" 2>&1; then
+            record ok "$repo python: import $m"
+        else
+            record FAIL "$repo python: the wheel installs and $m does not import — $(tail -1 "$v.log" | tr -d '\r')"
+        fi
+    done
 done < "$WORK/py_pkgs"
 fi
 
