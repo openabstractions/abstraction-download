@@ -57,14 +57,20 @@ def models():
     be marked critical. A record naming anything absent here in ``critical`` is
     refused, so the roster is the whole of what this reader negotiates over and
     it belongs where a harness can diff it against the other two."""
+    # The failure class is never critical by its own rule: an unreadable class
+    # and an absent class are one answer [DL-E16], so refusing the record over
+    # it would contradict the payload's own fallback.
+    never = NEVER_CRITICAL | {dl.FAILURE_EXTENSION}
     return "\n".join(
-        f"{name} {'never-critical' if name in NEVER_CRITICAL else 'critical-ok'}"
-        for name in sorted(KNOWN_FEATURES)
+        f"{name} {'never-critical' if name in never else 'critical-ok'}"
+        for name in sorted(KNOWN_FEATURES | {dl.FAILURE_EXTENSION})
     )
 
 
 def now():
     return datetime.now(timezone.utc)
+
+UNNAMED = "refused"
 
 REFUSALS = [
     (NotFound, "not-found"),
@@ -86,7 +92,19 @@ def outcome(exc):
     for kind, name in REFUSALS:
         if isinstance(exc, kind):
             return name
-    return "refused"
+    return UNNAMED
+
+
+def refusals():
+    """Every token ``outcome`` can print.
+
+    job.thrift declares these beside the enum member each spells, and the Go
+    driver reads them from there. Python cannot: the generated artefact is
+    always ``py/rec.py``, and this process already resolves ``py`` to the
+    download layer's copy beside this file. So the tokens are spelled by hand
+    here and the harness diffs this roster against the one that came from the
+    definition."""
+    return "\n".join(sorted({name for _, name in REFUSALS} | {UNNAMED}))
 
 
 def artifact(size):
@@ -489,8 +507,12 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--models":
         sys.stdout.write(models() + "\n")
         return
+    if len(sys.argv) == 2 and sys.argv[1] == "--refusals":
+        sys.stdout.write(refusals() + "\n")
+        return
     if len(sys.argv) != 3:
-        sys.exit("usage: replay.py <workdir> <scenario> | replay.py --capabilities | --models")
+        sys.exit("usage: replay.py <workdir> <scenario> | "
+                 "replay.py --capabilities | --models | --refusals")
 
     p = Replay(sys.argv[1])
     with open(sys.argv[2], "r", encoding="utf-8") as f:

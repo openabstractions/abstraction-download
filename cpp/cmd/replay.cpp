@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -71,11 +72,17 @@ std::string capabilities() {
 // refused, so the roster is the whole of what this reader negotiates over and it
 // belongs where a harness can diff it against the other two.
 std::string models() {
+    std::vector<std::string> names = abstraction::job::known_features();
+    const std::string& failure = abstraction::download::failure_extension();
+    names.push_back(failure);
+    std::sort(names.begin(), names.end());
     std::ostringstream o;
-    for (const std::string& name : abstraction::job::known_features()) {
-        o << name << (abstraction::job::is_never_critical_feature(name) ? " never-critical"
-                                                                     : " critical-ok")
-          << "\n";
+    for (const std::string& name : names) {
+        // The failure class is never critical by its own rule: an unreadable
+        // class and an absent class are one answer [DL-E16], so refusing the
+        // record over it would contradict the payload's own fallback.
+        const bool never = abstraction::job::is_never_critical_feature(name) || name == failure;
+        o << name << (never ? " never-critical" : " critical-ok") << "\n";
     }
     return o.str();
 }
@@ -86,6 +93,18 @@ std::map<std::string, std::int64_t> g_epochs;
 std::map<std::string, std::unique_ptr<abstraction::job::Subscription>> g_subs;
 std::map<std::string, std::unique_ptr<abstraction::job::KeepAwake>> g_holds;
 
+const char* const kUnnamed = "refused";
+
+const std::vector<std::pair<std::string, std::string>> kRefusals = {
+    {"NotFound", "not-found"},
+    {"LeaseHeld", "lease-held"},
+    {"StaleEpoch", "stale-epoch"},
+    {"LeaseExpired", "lease-expired"},
+    {"TerminalState", "terminal"},
+    {"UnknownSchema", "unknown-model"},
+    {"Invalid", "invalid"},
+};
+
 // Names a refusal in a vocabulary all three implementations share. The wording
 // of an error is not a contract and must never become one; which class of
 // refusal happened is exactly what a caller branches on.
@@ -94,14 +113,35 @@ std::string outcome(const abstraction::job::JobError* e) {
         return "ok";
     }
     const std::string name = e->name();
-    if (name == "NotFound") return "not-found";
-    if (name == "LeaseHeld") return "lease-held";
-    if (name == "StaleEpoch") return "stale-epoch";
-    if (name == "LeaseExpired") return "lease-expired";
-    if (name == "TerminalState") return "terminal";
-    if (name == "UnknownSchema") return "unknown-model";
-    if (name == "Invalid") return "invalid";
-    return "refused";
+    for (const auto& r : kRefusals) {
+        if (name == r.first) {
+            return r.second;
+        }
+    }
+    return kUnnamed;
+}
+
+// Every token outcome can print.
+//
+// job.thrift declares these beside the enum member each spells, and the Go
+// driver reads them from there. C++ cannot: the generated artefact always opens
+// namespace rec, and this program already carries the download layer's copy of
+// it through abstraction/download/failure.h. So the tokens are spelled by hand
+// here and the harness diffs this roster against the one that came from the
+// definition.
+std::string refusals() {
+    std::vector<std::string> tokens{kUnnamed};
+    for (const auto& r : kRefusals) {
+        if (std::find(tokens.begin(), tokens.end(), r.second) == tokens.end()) {
+            tokens.push_back(r.second);
+        }
+    }
+    std::sort(tokens.begin(), tokens.end());
+    std::ostringstream o;
+    for (const std::string& t : tokens) {
+        o << t << "\n";
+    }
+    return o.str();
 }
 
 std::string fields(const Record& r) {
@@ -654,8 +694,12 @@ int main(int argc, char** argv) {
         std::cout << models();
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--refusals") {
+        std::cout << refusals();
+        return 0;
+    }
     if (argc != 3) {
-        std::cerr << "usage: replay <workdir> <scenario> | replay --capabilities | --models\n";
+        std::cerr << "usage: replay <workdir> <scenario> | replay --capabilities | --models | --refusals\n";
         return 2;
     }
     const std::string work = argv[1];

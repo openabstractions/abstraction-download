@@ -113,7 +113,7 @@ def esc(out, s):
     out += b'"'
 
 
-FAILURE_NAMES = ["download.failure/v1"]
+FAILURE_NAMES = ["abstraction.download/failure@1"]
 
 
 class Failure:

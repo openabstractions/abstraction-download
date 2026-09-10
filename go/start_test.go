@@ -12,8 +12,7 @@ import (
 
 // S1. A client that found no service did not start one.
 //
-// The rule this keeps is the one the owner struck a silent fallback for
-// (VISION.md 2026-09-10): absence is reported, and a provider arrives because
+// The rule this keeps: absence is reported, and a provider arrives because
 // somebody supplied it on purpose. A client that starts a helper because it
 // could not find one is the same defect wearing a different coat, so the
 // evidence is not "the call returned an error" — it is that the endpoint is
@@ -75,9 +74,9 @@ func TestStartingASupervisorThatIsAlreadyThereStartsNothing(t *testing.T) {
 // S3. A start that spawned something which never listened says so, and says it
 // when the child dies rather than when a clock runs out.
 //
-// The 300ms sleep this replaces (research/bus206/RESULTS.md § 1.6) was a delay
-// standing in for a notification: it covered a stop-then-start race by guessing
-// how long a dying process holds its handles. Waiting on the child is a wait on
+// A fixed sleep here would be a delay standing in for a notification: it would
+// cover a stop-then-start race by guessing how long a dying process holds its
+// handles. Waiting on the child is a wait on
 // something, and the ceiling below is only reached by a child that neither
 // answers nor exits.
 func TestAStartWhoseChildNeverListensSaysSoWhenItDies(t *testing.T) {

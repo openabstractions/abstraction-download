@@ -44,8 +44,7 @@ var (
 // address a name that changes: not a Windows service trigger, not a launchd
 // MachServices key, not a systemd socket unit, not a security descriptor
 // written by an installer. Fixed names, one per scope, are what let a
-// supervisor be started by the platform rather than found by a file
-// (research/guar198/SPEC.md § 3.1).
+// supervisor be started by the platform rather than found by a file.
 //
 // One holder per name is the platform's answer, not ours: a second listener at
 // a held name is refused with listen.ErrTaken.
@@ -236,8 +235,7 @@ func exchange(endpoint, op string) (Answer, error) {
 	}
 	defer nc.Close()
 	// The dialled end of a pipe takes no read deadline on Windows; closing it is
-	// what bounds the wait, and a Close does release a blocked reader
-	// (research/bus145/RESULTS.md).
+	// what bounds the wait, and a Close does release a blocked reader.
 	hangup := time.AfterFunc(busWait, func() { nc.Close() })
 	defer hangup.Stop()
 	raw, err := json.Marshal(busRequest{Op: op})

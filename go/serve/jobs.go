@@ -3,8 +3,8 @@
 //
 // It exists because `jobd run` was a main, and a main is the one shape a host
 // program cannot host. One program registered once per capability is what every
-// platform activates (research/svc195/PROPOSAL.md § 6), so the supervisor loop
-// had to become a function. jobd still has it; so does openabstractions; the
+// platform activates — a Windows service, a launchd job, a systemd unit — so
+// the supervisor loop had to become a function. jobd still has it; so does openabstractions; the
 // CLIs dl and jobctl are untouched.
 package serve
 
@@ -208,7 +208,12 @@ func (s *Systems) Set(v string) error {
 
 // Jobs supervises in the foreground until it is stopped. It is what `jobd run`
 // and `openabstractions serve jobd` both are.
-func Jobs(args []string) error {
+func Jobs(args []string) error { return JobsContext(context.Background(), args) }
+
+// JobsContext is Jobs for a caller that has to be able to end it without a
+// signal. On Windows a service stop is not a signal and SIGTERM is never
+// delivered, so the SCM has no other way to reach the loop below.
+func JobsContext(parent context.Context, args []string) error {
 	fs := flag.NewFlagSet("jobd", flag.ContinueOnError)
 	interval := fs.Duration("interval", 30*time.Second, "how often to sweep")
 	endpoint := fs.String("endpoint", download.DefaultEndpoint(), "where applications connect")
@@ -268,7 +273,7 @@ func Jobs(args []string) error {
 	// Stop cleanly on Ctrl+C or a service stop. An interrupted sweep is safe —
 	// the lease lapses and the next owner continues — but exiting tidily
 	// releases it immediately instead of after the expiry.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Announce on a clock of its own, because the thing that starves a heartbeat

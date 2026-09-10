@@ -2,7 +2,7 @@
   "content": [
     "abstraction.job/base@1",
     "abstraction.job/terminal@1",
-    "download.failure/v1"
+    "abstraction.download/failure@1"
   ],
   "critical": [
     "abstraction.job/base@1",
@@ -39,7 +39,7 @@
   },
   "error": "download: no fetcher for this job's sources: scheme \"gopher\"",
   "extensions": {
-    "download.failure/v1": {
+    "abstraction.download/failure@1": {
       "error": "download: no fetcher for this job's sources: scheme \"gopher\"",
       "permanent": true,
       "retry_after": 30

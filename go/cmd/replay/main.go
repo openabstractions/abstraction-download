@@ -35,6 +35,7 @@ import (
 
 	dl "github.com/openabstractions/abstraction-download/go"
 	job "github.com/openabstractions/abstraction-job/go"
+	wire "github.com/openabstractions/abstraction-job/go/rec"
 	watch "github.com/openabstractions/abstraction-watch/go"
 )
 
@@ -70,10 +71,15 @@ func capabilities() string {
 // negotiates over and it belongs where a harness can diff it against the other
 // two.
 func models() string {
+	names := append(job.KnownFeatures(), dl.FailureExtension)
+	sort.Strings(names)
 	var lines []string
-	for _, name := range job.KnownFeatures() {
+	for _, name := range names {
+		// The failure class is never critical by its own rule: an unreadable
+		// class and an absent class are one answer [DL-E16], so refusing the
+		// record over it would contradict the payload's own fallback.
 		mark := "critical-ok"
-		if job.NeverCritical(name) {
+		if job.NeverCritical(name) || name == dl.FailureExtension {
 			mark = "never-critical"
 		}
 		lines = append(lines, name+" "+mark)
@@ -90,8 +96,12 @@ func main() {
 		fmt.Print(models() + "\n")
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--refusals" {
+		fmt.Print(refusals() + "\n")
+		return
+	}
 	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: replay <workdir> <scenario> | replay --capabilities")
+		fmt.Fprintln(os.Stderr, "usage: replay <workdir> <scenario> | replay --capabilities | --models | --refusals")
 		os.Exit(2)
 	}
 	work, scenario := os.Args[1], os.Args[2]
@@ -301,26 +311,30 @@ func atoi(s string) int64 {
 // outcome names a refusal in a vocabulary all three implementations share. The
 // wording of an error is not a contract and must never become one; which class
 // of refusal happened is exactly what a caller branches on.
+//
+// Both halves are somebody else's to spell. job.Verdict decides which member of
+// the vocabulary the error is, and job.thrift's transcript annotation decides
+// how that member is spelled here.
 func outcome(err error) string {
-	switch {
-	case err == nil:
+	if err == nil {
 		return "ok"
-	case errors.Is(err, job.ErrNotFound):
-		return "not-found"
-	case errors.Is(err, job.ErrLeaseHeld):
-		return "lease-held"
-	case errors.Is(err, job.ErrStaleEpoch):
-		return "stale-epoch"
-	case errors.Is(err, job.ErrLeaseExpiry):
-		return "lease-expired"
-	case errors.Is(err, job.ErrTerminal):
-		return "terminal"
-	case errors.Is(err, job.ErrUnknownSchema):
-		return "unknown-model"
-	case errors.Is(err, job.ErrInvalid):
-		return "invalid"
 	}
-	return "refused"
+	return wire.VerdictTranscript[job.Verdict(err)]
+}
+
+// refusals is every token outcome can print. The harness diffs it against the
+// other two drivers, which cannot read the definition and spell these by hand.
+func refusals() string {
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range wire.VerdictNames {
+		if t := wire.VerdictTranscript[name]; !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, "\n")
 }
 
 func compact(raw json.RawMessage) string {

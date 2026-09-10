@@ -151,11 +151,16 @@ in C++17, `java.nio.file.Files.isSameFile` in Java — whose documentation says
 outright that it may open both files. All four compare device and inode, or
 volume serial and file id.
 
-The reason is measured, in `research/normalisation/RESULTS.md`, which is not
-published. NTFS folds `café` against `CAFÉ` and holds `K` (U+212A) apart from `k`; APFS
-folds both; ext4 folds neither; one volume can be mounted differently from the
-next, so a case-sensitive APFS volume, a `mount -o casefold` ext4 and an SMB
-share each falsify any rule read off the host's name. Two records for one file
+The reason is measurable on any volume, and
+[`go/samepath_test.go`](go/samepath_test.go) is the reproducer: it names the
+pairs the three implementations were seen disagreeing about — `café` against
+`CAFÉ`, `K` (U+212A) against `k`, NFC against NFD — and states no expected
+answer, because `TestSamePathAgreesWithTheVolume` creates one name and looks for
+the other on the volume under the test. NTFS folds `café` against `CAFÉ` and
+holds `K` apart from `k`; APFS folds both; ext4 folds neither; one volume can be
+mounted differently from the next, so a case-sensitive APFS volume, a
+`mount -o casefold` ext4 and an SMB share each falsify any rule read off the
+host's name. Two records for one file
 are two leases, two partials and two writers racing into it. One record for two
 files hands the caller a job fetching a **different** file and says nothing.
 
@@ -289,9 +294,12 @@ half.
 
 **The class crosses a process, a provider and a language in one shape, and what
 it means does not depend on a service being up** [DL-E16]. It rides in
-`extensions["download.failure/v1"]`, and that payload is defined once, in
-[download.thrift](download.thrift), as `error` and `permanent` — `permanent`
-written only when it is true, so a *not now* is the shorter document. Four
+`extensions["abstraction.download/failure@1"]`, and that payload is defined
+once, in [download.thrift](download.thrift), as `error` and `permanent` —
+`permanent` written only when it is true, so a *not now* is the shorter
+document. The key is spelled as a content name because it is one: it appears in
+`content` for exactly as long as the payload does, and a driver's `--models`
+roster names it like any other name its implementation writes. Four
 consequences, and none of them optional:
 
 - **The key is the version.** An incompatible change to the payload is a new

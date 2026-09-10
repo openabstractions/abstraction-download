@@ -44,9 +44,8 @@ const (
 // DefaultConnections is how many ranges of one artifact an owner fetches at once.
 //
 // Eight, and the number is a guess: Ollama uses sixteen, aria2 defaults to five,
-// and the one thing measured here is eight against one
-// (research/transfer/2026-09-05-parallel-fetcher.txt). Nobody has measured where
-// it stops helping, or where a host starts refusing, so it is a field on Runner
+// and the one thing measured here is eight against one. Nobody has measured
+// where it stops helping, or where a host starts refusing, so it is a field on Runner
 // rather than a constant a caller cannot argue with.
 const DefaultConnections = 8
 

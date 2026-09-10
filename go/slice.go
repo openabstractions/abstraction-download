@@ -22,8 +22,8 @@ import (
 // it composes with any range-capable fetcher including one that is not ours.
 // Everything below is arithmetic on FetchRange.
 //
-// Measured before it was designed — research/range-support/RESULTS.txt, 20 real
-// hosts. Single ranges are nearly universal and multi-range replies are not, so
+// Measured before it was designed, over 20 real hosts: single ranges are nearly
+// universal and multi-range replies are not, so
 // nothing here asks for more than one range per request.
 
 var (
@@ -135,7 +135,7 @@ func (s *Slice) Head(ctx context.Context, n int64) ([]byte, error) {
 //
 // Measured rather than assumed: GitHub's release CDN and cdn.kernel.org answer
 // a suffix range with 501 Not Implemented and the same bytes named explicitly
-// with 206 — research/range-support/RESULTS.txt. A ZIP is read from its end, so
+// with 206. A ZIP is read from its end, so
 // a suffix-only implementation would fail on two hosts that do support ranges.
 func (s *Slice) Tail(ctx context.Context, n int64) ([]byte, error) {
 	size, err := s.Size(ctx)

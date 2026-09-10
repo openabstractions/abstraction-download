@@ -8,8 +8,8 @@
 // alongside this.
 //
 // WHY ONLY THE FAILURE. A download's spec is opaque payload the layer above
-// extends, and research/dlgen81/RESULTS.md measured what declaring it would
-// cost: the wire's extension point is bare top-level keys, `grant` drops them,
+// extends, and declaring it was measured against what it would cost:
+// the wire's extension point is bare top-level keys, `grant` drops them,
 // and a generated encoder would delete an adopter's `group_id` on the first
 // read-modify-write. The failure payload is the opposite case in every respect
 // — nobody else writes it, it is versioned by the key it is carried under, and
@@ -66,7 +66,7 @@ refusal {
 // because there is one version. An incompatible change to the shape below is a
 // SECOND entry and a second key, never an edit to this one — which is the whole
 // reason the shape can afford to refuse an unknown field.
-const list<string> failure_names = ["download.failure/v1"]
+const list<string> failure_names = ["abstraction.download/failure@1"]
 
 // Why the last attempt ended, and whether trying again could ever help.
 //

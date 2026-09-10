@@ -16,7 +16,8 @@
 # The rule is also DECLARED, which is the half that was missing. Everything
 # below shipped under an unchanged `abstraction.job/base@1`, so a reader
 # published before it reads these records happily and breaks the one rule they
-# are about: measured, research/wire-compat/RESULTS.txt §2. Step 2 carries no
+# are about — a `go/v0.1.0` lease holder walked a `complete` record back to
+# `pending`, and this scenario is what refuses that now. Step 2 carries no
 # such declaration and step 3 does, because a record becomes closed to its own
 # holder at the instant it becomes terminal and not before.
 #

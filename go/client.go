@@ -108,8 +108,7 @@ type Client interface {
 // It binds only what THIS process does at submission. A record carries no
 // executor, so a supervisor sweeping a shared store still adopts the job as an
 // orphan once the submitter dies. Making the choice durable needs a field on
-// the record, which is a contract change in three languages:
-// feedback/2026-09-08-vis23.md.
+// the record, which is a contract change in three languages.
 type Execution string
 
 const (
@@ -631,7 +630,7 @@ func (s *client) clearLastError(id string) {
 // supervisor sweeping a shared store still finds this job as an orphan if this
 // process dies mid-transfer, and nothing in the record tells it not to. That
 // wants a spec that can say "this sink is local to the submitter", which is a
-// contract change and is written up in feedback/2026-09-05-python-service.md.
+// contract change in three languages and has not been made.
 func boundHere(spec Spec) bool { return !relativeEverywhere(spec.Sink.Final) }
 
 // couldDeliverHere reports whether a supervisor could write a sink only this

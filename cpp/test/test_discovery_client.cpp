@@ -185,7 +185,11 @@ private:
     void open() {
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        if (path_.size() >= sizeof(addr.sun_path)) std::abort();
+        if (path_.size() >= sizeof(addr.sun_path)) {
+            std::printf("endpoint path is %zu bytes, sun_path holds %zu: %s\n", path_.size(),
+                        sizeof(addr.sun_path), path_.c_str());
+            std::abort();
+        }
         std::memcpy(addr.sun_path, path_.c_str(), path_.size());
         fs::create_directories(fs::path(path_).parent_path());
         ::chmod(fs::path(path_).parent_path().c_str(), 0700);
@@ -234,11 +238,16 @@ public:
         const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
+#ifdef _WIN32
         root_ = fs::temp_directory_path() / ("abstraction-disco-" + std::to_string(stamp));
+#else
+        // sun_path holds 104 bytes and the per-user TMPDIR macOS reports is 49
+        // of them before a name is added, so temp_directory_path() cannot hold
+        // an endpoint path here. /tmp is the only POSIX location short enough.
+        root_ = fs::path("/tmp") / ("ad-" + std::to_string(stamp));
+#endif
         fs::create_directories(root_);
 #ifndef _WIN32
-        // Keep the socket path inside the 104-byte cap and away from whatever
-        // else is on the machine.
         ::setenv("XDG_RUNTIME_DIR", root_.string().c_str(), 1);
 #endif
     }

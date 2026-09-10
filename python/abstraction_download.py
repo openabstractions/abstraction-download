@@ -412,7 +412,7 @@ def permanent(exc: BaseException) -> bool:
 # import name `py`, which belongs to somebody else on PyPI. It is the authority
 # this module is checked against instead -- test_abstraction_download.py runs
 # both over the same corpus and refuses a byte of difference.
-FAILURE_EXTENSION = "download.failure/v1"
+FAILURE_EXTENSION = "abstraction.download/failure@1"
 
 
 def _set_failure(rec: Record, exc: BaseException) -> None:
@@ -2516,7 +2516,7 @@ class Client:
 
     Ids rather than handles, and jobs() a snapshot rather than a live
     collection: Go's Client returns a job.Job and a job.Subscription, and the
-    Python job layer has neither. See feedback/2026-09-05-python-service.md.
+    Python job layer has neither.
     """
 
     def __init__(self, store: Store, runner: Optional[Runner] = None):
@@ -2525,8 +2525,7 @@ class Client:
         # The threads this process started. There is no Close on a Client in
         # either language -- submitting starts work on nothing anybody can join
         # -- and a test that walks away from a transfer leaves it writing into a
-        # directory the test is deleting. Kept so a test can settle; see
-        # feedback/2026-09-05-python-service.md.
+        # directory the test is deleting. Kept so a test can settle.
         self._workers: List[threading.Thread] = []
 
     def get(self, source: str, destination: str = "") -> str:
@@ -2701,8 +2700,7 @@ class Client:
 
         It is not the whole fence. A supervisor sweeping a shared store still
         finds this job as an orphan if this process dies mid-transfer, and
-        nothing in the record tells it not to. See
-        feedback/2026-09-05-python-service.md.
+        nothing in the record tells it not to.
         """
         self._clear_last_error(job_id)
         bound_here = not _relative_everywhere(spec.sink.final)

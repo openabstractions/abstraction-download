@@ -103,15 +103,10 @@ func (s *diedAfter) Update(id string, epoch int64, mutate func(*job.Record) erro
 // actually better on and the one nothing here measured.
 //
 // Every other number the project owns is bytes per second, and on that axis
-// wget is faster. Against the field at 8 GiB, killed a third of the way in, dl
-// re-fetched 11.6 MB where curl, wget and aria2c re-fetched all 3.22 GB that
-// remained, and an aria2c tuned to save its control file every second still
-// wasted 26 times what we did —
-// research/downloader-bench/2026-09-07-against-the-field.txt. A number that
-// good and never measured is a number that can rot unnoticed, and this one had
-// already started to: it found a killed transfer resuming from zero on a fast
-// link, because the progress callback the checkpoint hangs off was throttled by
-// time alone. See reportEvery in fetchers.go.
+// wget is faster. An advantage nothing tests is one that can rot unnoticed, and
+// this one had already started to: this test found a killed transfer resuming
+// from zero on a fast link, because the progress callback the checkpoint hangs
+// off was throttled by time alone. See reportEvery in fetchers.go.
 //
 // Waste is what the origin served beyond the size of the artifact. It is
 // bounded by how far a transfer may run ahead of its last checkpoint, so it is

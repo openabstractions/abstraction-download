@@ -696,7 +696,7 @@ class ClientTest(unittest.TestCase):
         # is still releasing its lease at that point. Windows will not remove a
         # directory a thread still has a file open in, so the temp directory
         # cleanup failed about one run in three. There is no Close on a Client
-        # to do this properly -- see feedback/2026-09-05-python-service.md.
+        # to do this properly.
         self.addCleanup(
             lambda: [t.join(timeout=30) for t in self.svc._workers]
         )
@@ -737,7 +737,7 @@ class ClientTest(unittest.TestCase):
         # Waited out rather than abandoned: the service starts work in a thread
         # nothing can stop, so a test that walks away leaves it writing into a
         # directory the test is deleting. There is no Close on a Client, in
-        # either language -- see feedback/2026-09-05-python-service.md.
+        # either language.
         self.svc.deliver(first, timeout=30)
 
     def test_a_finished_download_does_not_block_a_fresh_one(self):
@@ -758,7 +758,7 @@ class ClientTest(unittest.TestCase):
         # Waited out rather than abandoned: the service starts work in a thread
         # nothing can stop, so a test that walks away leaves it writing into a
         # directory the test is deleting. There is no Close on a Client, in
-        # either language -- see feedback/2026-09-05-python-service.md.
+        # either language.
         self.svc.deliver(second, timeout=30)
 
     def test_delivered_bytes_are_not_fetched_again(self):

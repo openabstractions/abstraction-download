@@ -360,7 +360,7 @@ var (
 //
 // The remaining gap, which this does not close: Poll, Start and Finalize can
 // hang the same way, and there the caller is a supervisor rather than a window,
-// so the answer is a deadline on the transport (research/plugins/CONTRACT.md).
+// so the answer is a deadline on the transport.
 func probe(t Tier, cfg config.Config) (Delegator, error) {
 	probesMu.Lock()
 	if probing[t.Name] {

@@ -16,7 +16,7 @@ import (
 // os.SameFile is the standard library's answer and it compares volume serial
 // and file id, which is where the answer actually lives — Python spells it
 // os.path.samefile, C++17 spells it std::filesystem::equivalent, Java spells it
-// Files.isSameFile. See download/CONTRACT.md, "Two paths, one file".
+// Files.isSameFile. See ../CONTRACT.md, "Two paths, one file".
 //
 // A destination usually does not exist yet, which those four cannot answer. Its
 // PARENT does, so the parent is settled the same way and the final component is

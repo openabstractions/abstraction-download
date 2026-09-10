@@ -17,7 +17,7 @@ import (
 // answers "no service" — Nudge and Who return ErrNoSupervisor and the work runs
 // in the calling process — because a client that starts a helper it could not
 // find has quietly become its own provider, which is the thing SLF4J does not
-// do (VISION.md 2026-09-10 "Three kinds of package").
+// do.
 // TestAClientThatFoundNoServiceDidNotStartOne is where that boundary is kept.
 //
 // It is idempotent, and the platform decides that rather than this code: the
@@ -102,9 +102,8 @@ func StartSupervisor(s Starting) (Started, error) {
 
 	// Waiting on the child is a wait on something: a supervisor that dies
 	// before it listens says so at once and names its log, instead of being
-	// indistinguishable from a slow one until a timeout expires. This used to
-	// be a fixed sleep after a kill, which stood in for a notification nobody
-	// had wired up (research/bus206/RESULTS.md § 1.6).
+	// indistinguishable from a slow one until a timeout expires. A fixed sleep
+	// after a kill would stand in for a notification nobody had wired up.
 	gone := make(chan error, 1)
 	go func() { gone <- cmd.Wait() }()
 

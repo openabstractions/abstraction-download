@@ -214,8 +214,8 @@ func TestARecordMayNotCarryAResolvedHeader(t *testing.T) {
 
 // What a reader does with a record written before this split: the attributes
 // are attributes, and none of them are sent. Nothing this project ever wrote
-// put a header in there — the audit is in feedback/2026-09-06-attrs-headers.md
-// — so the old shape loses nothing by being read the new way.
+// put a header in there, so the old shape loses nothing by being read the new
+// way.
 func TestAnOldRecordsAttributesAreNotSent(t *testing.T) {
 	const old = `{"artifact":{"size":4},"sources":[{"scheme":"https","locator":"https://example.invalid/x",
 	  "attrs":{"store":"ollama","X-Legacy":"whatever-this-was"}}],"sink":{"final":"models/x.gguf"}}`

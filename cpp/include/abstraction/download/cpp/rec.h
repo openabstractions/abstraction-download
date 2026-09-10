@@ -132,7 +132,7 @@ inline void esc(std::string& out, const std::string& s) {
     out += '"';
 }
 
-inline const std::vector<std::string> kFailureNames = {"download.failure/v1"};
+inline const std::vector<std::string> kFailureNames = {"abstraction.download/failure@1"};
 
 struct Failure {
     std::string error;

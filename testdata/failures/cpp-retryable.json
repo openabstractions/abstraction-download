@@ -1,7 +1,7 @@
 {
   "content": [
     "abstraction.job/base@1",
-    "download.failure/v1"
+    "abstraction.download/failure@1"
   ],
   "critical": [
     "abstraction.job/base@1"
@@ -41,7 +41,7 @@
   },
   "error": "download: digest mismatch: got sha256:fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108, want sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "extensions": {
-    "download.failure/v1": {
+    "abstraction.download/failure@1": {
       "error": "download: digest mismatch: got sha256:fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108, want sha256:0000000000000000000000000000000000000000000000000000000000000000"
     }
   },

@@ -15,7 +15,7 @@ import (
 // go/v0.1.0 tag and half by this tree, and this asks whether this code still
 // makes the same thing of all of them. It is the half of the question a test in
 // this module can answer; the other half — whether v0.1.0 still reads what we
-// write now — needs v0.1.0 running, and lives in research/wire-compat.
+// write now — needs the v0.1.0 reader running and cannot be asked from here.
 func TestRecordCorpus(t *testing.T) {
 	dir := filepath.Join("..", "testdata", "records")
 	for _, want := range readExpectations(t, filepath.Join(dir, "expect.txt")) {

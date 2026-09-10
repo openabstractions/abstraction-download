@@ -27,8 +27,7 @@ namespace fs = std::filesystem;
 // `validators` is written even when it says nothing. Go's encoder emits it
 // unconditionally, the field is compared byte for byte across languages, and one
 // state spelled two ways is a record that churns against itself. Two of the
-// three implementations therefore carry an empty object forever; see
-// feedback/2026-09-06-cpp-runner.md.
+// three implementations therefore carry an empty object forever.
 void set_prefix_checkpoint(job::Record& r, std::int64_t prefix, const Validators& v) {
     job::Json seen = job::Json::object();
     if (!v.etag.empty()) {

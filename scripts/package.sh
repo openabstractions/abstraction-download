@@ -3,11 +3,11 @@
 # never on the manifest. On 2026-09-09 all five Python wheels built with a
 # six-line METADATA — licence declared, licence text absent, no README —
 # while every pyproject.toml said license = "Apache-2.0"
-# (research/pkg157/RESULTS.md). A manifest is a promise; the archive is the
+# A manifest is a promise; the archive is the
 # package, and only opening it shows what a stranger receives.
 #
 # The contract is one list; each ecosystem spells it its own way
-# (research/pkg157/RESULTS.md §2 has the table and what was rejected):
+#
 #
 #   licence text    Apache-2.0 §4(a) binds every recipient who redistributes
 #                   to hand the licence on; a package without it leaves them
@@ -31,7 +31,7 @@
 #   it imports      Python only. A dependency list is a promise and opening the
 #                   archive cannot read it: every check above passed a wheel
 #                   that raised ModuleNotFoundError on import
-#                   (research/red186/RESULTS.md). The publish workflow cannot
+#                   The publish workflow cannot
 #                   answer this — on a first batch every sibling a wheel
 #                   declares is in that same batch and on no index. Here they
 #                   are built together, so pip resolves the declared graph out
@@ -104,7 +104,7 @@ SETUPTOOLS=""
 [ -n "$PY" ] && SETUPTOOLS=$("$PY" -c 'import setuptools; print(setuptools.__version__)' 2>/dev/null || true)
 # ensurepip dominates the cost of a venv and the import pass below builds one
 # per package; pip 22.3's --python installs into a venv built without one
-# (research/imp188/RESULTS.md). Probed against pip's own help, because a pip
+# Probed against pip's own help, because a pip
 # that does not know the option must not be mistaken for a wheel whose
 # dependencies do not resolve.
 PIP_TARGETS_A_VENV=""
@@ -311,7 +311,7 @@ while IFS=' ' read -r repo short; do
         # A limit of the filesystem is not a package failing its contract. The
         # egg-info sits about ninety characters below the build directory, so on
         # Windows it is the first path to cross MAX_PATH and the longest package
-        # name breaks first (research/red186/RESULTS.md §9, research/whl214).
+        # name breaks first.
         # A bare WinError 3 stays a FAIL: a missing path is not only ever this.
         case "$why" in
             *"WinError 206"*|*"path longer than allowed"*|*egg-info*dependency_links.txt*)

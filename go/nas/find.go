@@ -45,8 +45,7 @@ type Found struct {
 // work here: Synology Assistant's UDP 9999 broadcast got no reply from a DS218+
 // two metres away, on three payloads and both broadcast addresses. What did
 // answer, measured 2026-09-07, was an SSDP M-SEARCH on 239.255.255.250:1900 and
-// an mDNS PTR for _smb._tcp on 224.0.0.251:5353 — see
-// research/nas-discovery/RESULTS.txt.
+// an mDNS PTR for _smb._tcp on 224.0.0.251:5353.
 func Find(ctx context.Context) []Found {
 	var mu sync.Mutex
 	seen := map[string]*Found{}

@@ -7,7 +7,7 @@
 #
 # The date is an IMF-fixdate, which is the one spelling RFC 9110 requires a
 # server to send. What the three do with the obsolete spellings is NOT compared
-# here and they do not agree; see feedback/2026-09-06-wire-gaps.md.
+# here, and they do not agree.
 submit A size=64 digest=good src=http:modified
 claim A alpha 5000
 stage A 40 stale

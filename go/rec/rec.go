@@ -187,7 +187,7 @@ func esc(out []byte, s string) []byte {
 	return append(out, '"')
 }
 
-var FailureNames = []string{"download.failure/v1"}
+var FailureNames = []string{"abstraction.download/failure@1"}
 
 type Failure struct {
 	Error     string

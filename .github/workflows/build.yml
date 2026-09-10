@@ -148,8 +148,8 @@ jobs:
           repository: openabstractions/abstraction-watch
           path: abstraction-watch
 
-      # The file list, not a build file. research/truth92 measured this exact
-      # route under g++ and MSVC; the published CMakeLists.txt was dropped
+      # The file list, not a build file. This exact route was measured by hand
+      # under g++ and MSVC; the published CMakeLists.txt was dropped
       # because it fetched a dependency these sources no longer use.
       #
       # fetchers.cpp compiles everywhere and registers an https fetcher only
@@ -208,7 +208,7 @@ jobs:
           {
             printf '\n### UNPROVEN\n\nThis workflow builds what this repository contains, and nothing else. It ran none of:\n\n'
             printf -- '- the cross-language conformance harnesses, which compare bytes across all three languages and live in the private tree\n'
-            printf -- '- MSVC. The c++ job takes whichever of g++ or clang++ is on PATH; research/truth92 measured MSVC by hand and this does not re-measure it\n'
+            printf -- '- MSVC. The c++ job takes whichever of g++ or clang++ is on PATH, and this does not re-measure MSVC\n'
             printf -- '- any real transfer. Nothing here reaches a network, so no https fetcher is exercised on any platform\n'
             printf -- '- delegation to a real BITS, launchd or NAS tier, and no signed or installed artefact\n'
             printf -- '- the siblings at any pinned revision. python and c++ take job, cas and watch at their default branch, so this is a statement about today.\n'
