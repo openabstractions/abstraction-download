@@ -39,11 +39,11 @@
 # would be inventing the other half.
 #
 # name                  class      by
-go-permanent            permanent  download/go, ErrNoFetcher
-go-retryable            retryable  download/go, ErrDigestMismatch
-python-permanent        permanent  download/python, NoSource
-python-retryable        retryable  download/python, DigestMismatch
-cpp-permanent           permanent  download/cpp, Error(permanent)
-cpp-retryable           retryable  download/cpp, Error(not permanent)
+go-permanent            permanent  abstraction-download/go, ErrNoFetcher
+go-retryable            retryable  abstraction-download/go, ErrDigestMismatch
+python-permanent        permanent  abstraction-download/python, NoSource
+python-retryable        retryable  abstraction-download/python, DigestMismatch
+cpp-permanent           permanent  abstraction-download/cpp, Error(permanent)
+cpp-retryable           retryable  abstraction-download/cpp, Error(not permanent)
 legacy-no-key           retryable  go/v0.1.0, before the key existed
 forged-unknown-field    retryable  forged: a payload from a newer writer

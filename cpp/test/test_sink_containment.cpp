@@ -1,5 +1,5 @@
-// The same cases as download/go/containment_test.go and
-// download/python/test_abstraction_download.py, deliberately. A record one
+// The same cases as abstraction-download/go/containment_test.go and
+// abstraction-download/python/test_abstraction_download.py, deliberately. A record one
 // implementation refuses and another acts on is worse than either behaviour on
 // its own, and this side reads records it does not run — so agreeing about the
 // refusal is the only thing it can contribute.
@@ -64,8 +64,8 @@ static void test_sink_may_not_escape_the_store_root() {
 }
 
 // Spelled out in full, because Go and Python must print this same string: see
-// download/go/containment_test.go and
-// download/python/test_abstraction_download.py. It names the path FROM THE
+// abstraction-download/go/containment_test.go and
+// abstraction-download/python/test_abstraction_download.py. It names the path FROM THE
 // RECORD, not the one it resolved to, so a caller can find the field it got
 // wrong.
 static void test_refusal_names_the_path_from_the_record() {

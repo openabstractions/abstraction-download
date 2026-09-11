@@ -18,7 +18,7 @@
 //
 // WHAT THIS FILE CANNOT SAY, and therefore what stays hand-written beside the
 // generated code: which of this layer's errors are refusals. That is a property
-// of each error where it is DEFINED — see download/CONTRACT.md § Two endings —
+// of each error where it is DEFINED — see abstraction-download/CONTRACT.md § Two endings —
 // and a list of them here would be the fourth copy of the list that already
 // disagreed across two languages.
 

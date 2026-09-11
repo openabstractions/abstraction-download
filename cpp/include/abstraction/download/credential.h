@@ -15,7 +15,7 @@ namespace download {
 // comma-separated list each covering its subdomains. Neither is read from the
 // record or the store, because a shared store is written by whoever can write
 // it, and a record that chose the host would otherwise choose where the
-// owner's token goes. Same rule as download/go/credentials.go.
+// owner's token goes. Same rule as abstraction-download/go/credentials.go.
 
 inline const char* const kCredentialAttr = "credential";
 inline const char* const kCredentialHeaderAttr = "credential_header";

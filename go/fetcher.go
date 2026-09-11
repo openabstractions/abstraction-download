@@ -261,7 +261,7 @@ var (
 // this function consults, because the list is the part that drifts: this layer
 // kept one here and one in Python, they disagreed by a row for as long as both
 // existed, and neither language could see it because each only ever read its
-// own. See download/CONTRACT.md § Two endings.
+// own. See abstraction-download/CONTRACT.md § Two endings.
 type permanent struct{ error }
 
 func forever(text string) error { return permanent{errors.New(text)} }

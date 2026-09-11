@@ -46,8 +46,8 @@ download still arrives, and Chromium settles it the same way in
 obeying that sentence and no scenario existed to notice; Python still obeyed it,
 and lost a download that was going to succeed on every retry, because nothing
 about the record changed between them. Proven in
-`download/go/runner_test.go` `TestRestartsWhenServerIgnoresRange`,
-`download/python/test_abstraction_download.py`
+`abstraction-download/go/runner_test.go` `TestRestartsWhenServerIgnoresRange`,
+`abstraction-download/python/test_abstraction_download.py`
 `test_restarts_at_zero_when_a_server_ignores_range`, and across all three in
 [`wire-ignored-range`](testdata/scenarios/wire-ignored-range.txt).
 
@@ -55,7 +55,7 @@ about the record changed between them. Proven in
 half-open; an HTTP byte range is inclusive at both ends (RFC 9110 §14.1.2). So
 `[40, 48)` goes out as `bytes=40-47`, and `bytes 40-47/64` comes back as
 `[40, 48)` — eight bytes, spelled two ways. The divergence is declared, with
-what it costs, in [`job/CONTRACT.md`](https://github.com/openabstractions/abstraction-job/blob/main/CONTRACT.md).
+what it costs, in [`abstraction-job/CONTRACT.md`](https://github.com/openabstractions/abstraction-job/blob/main/CONTRACT.md).
 
 **A 206 is an answer to this request only if it names the offset the next byte
 goes at** [DL-R7]. One rule, and it settles four questions that had four answers. A
@@ -423,7 +423,7 @@ letting silence read as conformance.
 **And every rule on this page carries a tag a scenario cites**, so the harness
 can print the rules nothing exercises rather than leaving them to be discovered
 by whoever happens to write that scenario. The convention is one paragraph in
-[`job/CONTRACT.md`](https://github.com/openabstractions/abstraction-job/blob/main/CONTRACT.md#every-invariant-carries-a-name); the count is
+[`abstraction-job/CONTRACT.md`](https://github.com/openabstractions/abstraction-job/blob/main/CONTRACT.md#every-invariant-carries-a-name); the count is
 printed by every run.
 
 **A resume says which version it is continuing** [DL-V1]. A bare `Range` names no file,
@@ -611,12 +611,12 @@ remote store as a `job` file store — a UNC path, a mapped drive, a mounted
 share — submits a record into it, and reads that record back. The delegate is a
 supervisor sweeping the same directory through its own filesystem. Neither side
 opens a connection to the other, and no message format exists beyond the record
-the `job` layer already defines. Verified in `download/go/nas/nas.go`, which
+the `job` layer already defines. Verified in `abstraction-download/go/nas/nas.go`, which
 imports `os`, `path`, `path/filepath` and the two layers, and reaches the far
 side only through `job.Store`.
 
 Two things in the same package are **not** on this channel and are configuration
-rather than transport. `Find` (`download/go/nas/find.go`) sends SSDP and mDNS
+rather than transport. `Find` (`abstraction-download/go/nas/find.go`) sends SSDP and mDNS
 multicast to look for a host that might hold a store, and `Check` writes and
 re-reads one probe byte to prove the share is writable; both run when a person
 is choosing a store, carry no job and no record, and a configured delegate never
@@ -691,7 +691,7 @@ them on this page rather than in a defect:
 - The delegate is a `job` file store binding at the same root, holding byte 0 of
   `<id>.json.lock` for every write and staging through a temporary file it
   renames. A delegate that locks differently passes its own tests and loses
-  updates against ours; `cas/README.md` § *What a fourth implementation must do*
+  updates against ours; `abstraction-cas/README.md` § *What a fourth implementation must do*
   is the agreement.
 - `transferred` is the delegate's last state. The requester writes `complete`
   when it has taken delivery, and a delegate that acknowledges its own work
@@ -719,7 +719,7 @@ to acknowledge or abandon; the delegate claims it, checkpoints it and ends it.
 The lease and its epoch are what make one writer authoritative at a time, and
 they are the whole of the mutual exclusion here — the file lock underneath them
 is not shared, because a byte-range lock taken over SMB and a `flock` taken on
-the server's own volume do not meet. Measured in `cas/README.md`: writers on two
+the server's own volume do not meet. Measured in `abstraction-cas/README.md`: writers on two
 hosts on one file lost or refused 147–149 of 2150 updates across three runs,
 while six writers in three languages on one host lost none of 1800. `job`'s own
 page states the consequence — a record written from two hosts needs a protocol
@@ -1103,7 +1103,7 @@ a shell as one byte, where until 2026-09-08 it did not survive at all. `dl` and
 A command-line conformance corpus cannot be written against that.
 
 **The status is the class, never the cause** [DL-E9]. These are the three
-answers of [`job/SPEC.md` § 6](https://github.com/openabstractions/abstraction-job/blob/main/SPEC.md), plus the two a command line needs.
+answers of [`abstraction-job/SPEC.md` § 6](https://github.com/openabstractions/abstraction-job/blob/main/SPEC.md), plus the two a command line needs.
 
 | status | name | § 6 answer | what the caller should do |
 |---|---|---|---|
@@ -1205,7 +1205,7 @@ bytes rather than the submitter's. Whitespace is the record writer's choice and
 is compacted away here; escapes and number spellings are not, and are compared.
 
 `scripts/verdict-conformance.sh` feeds every file in
-`download/testdata/verdicts/` to every registered implementation in both modes
+`abstraction-download/testdata/verdicts/` to every registered implementation in both modes
 and compares the verdict — accepted, refused, or neither — rather than the
 output. It takes `SPECREAD_CPP` and `SPECREAD_EXTRA` exactly as
 `spec-conformance.sh` does. **That corpus only grows**: any input that has ever
@@ -1234,7 +1234,7 @@ everything else.
 ## Tested
 
 ```bash
-cd download/go && go test ./...
+cd go && go test ./...
 ```
 
 19 tests. The transfer path: resume from a partial; discarding an unproven tail;

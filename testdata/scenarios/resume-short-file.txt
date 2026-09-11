@@ -7,7 +7,7 @@
 # verified anyway is the 40 GB this layer exists not to fetch twice.
 #
 # Go and C++ deleted the file and refused until 2026-09-06, Python did what
-# download/README.md's first guarantee says, and the two texts contradicted each
+# abstraction-download/README.md's first guarantee says, and the two texts contradicted each
 # other in writing for as long as both existed. Every other scenario was green
 # throughout: a harness that compares implementations to each other can see a
 # disagreement about this rule and cannot see the rule.

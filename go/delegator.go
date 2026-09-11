@@ -603,7 +603,7 @@ func (d *Delegators) Close() error {
 // The identity of the far side's error does not cross and is not meant to. What
 // crosses is its class and its words, which is what a successor acts on.
 //
-// The shape is download/download.thrift's, so the bytes are the generated
+// The shape is abstraction-download/download.thrift's, so the bytes are the generated
 // codec's in every language rather than each language's own JSON writer.
 type Failure rec.Failure
 

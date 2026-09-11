@@ -35,7 +35,7 @@
 // # Why this lives in its own library and not in abstraction::job
 //
 // The contract says discovery belongs to the download layer and that nothing in
-// `job` may depend on it, so this lives under download/cpp as
+// `job` may depend on it, so this lives under abstraction-download/cpp as
 // `abstraction::discovery`, in a separate target that `abstraction_job` does
 // not link and that does not link `abstraction_job`. The dependency the
 // contract forbids therefore cannot be formed by accident.

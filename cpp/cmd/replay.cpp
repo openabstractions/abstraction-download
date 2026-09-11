@@ -48,7 +48,7 @@ using abstraction::job::FileStore;
 using abstraction::job::Json;
 using abstraction::job::Record;
 
-// Where download/testdata/fixture.py is listening, or "" when the harness
+// Where abstraction-download/testdata/fixture.py is listening, or "" when the harness
 // started no server. A driver that cannot reach one must not claim the wire
 // capability: a scenario nobody ran is counted as unproven, and a scenario
 // silently skipped reads as a pass.

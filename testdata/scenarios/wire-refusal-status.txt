@@ -1,6 +1,6 @@
 # requires: wire
 #
-# download/README.md § Two endings lists ten statuses as "the source refused",
+# abstraction-download/README.md § Two endings lists ten statuses as "the source refused",
 # and records that Go and Python disagreed about four of them for as long as
 # both existed because no test in this repository compares one implementation's
 # classification of a status against another's. This is that test. Each of these

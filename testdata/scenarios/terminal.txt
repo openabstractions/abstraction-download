@@ -4,7 +4,7 @@
 # finished work, and an implementation that lets one operation through here is
 # one that can resurrect a cancelled job.
 #
-# job/README.md: "complete, failed and cancelled are terminal: no claim, no
+# abstraction-job/README.md: "complete, failed and cancelled are terminal: no claim, no
 # update, no intent." Claim and intent were refused by all three. The update was
 # refused by none of them, and neither was `release`, which every implementation
 # builds on update: step 6 wrote progress onto a record the same page calls

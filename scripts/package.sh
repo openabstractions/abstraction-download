@@ -65,6 +65,14 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = --help ] || { [ ! -f "$ROOT/scripts/split.manifest" ] && [ "$#" = 0 ]; }; then
+    printf '%s\n' 'Usage: sh scripts/package.sh --artifact FILE' 'Check a built wheel, sdist or Go module zip; no publication.'
+    exit 0
+fi
+if [ ! -f "$ROOT/scripts/split.manifest" ] && [ "${1:-}" != --artifact ]; then
+    printf '%s\n' 'This checkout supports --artifact FILE only; aggregate builds require the maintainer source.' >&2
+    exit 2
+fi
 cd "$ROOT"
 ORG="${ABSTRACTION_ORG:-openabstractions}"
 SPLIT="${ABSTRACTION_SPLIT:-$ROOT/.split}"
@@ -269,7 +277,7 @@ if [ -d "$SPLIT" ]; then
     printf 'state: HEAD %s; .split generated %s minute(s) ago by scripts/split.sh; python %s setuptools %s; cmake %s\n\n' \
         "$COMMIT" "$split_age" "${PY:-none}" "${SETUPTOOLS:-none}" "${CMAKE:-none}"
 else
-    printf 'state: HEAD %s; no .split — run scripts/split.sh first; python %s; cmake %s\n\n' "$COMMIT" "${PY:-none}" "${CMAKE:-none}"
+    printf 'state: HEAD %s; no .split — run sh scripts/oa.sh split first; python %s; cmake %s\n\n' "$COMMIT" "${PY:-none}" "${CMAKE:-none}"
 fi
 
 # ---- Python -------------------------------------------------------------------
@@ -290,7 +298,7 @@ while IFS=' ' read -r repo short; do
     [ -n "$repo" ] || continue
     src="$SPLIT/$repo/python"
     if [ ! -f "$src/pyproject.toml" ]; then
-        record UNPROVEN "$repo: $src/pyproject.toml is not there — run scripts/split.sh, the wheel is built from the published image"
+        record UNPROVEN "$repo: $src/pyproject.toml is not there — run sh scripts/oa.sh split, the wheel is built from the published image"
         continue
     fi
     if [ -z "$PY" ] || [ -z "$SETUPTOOLS" ] || [ "${SETUPTOOLS%%.*}" -lt 77 ]; then
@@ -424,7 +432,7 @@ for repo in abstraction-download abstraction-job abstraction-storage abstraction
     name="abstraction_${repo#abstraction-}"
     src="$SPLIT/$repo/cpp"
     if [ ! -f "$src/CMakeLists.txt" ]; then
-        record UNPROVEN "$repo cpp: $src/CMakeLists.txt is not there — run scripts/split.sh"
+        record UNPROVEN "$repo cpp: $src/CMakeLists.txt is not there — run sh scripts/oa.sh split"
         continue
     fi
     if [ -z "$CMAKE" ]; then

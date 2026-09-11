@@ -52,7 +52,7 @@ type replay struct {
 	out     *bufio.Writer
 }
 
-// fixture is where download/testdata/fixture.py is listening, or "" when the
+// fixture is where abstraction-download/testdata/fixture.py is listening, or "" when the
 // harness started no server. A driver that cannot reach one must not claim the
 // wire capability: a scenario nobody ran is counted as unproven, and a scenario
 // silently skipped reads as a pass.

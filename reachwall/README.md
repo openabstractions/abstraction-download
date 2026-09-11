@@ -1,6 +1,6 @@
 # reachwall — the refused list, in the platform's own packet filter
 
-`Refusals` (`download/go/reach.go`) is a file of hosts this machine will not
+`Refusals` (`abstraction-download/go/reach.go`) is a file of hosts this machine will not
 reach, each with a reason. The runner refuses them for every program that asks
 its seat. This compiles the same file into rules the platform enforces on
 programs that never asked: Windows Firewall, or nftables. The reason stays in

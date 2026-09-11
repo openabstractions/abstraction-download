@@ -1,5 +1,5 @@
-// The same cases as download/go/credentials_test.go and
-// download/python/test_abstraction_download.py, deliberately: a record naming
+// The same cases as abstraction-download/go/credentials_test.go and
+// abstraction-download/python/test_abstraction_download.py, deliberately: a record naming
 // credential "hf" with a locator the owner never chose must not receive the
 // owner's token, and the bound host must.
 

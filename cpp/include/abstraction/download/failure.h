@@ -5,7 +5,7 @@
 // runner to resume. Locally that is a dynamic_cast; across a process, a
 // provider or a language it is nothing at all, because `error` is prose and a
 // sentence is not a class. So the class travels beside the sentence, in the
-// shape download/download.thrift declares and the generated codec writes.
+// shape abstraction-download/download.thrift declares and the generated codec writes.
 
 #ifndef ABSTRACTION_DOWNLOAD_FAILURE_H
 #define ABSTRACTION_DOWNLOAD_FAILURE_H

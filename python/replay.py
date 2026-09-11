@@ -41,7 +41,7 @@ STATES = (PENDING, RUNNING, TRANSFERRED, COMPLETE, FAILED, CANCELLED)
 
 
 def fixture():
-    """Where download/testdata/fixture.py is listening, or "" when the harness
+    """Where abstraction-download/testdata/fixture.py is listening, or "" when the harness
     started no server. A driver that cannot reach one must not claim the wire
     capability: a scenario nobody ran is counted as unproven, and a scenario
     silently skipped reads as a pass."""

@@ -154,7 +154,7 @@ inline bool folds_together(const std::filesystem::path& dir, std::string x, std:
 // next. std::filesystem::equivalent is the standard library's answer and it
 // compares device and inode, or volume serial and file id, which is where the
 // answer actually lives — Go spells it os.SameFile, Python spells it
-// os.path.samefile, Java spells it Files.isSameFile. See download/CONTRACT.md,
+// os.path.samefile, Java spells it Files.isSameFile. See abstraction-download/CONTRACT.md,
 // "Two paths, one file".
 //
 // A destination usually does not exist yet, which those four cannot answer. Its

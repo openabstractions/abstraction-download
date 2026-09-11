@@ -130,7 +130,7 @@ std::int64_t content_range_start(const std::string& header) {
 // The artifact's full length out of a `Content-Range`, and 0 when the server
 // wrote `*`, which it is entitled to do. `bytes 40-63/*` once threw out of
 // std::stoll through a path nothing was catching; a one-word header crashed a
-// downloader. See download/testdata/scenarios/wire-unknown-total.txt.
+// downloader. See abstraction-download/testdata/scenarios/wire-unknown-total.txt.
 std::int64_t content_range_total(const std::string& header) {
     const std::size_t slash = header.find('/');
     if (slash == std::string::npos) {
@@ -278,13 +278,13 @@ std::wstring header_line(const std::map<std::string, std::string>& headers) {
 }
 
 // Is this status the source saying no, as against the transport having a bad
-// moment? download/README.md § Two endings, and it is LISTED, not ranged: this
+// moment? abstraction-download/README.md § Two endings, and it is LISTED, not ranged: this
 // was `status >= 400 && status < 500` with two holes cut in it, so 409, 423 and
 // 425 — somebody else's lock, and a request that arrived too early — ended jobs
 // that would have worked on the next sweep. An unrecognised 4xx is "not now",
 // because being wrong that way costs a retry and being wrong the other way
 // costs the download. Found by
-// download/testdata/scenarios/wire-notnow-status.txt.
+// abstraction-download/testdata/scenarios/wire-notnow-status.txt.
 bool refused(DWORD status) {
     switch (status) {
         case 400: case 401: case 402: case 403: case 404:

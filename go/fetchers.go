@@ -304,7 +304,7 @@ func (h HTTP) Ranged(ctx context.Context, src Source, headers map[string]string)
 
 // refused reports whether a status is the source saying no, as against the
 // transport having a bad moment. See Permanent: the first ends the job, the
-// second leaves it adoptable, and download/CONTRACT.md § Two endings is the list
+// second leaves it adoptable, and abstraction-download/CONTRACT.md § Two endings is the list
 // every implementation answers to.
 //
 // Listed rather than ranged, because the two mistakes do not cost the same: an
@@ -335,7 +335,7 @@ func answered(locator string, resp *http.Response) error {
 // Fetch used to call answered directly, so every non-200 was permanent and the
 // list this file spends thirty lines justifying was consulted by nobody on the
 // path that downloads. A 503 ended the job. Found by
-// download/testdata/scenarios/wire-notnow-status.txt.
+// abstraction-download/testdata/scenarios/wire-notnow-status.txt.
 func statusError(locator string, resp *http.Response) error {
 	if refused(resp.StatusCode) {
 		return answered(locator, resp)

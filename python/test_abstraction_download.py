@@ -19,10 +19,10 @@ import unittest
 # would defeat the point: this must run against the SAME record implementation
 # the Go tests interoperate with.
 sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "job", "python")
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "abstraction-job", "python")
 )
 sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "watch", "python")
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "abstraction-watch", "python")
 )
 
 from abstraction_job import FileStore, Record, TRANSFERRED, COMPLETE, FAILED
@@ -436,7 +436,7 @@ class DownloadTest(unittest.TestCase):
 
     # -- containment ------------------------------------------------------
     #
-    # The same cases as download/go/containment_test.go, deliberately. A record
+    # The same cases as abstraction-download/go/containment_test.go, deliberately. A record
     # one implementation refuses and another acts on is worse than either
     # behaviour on its own.
 
@@ -474,8 +474,8 @@ class DownloadTest(unittest.TestCase):
 
     def test_refusal_names_the_path_from_the_record(self):
         """Spelled out in full, because Go and C++ must print this same string:
-        see download/go/containment_test.go and
-        download/cpp/test/test_sink_containment.cpp."""
+        see abstraction-download/go/containment_test.go and
+        abstraction-download/cpp/test/test_sink_containment.cpp."""
         with self.assertRaises(dl.EscapesRoot) as caught:
             dl._resolve_under("C:\\store\\jobs", "../../../Users/victim/.ssh/authorized_keys")
         self.assertEqual(
@@ -1655,7 +1655,7 @@ class FailureCorpus(unittest.TestCase):
         """The shipped module against the generated reader of the same
         definition.
 
-        py/rec.py is generated from download/download.thrift and is NOT in the
+        py/rec.py is generated from abstraction-download/download.thrift and is NOT in the
         wheel -- ``py-modules`` ships one file, and adding the generated one
         would claim the top-level import name ``py``, which belongs to somebody
         else on PyPI. So it is the authority rather than the implementation, and
