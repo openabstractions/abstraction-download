@@ -355,10 +355,10 @@ void test_https_availability_is_told_truthfully() {
 // Only when somebody points it at a real URL. A test that reaches the network on
 // every run is a test everyone learns to ignore when the network is down.
 void test_a_live_https_fetch() {
-    const char* url = std::getenv("A\\TRACTION_LIVE_URL");
-    const char* want = std::getenv("A\\TRACTION_LIVE_DIGEST");
+    const char* url = std::getenv("ABSTRACTION_LIVE_URL");
+    const char* want = std::getenv("ABSTRACTION_LIVE_DIGEST");
     if (url == nullptr || want == nullptr) {
-        std::printf("[skip] live https — set A\\TRACTION_LIVE_URL and A\\TRACTION_LIVE_DIGEST\n");
+        std::printf("[skip] live https — set ABSTRACTION_LIVE_URL and ABSTRACTION_LIVE_DIGEST\n");
         return;
     }
     Scratch s;

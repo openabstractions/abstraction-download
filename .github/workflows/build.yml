@@ -176,7 +176,6 @@ jobs:
           cmake --build build --config Release --parallel 2
           # Optional live HTTPS remains out of this isolated regression job.
           unset ABSTRACTION_LIVE_URL ABSTRACTION_LIVE_DIGEST
-          unset 'A\TRACTION_LIVE_URL' 'A\TRACTION_LIVE_DIGEST'
           ctest --test-dir build -C Release --output-on-failure --no-tests=error --timeout 30 | tee ctest.txt
           {
             printf '%s: CMake Release build and CTest, including DiscoveryClient and LocalStream with pinned public siblings\n' "$RUNNER_OS"
