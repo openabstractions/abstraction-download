@@ -4,3 +4,6 @@
 # no diff shows.
 testdata/** text eol=lf
 *.json text eol=lf
+
+# Malformed input fixtures are exact bytes, including intentional CRLF.
+testdata/verdicts/** -text
