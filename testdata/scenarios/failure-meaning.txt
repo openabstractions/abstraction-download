@@ -24,10 +24,10 @@ submit C size=64 digest=good src=file
 run C gamma
 failure C
 
-# expect 2: transfer-failed state=failed ...
+# expect 2: transfer-failed state=failed ... [DL-E2]
 # expect 2: content=abstraction.job/base@1,abstraction.job/terminal@1,abstraction.download/failure@1 ... [DL-E16]
 # expect 3: ok class=permanent [DL-E16]
-# expect 5: transfer-failed state=pending ...
+# expect 5: transfer-failed state=pending ... [DL-E1]
 # expect 5: content=abstraction.job/base@1,abstraction.download/failure@1 ... [DL-E16]
 # expect 6: ok class=retryable [DL-E16]
 # expect 8: content=abstraction.job/base@1 ... [DL-E16]

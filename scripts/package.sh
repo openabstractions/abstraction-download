@@ -50,7 +50,7 @@
 #            command builds that zip from the published repository, adding
 #            the repository's root LICENSE unasked; no checkout here can
 #            reproduce it, so it is checked where it exists.
-#   C++      cmake --install of .split/<repo>/cpp into scratch, for the four
+#   C++      cmake --install of .split/<repo>/cpp into scratch, for the five
 #            layers that carry a project() of their own.
 #
 #   scripts/package.sh                   every language
@@ -66,7 +66,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = --help ] || { [ ! -f "$ROOT/scripts/split.manifest" ] && [ "$#" = 0 ]; }; then
-    printf '%s\n' 'Usage: sh scripts/package.sh --artifact FILE' 'Check a built wheel, sdist or Go module zip; no publication.'
+    printf '%s\n' 'Usage: sh scripts/package.sh [python go cpp] | --artifact FILE' 'Maintainer source: build selected package kinds (default: all) from .split and remote tags.' 'Published checkout: --artifact checks one built wheel, sdist or Go module zip. No publication.'
     exit 0
 fi
 if [ ! -f "$ROOT/scripts/split.manifest" ] && [ "${1:-}" != --artifact ]; then
@@ -434,8 +434,7 @@ fi
 
 if want cpp; then
 printf '\n\033[1mC++ — cmake --install of the published layer, into scratch\033[0m\n'
-record ABSENT "abstraction-cas cpp: no CMakeLists.txt is published (split.manifest drops it) — the repository is the package; nothing to install"
-for repo in abstraction-download abstraction-job abstraction-storage abstraction-watch; do
+for repo in abstraction-cas abstraction-download abstraction-job abstraction-storage abstraction-watch; do
     name="abstraction_${repo#abstraction-}"
     src="$SPLIT/$repo/cpp"
     if [ ! -f "$src/CMakeLists.txt" ]; then
