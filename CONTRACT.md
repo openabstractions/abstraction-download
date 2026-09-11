@@ -297,7 +297,9 @@ it means does not depend on a service being up** [DL-E16]. It rides in
 `extensions["abstraction.download/failure@1"]`, and that payload is defined
 once, in [download.thrift](download.thrift), as `error` and `permanent` —
 `permanent` written only when it is true, so a *not now* is the shorter
-document. The key is spelled as a content name because it is one: it appears in
+document. A valid payload establishes failure presence even when its `error`
+text and the record's diagnostic are empty; diagnostic text does not determine
+the presence or class of a failure. The key is spelled as a content name because it is one: it appears in
 `content` for exactly as long as the payload does, and a driver's `--models`
 roster names it like any other name its implementation writes. Four
 consequences, and none of them optional:

@@ -831,7 +831,7 @@ const (
 // to write one, so the crash-and-resume case — the case this project exists for
 // — is adopted as fast as it always was.
 func RetryAfter(rec *job.Record) time.Time {
-	if rec.Error == "" {
+	if LastFailure(rec) == nil {
 		return time.Time{}
 	}
 	wait := RetryDelay

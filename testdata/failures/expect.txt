@@ -47,3 +47,5 @@ cpp-permanent           permanent  abstraction-download/cpp, Error(permanent)
 cpp-retryable           retryable  abstraction-download/cpp, Error(not permanent)
 legacy-no-key           retryable  go/v0.1.0, before the key existed
 forged-unknown-field    retryable  forged: a payload from a newer writer
+empty-retryable retryable synthetic: valid empty diagnostic regression
+empty-permanent permanent synthetic: valid empty diagnostic regression

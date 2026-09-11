@@ -66,17 +66,15 @@ inline void clear_failure(job::Record& r) {
 // an unknown field rather than granting it, so an unreadable class and an
 // absent one are one answer and neither is a guess.
 inline std::optional<Error> last_failure(const job::Record& r) {
-    if (r.error.empty()) {
-        return std::nullopt;
-    }
     if (r.extensions.contains(failure_extension())) {
         try {
             const rec::Failure f = rec::decode(r.extensions.at(failure_extension()).dump());
-            if (!f.error.empty()) {
-                return Error(f.error, f.permanent);
-            }
+            return Error(f.error, f.permanent);
         } catch (const rec::Refusal&) {
         }
+    }
+    if (r.error.empty()) {
+        return std::nullopt;
     }
     return Error(r.error, false);
 }

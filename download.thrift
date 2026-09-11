@@ -82,9 +82,9 @@ const list<string> failure_names = ["abstraction.download/failure@1"]
 // unknown_fields = "refuse" rather than "grant". `grant` skips and drops, which
 // is right where a stranger extends a document we carry; nobody extends this
 // one, the key above is its version, and refusing makes an unreadable payload
-// behave exactly like an absent payload — a failed job that is still adoptable,
-// which is what every reader did before this key existed. See
-// CONTRACT.md [DL-F5].
+// behave like an absent class: the record's diagnostic remains an unclassed
+// failure. Claimability is determined by the job state, not this payload. See
+// CONTRACT.md [DL-E16]. A present Failure remains a failure when error is empty.
 struct Failure {
   1: required string error
   2: optional bool permanent (omit = "zero")

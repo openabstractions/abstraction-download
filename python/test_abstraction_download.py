@@ -701,6 +701,38 @@ class ClientTest(unittest.TestCase):
             lambda: [t.join(timeout=30) for t in self.svc._workers]
         )
 
+    def test_delivery_and_retry_keep_failure_presence(self):
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                jid = dl.submit(self.store, dl.Spec(
+                    sources=[dl.Source(scheme="file", locator="unused")],
+                    sink=dl.Sink(final=os.path.join(self.dir.name, str(terminal)+".bin"))))
+                held = self.store.claim(jid, self.svc.runner.owner, 30)
+                def fail(rec):
+                    dl._set_failure(rec, dl.Permanent("") if terminal else dl.DownloadError(""))
+                    rec.state = FAILED if terminal else "pending"
+                self.store.update(jid, held.lease.epoch, fail)
+                if not terminal:
+                    self.store.release(jid, held.lease.epoch)
+                with self.assertRaises(dl.DownloadError) as caught:
+                    self.svc.deliver(jid, timeout=1)
+                self.assertEqual(str(caught.exception), "")
+                self.assertEqual(dl.permanent(caught.exception), terminal)
+                if not terminal:
+                    self.svc._clear_last_error(jid)
+                    rec = self.store.load(jid)
+                    self.assertIsNone(dl.last_failure(rec))
+                    self.assertEqual(dl.retry_after(rec), 0.0)
+
+    def test_failed_without_readable_failure_is_not_success(self):
+        jid = dl.submit(self.store, dl.Spec(
+            sources=[dl.Source(scheme="file", locator="unused")],
+            sink=dl.Sink(final=os.path.join(self.dir.name, "missing-failure.bin"))))
+        held = self.store.claim(jid, self.svc.runner.owner, 30)
+        self.store.update(jid, held.lease.epoch, lambda rec: setattr(rec, "state", FAILED))
+        with self.assertRaises(dl.DownloadError):
+            self.svc.deliver(jid, timeout=1)
+
     def serve_bytes(self, n=64 * 1024):
         body, digest = payload(n)
         srv, url = serve(body)
@@ -1636,6 +1668,19 @@ class FailureCorpus(unittest.TestCase):
     about every refusal this layer declares forever, and a job that stays
     adoptable is fetched again on every sweep for as long as the store exists.
     """
+
+    def test_empty_failure_keeps_presence_and_class(self):
+        for original in (Exception(""), dl.Permanent("")):
+            with open(os.path.join(CORPUS, "go-permanent.json"), "rb") as f:
+                rec = Record.from_json(f.read())
+            dl._set_failure(rec, original)
+            restored = dl.last_failure(rec)
+            self.assertIsNotNone(restored)
+            self.assertEqual(str(restored), "")
+            self.assertEqual(dl.permanent(restored), dl.permanent(original))
+            self.assertGreater(dl.retry_after(rec), rec.updated_at.timestamp())
+            dl._clear_failure(rec)
+            self.assertIsNone(dl.last_failure(rec))
 
     def test_a_failure_from_any_language_keeps_its_class(self):
         for name, want in corpus().items():

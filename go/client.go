@@ -191,10 +191,13 @@ func (s *client) Deliver(ctx context.Context, id string) (*job.Record, error) {
 			}
 			return s.runner.Store.Load(id)
 		case rec.State == job.StateFailed:
-			return rec, LastFailure(rec)
+			if failure := LastFailure(rec); failure != nil {
+				return rec, failure
+			}
+			return rec, errors.New("download: job failed without a readable failure")
 		case rec.State.Terminal():
 			return rec, nil
-		case rec.Error != "" && s.runner.Store.Claimable(rec):
+		case LastFailure(rec) != nil && s.runner.Store.Claimable(rec):
 			// An attempt that failed and let go of the job. Not terminal — the
 			// partial is still there and a successor will resume it — but it is
 			// the end of THIS request.
@@ -603,7 +606,7 @@ func (s *client) noExecutor() error {
 // outcome is the current one.
 func (s *client) clearLastError(id string) {
 	rec, err := s.runner.Store.Load(id)
-	if err != nil || rec.Error == "" {
+	if err != nil || LastFailure(rec) == nil {
 		return
 	}
 	held, err := s.runner.Store.Claim(id, s.runner.Owner, s.runner.LeaseTTL)

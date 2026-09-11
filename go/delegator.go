@@ -627,7 +627,7 @@ func DecodeFailure(b []byte) (*Failure, error) {
 
 // Err rebuilds the error on this side, class intact.
 func (f *Failure) Err() error {
-	if f == nil || f.Error == "" {
+	if f == nil {
 		return nil
 	}
 	if f.Permanent {
@@ -1091,7 +1091,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			// writing there makes all three wrong to gain a line jobd already
 			// prints from what Reconcile returns. A delegate that tried and
 			// failed is the opposite, and keeps its reason.
-			if st.Err != "" {
+			if st.State == DelegateFailed || st.Err != "" {
 				return setFailure(rr, (&Failure{Error: st.Err, Permanent: st.Permanent}).Err())
 			}
 			return nil

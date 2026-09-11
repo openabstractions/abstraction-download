@@ -68,6 +68,15 @@ int main(int argc, char** argv) {
         return 2;
     }
     const fs::path dir = argv[1];
+    for (bool permanent : {false, true}) {
+        Record r;
+        abstraction::download::set_failure(r, abstraction::download::Error("", permanent));
+        auto restored = last_failure(r);
+        check("empty failure keeps presence and class", restored.has_value() &&
+              std::string(restored->what()).empty() && restored->permanent() == permanent);
+        abstraction::download::clear_failure(r);
+        check("cleared failure is absent", !last_failure(r).has_value());
+    }
     const auto want = corpus(dir);
     check("the corpus table names at least one record", !want.empty());
 

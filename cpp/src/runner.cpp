@@ -505,6 +505,7 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
     };
 
     std::string last_error;
+    bool has_failure = false;
     bool last_permanent = false;
     bool served = false;
 
@@ -516,9 +517,10 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
             // A source that says no does not speak for a mirror that merely
             // dropped the connection, so a retryable failure anywhere in the
             // list outranks a refusal that happened to come last.
-            if (last_error.empty() || last_permanent) {
+            if (!has_failure || last_permanent) {
                 last_error = why;
                 last_permanent = true;
+                has_failure = true;
             }
             continue;
         }
@@ -527,6 +529,7 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
             // Not permanent: a record naming a plain host runs here unchanged.
             last_error = why;
             last_permanent = false;
+            has_failure = true;
             continue;
         }
         if (reach && !host.empty()) {
@@ -534,6 +537,7 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
                 // Not permanent: the refusal is this machine's, not the job's.
                 last_error = "download: this machine will not reach " + host + ": " + why;
                 last_permanent = false;
+                has_failure = true;
                 continue;
             }
         }
@@ -545,6 +549,7 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
         if (!unbound.empty()) {
             last_error = unbound;
             last_permanent = false;
+            has_failure = true;
             continue;
         }
         req.from = base;
@@ -574,17 +579,18 @@ Runner::Transferred Runner::transfer(const job::Record& rec, const Spec& spec, s
                 keep_proven(rec.id, epoch, base + landed, seen);
                 throw;
             }
-            if (last_error.empty() || last_permanent || !e.permanent()) {
+            if (!has_failure || last_permanent || !e.permanent()) {
                 last_error = e.what();
                 last_permanent = e.permanent();
+                has_failure = true;
             }
         }
     }
 
     out.flush();
     if (!served) {
-        throw Error(last_error.empty() ? "download: no fetcher for this job's sources" : last_error,
-                    last_error.empty() ? true : last_permanent);
+        throw Error(has_failure ? last_error : "download: no fetcher for this job's sources",
+                    has_failure ? last_permanent : true);
     }
     out.close();
     return Transferred{base + landed, hash.digest(), seen};

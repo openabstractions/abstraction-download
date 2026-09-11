@@ -1,14 +1,43 @@
 package download
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
 )
+
+func TestEmptyFailureKeepsPresenceAndClass(t *testing.T) {
+	for _, original := range []error{errors.New(""), permanent{errors.New("")}} {
+		wire, err := DecodeFailure(EncodeFailure(FailureOf(original)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := wire.Err(); got == nil || got.Error() != "" || Permanent(got) != Permanent(original) {
+			t.Fatalf("delegated empty failure lost presence or class: %#v", got)
+		}
+		r := &job.Record{}
+		if err := setFailure(r, original); err != nil {
+			t.Fatal(err)
+		}
+		if got := LastFailure(r); got == nil || got.Error() != "" || Permanent(got) != Permanent(original) {
+			t.Fatalf("local empty failure lost presence or class: %#v", got)
+		}
+		if RetryAfter(r).IsZero() {
+			t.Fatal("empty failure bypassed retry delay")
+		}
+		clearFailure(r)
+		if LastFailure(r) != nil {
+			t.Fatal("cleared failure is still present")
+		}
+	}
+}
 
 // The corpus and what each record must still MEAN, read off the table that
 // ships beside it rather than restated here: a second copy of the answers is a
@@ -196,5 +225,101 @@ func TestTheCorpusTableNamesEveryRecordInTheDirectory(t *testing.T) {
 		if _, err := os.Stat(filepath.Join("..", "testdata", "failures", name+".json")); err != nil {
 			t.Errorf("expect.txt names %s and the directory does not carry it", name)
 		}
+	}
+}
+
+func TestDeliverPreservesEmptyFailure(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "retryable", true: "permanent"}[terminal], func(t *testing.T) {
+			runner, store, root := newRunner(t)
+			id := submit(t, store, root, "", 0, Source{Scheme: "file", Locator: "unused"})
+			held, err := store.Claim(id, runner.Owner, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Update(id, held.Lease.Epoch, func(r *job.Record) error {
+				r.State = job.StatePending
+				var failure error = errors.New("")
+				if terminal {
+					failure = permanent{failure}
+					r.State = job.StateFailed
+				}
+				return setFailure(r, failure)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !terminal {
+				if err := store.Release(id, held.Lease.Epoch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err = NewClient(runner).Deliver(ctx, id)
+			if err == nil || err.Error() != "" || Permanent(err) != terminal {
+				t.Fatalf("delivery lost failure: %v", err)
+			}
+			if !terminal {
+				NewClient(runner).(*client).clearLastError(id)
+				rec, err := store.Load(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if LastFailure(rec) != nil || !RetryAfter(rec).IsZero() {
+					t.Fatal("retry retained the previous failure")
+				}
+			}
+		})
+	}
+}
+
+type failedStatusDelegate struct {
+	*fakeDelegate
+	status Status
+}
+
+func (d *failedStatusDelegate) Poll(context.Context, string) (Status, error) { return d.status, nil }
+func TestReconcilePreservesEmptyFailure(t *testing.T) {
+	for _, permanent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "retryable", true: "permanent"}[permanent], func(t *testing.T) {
+			body, digest := payload(t, 16)
+			runner, store, delegate, root := newDelegatingRunner(t, body)
+			d := &failedStatusDelegate{fakeDelegate: delegate, status: Status{State: DelegateFailed, Permanent: permanent}}
+			runner.Delegators = NewDelegators(d)
+			id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: "https://example.invalid/model"})
+			if err := runner.Delegate(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			if err := runner.Reconcile(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			rec, err := store.Load(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure := LastFailure(rec)
+			if failure == nil || failure.Error() != "" || Permanent(failure) != permanent {
+				t.Fatalf("delegation lost failure: %v", failure)
+			}
+		})
+	}
+}
+
+func TestDeliverFailedWithoutReadableFailureIsNotSuccess(t *testing.T) {
+	runner, store, root := newRunner(t)
+	id := submit(t, store, root, "", 0, Source{Scheme: "file", Locator: "unused"})
+	held, err := store.Claim(id, runner.Owner, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update(id, held.Lease.Epoch, func(r *job.Record) error { r.State = job.StateFailed; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := NewClient(runner).Deliver(ctx, id); err == nil {
+		t.Fatal("failed record reported success")
 	}
 }

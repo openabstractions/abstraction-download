@@ -4,6 +4,7 @@
 // honours what somebody asked before it moves a byte.
 
 #include <abstraction/download/runner.h>
+#include <abstraction/download/failure.h>
 #include <abstraction/download/sink.h>
 #include <abstraction/job/ranges.h>
 #include <abstraction/job/store.h>
@@ -109,6 +110,28 @@ bool ran(Runner& runner, const std::string& id) {
     } catch (const std::exception&) {
         return false;
     }
+}
+
+void test_empty_retryable_failure_stays_retryable() {
+    class EmptyFailure : public abstraction::download::Fetcher {
+    public:
+        std::vector<std::string> schemes() const override { return {"empty"}; }
+        std::vector<std::string> capabilities() const override { return {}; }
+        abstraction::download::Result fetch(const abstraction::download::Request&) override {
+            throw abstraction::download::Error("", false);
+        }
+    };
+    Scratch scratch;
+    FileStore store(scratch.root());
+    Runner runner(store, "empty-failure-test");
+    runner.fetchers.add(std::make_shared<EmptyFailure>());
+    const auto submitted = submit(store, "empty", "local", "", 0, "empty.bin");
+    check("empty failure makes the attempt fail", !ran(runner, submitted.id));
+    const auto record = store.load(submitted.id);
+    const auto failure = abstraction::download::last_failure(record);
+    check("empty retryable failure does not become terminal",
+          record.state != abstraction::job::state::kFailed && failure &&
+          !failure->permanent() && std::string(failure->what()).empty());
 }
 
 void test_sha256_matches_the_published_vectors() {
@@ -417,6 +440,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     test_sha256_matches_the_published_vectors();
+    test_empty_retryable_failure_stays_retryable();
     test_a_transfer_ends_transferred_and_proven();
     test_wrong_bytes_are_refused_and_not_kept();
     test_a_scheme_nobody_serves_ends_the_job();

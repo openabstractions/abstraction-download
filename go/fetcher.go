@@ -333,13 +333,16 @@ func clearFailure(rr *job.Record) {
 // unknown field rather than granting it: an unreadable class and an absent one
 // are the same answer, and one of them is a diagnostic somebody can act on.
 func LastFailure(r *job.Record) error {
-	if r == nil || r.Error == "" {
+	if r == nil {
 		return nil
 	}
 	if raw, ok := r.Extensions[FailureExtension]; ok {
-		if f, err := DecodeFailure(raw); err == nil && f.Error != "" {
+		if f, err := DecodeFailure(raw); err == nil {
 			return f.Err()
 		}
+	}
+	if r.Error == "" {
+		return nil
 	}
 	return errors.New(r.Error)
 }
