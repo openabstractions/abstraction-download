@@ -25,7 +25,12 @@ import (
 func endpoint(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {
-		return filepath.Join(t.TempDir(), "bus")
+		dir, err := os.MkdirTemp("/tmp", "dl-bus-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		return filepath.Join(dir, "bus")
 	}
 	return fmt.Sprintf(`\\.\pipe\jobs-test-%d-%s`, os.Getpid(), t.Name())
 }
@@ -34,6 +39,7 @@ func endpoint(t *testing.T) string {
 // heartbeat the way jobd names it.
 func announce(t *testing.T, store job.Store, owner, tier string) *Bus {
 	t.Helper()
+	requireProgramBus(t)
 	b, err := ListenBus(endpoint(t), owner, func() string { return tier })
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +49,47 @@ func announce(t *testing.T, store job.Store, owner, tier string) *Bus {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func requireProgramBus(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("UNPROVEN successful bus calls: current Darwin transport cannot meet Program proof; XPC is planned. TestDarwinBusRefusesBeforeServing verifies refusal")
+	}
+}
+
+// A stale announcement need not create a live service first. This keeps
+// absence/store-only behavior covered even where successful IPC is UNPROVEN.
+func announceAbsent(t *testing.T, store job.Store) string {
+	t.Helper()
+	at := endpoint(t)
+	if err := Heartbeat(store, "jobd@test:1", "here", at, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+func TestDarwinBusRefusesBeforeServing(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin transport proof ceiling")
+	}
+	at := endpoint(t)
+	called := false
+	b, err := ListenBus(at, "jobd@test:1", func() string { called = true; return "here" })
+	if b != nil {
+		b.Close()
+		t.Fatal("unsupported bus started")
+	}
+	if !errors.Is(err, identity.ErrNotProven) {
+		t.Fatalf("expected proof refusal, got %v", err)
+	}
+	if called {
+		t.Fatal("refused bus consulted provider")
+	}
+	if _, err := os.Stat(at); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("listener created: %v", err)
+	}
+	t.Log("UNPROVEN successful Darwin bus calls; startup refusal verified")
 }
 
 // N1. The name is the same in another process. Everything the service work
@@ -85,6 +132,7 @@ func TestTheEndpointThisProcessWouldListenAt(t *testing.T) {
 // N2. One holder per name. Two supervisors sharing an address would each hear
 // half the callers, and neither could say so.
 func TestASecondSupervisorAtOneNameIsRefused(t *testing.T) {
+	requireProgramBus(t)
 	at := endpoint(t)
 	first, err := ListenBus(at, "jobd@test:1", func() string { return "here" })
 	if err != nil {
@@ -137,7 +185,11 @@ func TestABusWithNoNameRefusesToListen(t *testing.T) {
 		b.Close()
 		t.Fatal("a bus with no name listened")
 	}
-	if !errors.Is(err, ErrNoName) {
+	want := ErrNoName
+	if runtime.GOOS == "darwin" {
+		want = identity.ErrNotProven
+	}
+	if !errors.Is(err, want) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -202,11 +254,9 @@ func (unbound) Bind() (*identity.Binding, error) { return nil, identity.ErrNoBin
 // B4. A caller the kernel cannot name is refused on every op, is told why, and
 // wakes nothing.
 func TestACallerTheKernelCannotNameIsRefused(t *testing.T) {
-	b, err := ListenBus(endpoint(t), "jobd@test:1", func() string { return "here" })
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
+	// The handler must refuse before consulting any provider. No successful
+	// listener or lowered identity requirement is needed for this control.
+	b := &Bus{looks: make(chan struct{}, 1)}
 	for _, op := range []string{"look", "who"} {
 		server, client := net.Pipe()
 		go b.serve(unbound{server})
@@ -247,8 +297,7 @@ func TestNothingAnnouncedIsNoSupervisor(t *testing.T) {
 // B6. A heartbeat outlives the process that wrote it; an endpoint does not.
 func TestAnAnnouncedBusNobodyServesIsNoSupervisor(t *testing.T) {
 	_, store, _ := newRunner(t)
-	b := announce(t, store, "jobd@test:1", "here")
-	b.Close()
+	announceAbsent(t, store)
 	if err := Nudge(store); !errors.Is(err, ErrNoSupervisor) {
 		t.Fatalf("a dead bus answered: %v", err)
 	}
@@ -267,7 +316,7 @@ func TestASupervisorWithoutABusIsReachedThroughTheStore(t *testing.T) {
 	if err := Nudge(store); !errors.Is(err, ErrNoBus) {
 		t.Fatalf("no endpoint: %v", err)
 	}
-	announce(t, store, "jobd@test:1", "here")
+	announceAbsent(t, store)
 	rewriteHeartbeat(t, store, func(s *Supervisor) { s.Host = "a-machine-that-is-not-this-one" })
 	if err := Nudge(store); !errors.Is(err, ErrNoBus) {
 		t.Fatalf("another host: %v", err)
@@ -285,8 +334,7 @@ func failingSpec() Spec {
 // announced supervisor does not answer is worked here.
 func TestASubmitIsWorkedHereWhenTheAnnouncedSupervisorDoesNotAnswer(t *testing.T) {
 	_, store, _ := newRunner(t)
-	b := announce(t, store, "jobd@test:1", "here")
-	b.Close()
+	announceAbsent(t, store)
 	svc := NewClient(NewRunner(store, "app"))
 	h, err := svc.Submit(failingSpec())
 	if err != nil {

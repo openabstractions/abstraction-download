@@ -86,11 +86,11 @@ func TestADelegatedFinaliseOutlastsItsOwnLease(t *testing.T) {
 	}
 
 	r := NewRunner(store, "test-runner")
-	// Thirty seconds against a forty-gigabyte copy, scaled so a test can run it
-	// in real time. Nothing here is injected: the reproduction is that real time
-	// passes while an owner does honest work.
-	r.LeaseTTL = 300 * time.Millisecond
-	r.Delegators = NewDelegators(&slowFinalise{body: body, take: 1200 * time.Millisecond})
+	// Keep four full lease periods of real work, but allow filesystem renewal
+	// latency on hosted runners. The old 300ms lease could expire during one
+	// scheduling/filesystem pause, testing machine load instead of renewal.
+	r.LeaseTTL = 2 * time.Second
+	r.Delegators = NewDelegators(&slowFinalise{body: body, take: 4 * r.LeaseTTL})
 
 	if err := r.Delegate(context.Background(), id); err != nil {
 		t.Fatalf("delegate: %v", err)

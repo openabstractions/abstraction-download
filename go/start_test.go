@@ -23,9 +23,7 @@ import (
 // is exactly one address to look at afterwards.
 func TestAClientThatFoundNoServiceDidNotStartOne(t *testing.T) {
 	_, store, _ := newRunner(t)
-	b := announce(t, store, "jobd@test:1", "here")
-	at := b.Endpoint
-	b.Close()
+	at := announceAbsent(t, store)
 
 	if err := Nudge(store); !errors.Is(err, ErrNoSupervisor) {
 		t.Fatalf("Nudge answered %v, not absence", err)
