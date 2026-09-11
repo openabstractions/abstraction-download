@@ -130,24 +130,31 @@ int main() {
     }
     check("all 256 byte values sent unchanged", received == payload);
     {
-        Listener server([](Native peer) {
-            char request; read_bytes(peer, &request, 1);
-            std::this_thread::sleep_for(60ms);
-            write_bytes(peer, "a");
-            std::this_thread::sleep_for(70ms);
-            write_bytes(peer, "b");
-            std::this_thread::sleep_for(70ms);
+        // No deliberate delay competes with connection setup or the first read.
+        // Start the delayed phase only after the client has received its control
+        // byte. The next read begins near the original deadline: a fresh budget
+        // per read would receive b/c, whereas the connection budget must expire.
+        const auto start = Clock::now();
+        Listener server([start](Native peer) {
+            char request;
+            if (!read_bytes(peer, &request, 1)) return;
+            if (!write_bytes(peer, "a")) return;
+            if (!read_bytes(peer, &request, 1)) return;
+            std::this_thread::sleep_until(start + 600ms);
+            if (!write_bytes(peer, "b")) return;
+            std::this_thread::sleep_until(start + 650ms);
             write_bytes(peer, "c");
         });
-        auto start = Clock::now();
-        Stream client(server.path, start + 120ms);
+        Stream client(server.path, start + 500ms);
         check("deadline request", client.write_all("!"));
         char part; std::size_t n = 0;
-        check("first read before deadline", client.read_some(&part, 1, n) && part == 'a');
+        check("control byte received before delayed phase", client.read_some(&part, 1, n) && part == 'a');
+        check("acknowledge control byte", client.write_all("!"));
+        std::this_thread::sleep_until(start + 400ms);
         std::string later;
         while (later.size() < 2 && client.read_some(&part, 1, n)) later.push_back(part);
         check("delayed bytes cannot renew original deadline", later.size() < 2 && n == 0 && client.status() == Status::timeout);
-        check("timeout stays bounded", Clock::now() - start < 1s);
+        check("timeout stays bounded", Clock::now() - start < 2s);
     }
     {
         Listener server([](Native) { std::this_thread::sleep_for(150ms); });

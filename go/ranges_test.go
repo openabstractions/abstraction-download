@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -71,18 +72,10 @@ func stageSparse(t *testing.T, store job.Store, id string, body []byte, proven .
 		t.Fatal(err)
 	}
 
-	const ttl = 100 * time.Millisecond
-	held, err := store.Claim(id, "dead-owner", ttl)
-	if err != nil {
-		t.Fatalf("stage claim: %v", err)
-	}
-	if _, err := store.Update(id, held.Lease.Epoch, func(rr *job.Record) error {
+	stageAbandonedProgress(t, store, id, "dead-owner", func(rr *job.Record) error {
 		rr.Progress.Done = rs.Total()
 		return setCheckpoint(rr, Checkpoint{Verified: rs})
-	}); err != nil {
-		t.Fatalf("stage progress: %v", err)
-	}
-	time.Sleep(ttl + 50*time.Millisecond) // let the lease lapse, as a crash would
+	})
 
 	rec, err := store.Load(id)
 	if err != nil {
@@ -94,6 +87,37 @@ func stageSparse(t *testing.T, store job.Store, id string, body []byte, proven .
 	}
 	if !cp.Verified.Equal(rs) {
 		t.Fatalf("staging did not take: checkpoint holds %v, want %v", cp.Verified, rs)
+	}
+}
+
+// Range continuation tests need an abandoned checkpoint, not a race between
+// filesystem setup and a 100ms lease. Stage under a normal lease, then persist
+// an expired lease while retaining the dead owner's epoch and running state.
+// Actual timed renewal/expiry behavior is covered by the keeper tests.
+func stageAbandonedProgress(t *testing.T, store job.Store, id, owner string, progress func(*job.Record) error) {
+	t.Helper()
+	held, err := store.Claim(id, owner, time.Minute)
+	if err != nil {
+		t.Fatalf("stage claim: %v", err)
+	}
+	if _, err := store.Update(id, held.Lease.Epoch, func(rr *job.Record) error {
+		if err := progress(rr); err != nil {
+			return err
+		}
+		rr.Lease.ExpiresAt = job.At(time.Now().Add(-time.Second))
+		return nil
+	}); err != nil {
+		t.Fatalf("stage progress: %v", err)
+	}
+	rec, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Lease.Owner != owner || rec.Lease.Epoch != held.Lease.Epoch || rec.State != job.StateRunning || !store.Claimable(rec) {
+		t.Fatalf("fixture is not an abandoned running checkpoint: %+v", rec)
+	}
+	if _, err := store.Update(id, held.Lease.Epoch, func(*job.Record) error { return nil }); !errors.Is(err, job.ErrLeaseExpiry) {
+		t.Fatalf("abandoned owner was not fenced: %v", err)
 	}
 }
 
@@ -256,19 +280,11 @@ func TestPrefixOnlyRecordReadsAndContinues(t *testing.T) {
 	if err := os.WriteFile(partialOf(t, store, id), body[:proven], 0o644); err != nil {
 		t.Fatal(err)
 	}
-	const ttl = 100 * time.Millisecond
-	held, err := store.Claim(id, "prefix-only-writer", ttl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update(id, held.Lease.Epoch, func(rr *job.Record) error {
+	stageAbandonedProgress(t, store, id, "prefix-only-writer", func(rr *job.Record) error {
 		rr.Progress.Done = proven
 		rr.Checkpoint = []byte(`{"verified_prefix":8192}`)
 		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(ttl + 50*time.Millisecond)
+	})
 
 	rec, err := store.Load(id)
 	if err != nil {
