@@ -48,6 +48,17 @@ macro(abstraction_need name)
 endmacro()
 
 abstraction_need(job)
+# IPC has its own package even when built from the identity sibling source.
+if(NOT TARGET abstraction::ipc)
+    find_package(abstraction_ipc CONFIG QUIET)
+endif()
+if(NOT TARGET abstraction::ipc AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../abstraction-identity/cpp/CMakeLists.txt")
+    add_subdirectory(../../abstraction-identity/cpp abstraction_ipc-build)
+endif()
+if(NOT TARGET abstraction::ipc)
+    message(FATAL_ERROR "abstraction_ipc not found: install it or provide the abstraction-identity sibling")
+endif()
+set_property(GLOBAL APPEND PROPERTY ABSTRACTION_PACKAGE_DEPS abstraction_ipc)
 
 # What a download job is, and where its bytes may NOT land: header-only and
 # dependency-free, the string rules a reader needs in order to say the same
@@ -74,7 +85,7 @@ target_include_directories(abstraction_discovery PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(abstraction_discovery PUBLIC abstraction::json)
+target_link_libraries(abstraction_discovery PUBLIC abstraction::json abstraction::ipc)
 target_compile_features(abstraction_discovery PUBLIC cxx_std_17)
 set_target_properties(abstraction_discovery PROPERTIES EXPORT_NAME discovery)
 add_library(abstraction::discovery ALIAS abstraction_discovery)
@@ -114,6 +125,11 @@ if(ABSTRACTION_BUILD_TESTS)
     add_executable(test_discovery_client test/test_discovery_client.cpp)
     target_link_libraries(test_discovery_client PRIVATE abstraction_discovery Threads::Threads)
     add_test(NAME DiscoveryClient COMMAND test_discovery_client)
+    add_executable(test_local_stream test/test_local_stream.cpp)
+    target_link_libraries(test_local_stream PRIVATE Threads::Threads abstraction::ipc)
+    target_compile_features(test_local_stream PRIVATE cxx_std_17)
+    add_test(NAME LocalStream COMMAND test_local_stream)
+    set_tests_properties(DiscoveryClient LocalStream PROPERTIES TIMEOUT 10)
 
     add_executable(test_sink_containment test/test_sink_containment.cpp)
     target_link_libraries(test_sink_containment PRIVATE abstraction_download)

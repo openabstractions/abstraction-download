@@ -175,6 +175,12 @@ sources that satisfies reach `cas` and `watch` in turn, so that build needs
 [`abstraction-watch`](https://github.com/openabstractions/abstraction-watch):
 either installed already and on `CMAKE_PREFIX_PATH`, or cloned beside this
 repository, in which case they are compiled in and travel in this package.
+Discovery also requires the shared client byte runtime from
+[`abstraction-identity`](https://github.com/openabstractions/abstraction-identity):
+install its `cpp` CMake package `abstraction_ipc` on `CMAKE_PREFIX_PATH`, or
+clone it beside this repository. Discovery links its `abstraction::ipc` target;
+this dependency supplies client transport, not a C++ identity service.
+
 Nothing is fetched while CMake configures — a build that reaches the network is
 a dependency you did not choose, and handing you one would be the thing this
 layer exists to stop.

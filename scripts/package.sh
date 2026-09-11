@@ -118,6 +118,13 @@ SETUPTOOLS=""
 PIP_TARGETS_A_VENV=""
 [ -n "$PY" ] && "$PY" -m pip --help 2>/dev/null | grep -q -- '--python' && PIP_TARGETS_A_VENV=yes
 
+# Optional compiler choices from the gate; leave the caller's defaults alone
+# when these are absent. SDK PATH/INCLUDE/LIB remain inherited.
+cpp_cmake() (
+    [ "${ABSTRACTION_CPP_CC+x}" != x ] || export CC="$ABSTRACTION_CPP_CC"
+    [ "${ABSTRACTION_CPP_CXX+x}" != x ] || export CXX="$ABSTRACTION_CPP_CXX"
+    "$CMAKE" "$@"
+)
 CMAKE="${ABSTRACTION_CMAKE:-$(command -v cmake 2>/dev/null || true)}"
 for c in "/c/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" \
          "/c/Program Files/CMake/bin/cmake.exe"; do
@@ -440,15 +447,15 @@ for repo in abstraction-download abstraction-job abstraction-storage abstraction
         continue
     fi
     b="$WORK/cpp-$repo"
-    if ! "$CMAKE" -S "$src" -B "$b/build" -DABSTRACTION_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release > "$b.configure.log" 2>&1; then
+    if ! cpp_cmake -S "$src" -B "$b/build" -DABSTRACTION_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release > "$b.configure.log" 2>&1; then
         record FAIL "$repo cpp: does not configure from the published sources — $(grep -A3 'CMake Error' "$b.configure.log" | sed '1d; /^Call Stack/,$d' | tr -s ' \n' ' ')"
         continue
     fi
-    if ! "$CMAKE" --build "$b/build" --config Release > "$b.build.log" 2>&1; then
+    if ! cpp_cmake --build "$b/build" --config Release > "$b.build.log" 2>&1; then
         record FAIL "$repo cpp: does not build — $(grep -m1 -i ' error ' "$b.build.log")"
         continue
     fi
-    if ! "$CMAKE" --install "$b/build" --config Release --prefix "$b/prefix" > "$b.install.log" 2>&1; then
+    if ! cpp_cmake --install "$b/build" --config Release --prefix "$b/prefix" > "$b.install.log" 2>&1; then
         record FAIL "$repo cpp: does not install — $(tail -1 "$b.install.log")"
         continue
     fi

@@ -21,6 +21,7 @@ defaults:
 
 jobs:
   go:
+    name: ${{ matrix.module }} (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -82,26 +83,29 @@ jobs:
     steps:
       # The python and c++ of this layer import the layers below it by relative
       # path, so the runner is laid out the way a reader lays out clones: this
-      # repository beside its siblings, each at its default branch. A break in
-      # abstraction-job turns this red, which is the point.
+      # repository beside its siblings, each pinned to a reviewed public commit.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           path: abstraction-download
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-job
+          ref: fd81f613abbb1af3215b3c69285a06817ae50c27
           path: abstraction-job
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-cas
+          ref: 22dd17e641e272e7e7c588321433d8cf3f714ecc
           path: abstraction-cas
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-watch
+          ref: a4c1a93ad7de4e41605d265d870a8c97ac20f53a
           path: abstraction-watch
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-config
+          ref: e441cd521a36549e0ae7a6d08b2d85cf00b0cacf
           path: abstraction-config
 
       - name: test
@@ -109,9 +113,9 @@ jobs:
         run: |
           PY="$(command -v python3 || command -v python || true)"
           if [ -z "$PY" ]; then
-            printf 'UNPROVEN  python on %s — no interpreter on PATH, nothing was run\n' "$RUNNER_OS"
-            printf '%s: UNPROVEN python, no interpreter on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            printf 'FAIL  python on %s — no interpreter on PATH, nothing was run\n' "$RUNNER_OS"
+            printf '%s: FAIL python, no interpreter on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           "$PY" --version
           sep=':'
@@ -138,65 +142,46 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-job
+          ref: fd81f613abbb1af3215b3c69285a06817ae50c27
           path: abstraction-job
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-cas
+          ref: 22dd17e641e272e7e7c588321433d8cf3f714ecc
           path: abstraction-cas
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-watch
+          ref: a4c1a93ad7de4e41605d265d870a8c97ac20f53a
           path: abstraction-watch
 
-      # The file list, not a build file. This exact route was measured by hand
-      # under g++ and MSVC; the published CMakeLists.txt was dropped
-      # because it fetched a dependency these sources no longer use.
-      #
-      # fetchers.cpp compiles everywhere and registers an https fetcher only
-      # where there is a WinHTTP to register it against, which is why the link
-      # line grows a library on Windows and nowhere else.
-      - name: compile and run
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openabstractions/abstraction-identity
+          ref: 9b3c2c8c45763c3400da9aa8abe5f67cb071a5e1
+          path: abstraction-identity
+
+      # Exercise the shipped build graph, including discovery's shared IPC
+      # runtime. CMake selects the installed native compiler; Windows requests
+      # x64 from its default Visual Studio generator, without a version guess.
+      - name: configure, build and test C++
         working-directory: abstraction-download
         run: |
-          CXX="$(command -v g++ || command -v clang++ || true)"
-          if [ -z "$CXX" ]; then
-            printf 'UNPROVEN  c++ on %s — neither g++ nor clang++ is on PATH, nothing was compiled\n' "$RUNNER_OS"
-            printf '%s: UNPROVEN c++, no g++ or clang++ on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          "$CXX" --version | head -1
-          out=testbin
-          link=""
+          cmake --version
           if [ "$RUNNER_OS" = Windows ]; then
-            out=testbin.exe
-            link="-lwinhttp"
-            # Git Bash puts its own mingw64\bin ahead of the runner's C:\mingw64\bin,
-            # so a dynamically linked binary loads Git's older libstdc++-6.dll and
-            # dies in the loader before main: no output, no message, exit 127.
-            case "$("$CXX" --version | head -1)" in *g++*) link="$link -static" ;; esac
+            cmake -S cpp -B build -A x64
+          else
+            cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release
           fi
-          "$CXX" -std=c++17 -DABSTRACTION_DOWNLOAD_RUNNER_LINKED -I cpp/include \
-            -I ../abstraction-job/cpp/include -I ../abstraction-cas/cpp/include \
-            -I ../abstraction-watch/cpp/include \
-            cpp/test/test_runner.cpp cpp/src/runner.cpp cpp/src/spec.cpp \
-            cpp/src/wanted.cpp cpp/src/sha256.cpp cpp/src/fetchers.cpp \
-            ../abstraction-job/cpp/src/json.cpp ../abstraction-job/cpp/src/record.cpp \
-            ../abstraction-job/cpp/src/ranges.cpp ../abstraction-job/cpp/src/store.cpp \
-            ../abstraction-job/cpp/src/awake.cpp \
-            ../abstraction-cas/cpp/src/cas.cpp -o "$out" $link
-          code=0
-          "./$out" | tee out.txt || code=$?
-          n=$(grep -c PASS out.txt || true)
-          if [ "$n" -lt 1 ]; then
-            printf 'FAIL  the test binary printed no PASS line, and an empty run is not a pass\n'
-            exit 1
-          fi
-          if [ "$code" -ne 0 ]; then
-            printf 'FAIL  the run exited %s\n' "$code"
-            exit 1
-          fi
-          printf '%s: c++ %s, %s assertions\n' \
-            "$RUNNER_OS" "$("$CXX" --version | head -1)" "$n" >> "$GITHUB_STEP_SUMMARY"
+          cmake --build build --config Release --parallel 2
+          # Optional live HTTPS remains out of this isolated regression job.
+          unset ABSTRACTION_LIVE_URL ABSTRACTION_LIVE_DIGEST
+          unset 'A\TRACTION_LIVE_URL' 'A\TRACTION_LIVE_DIGEST'
+          ctest --test-dir build -C Release --output-on-failure --no-tests=error --timeout 30 | tee ctest.txt
+          {
+            printf '%s: CMake Release build and CTest, including DiscoveryClient and LocalStream with pinned public siblings\n' "$RUNNER_OS"
+            grep -E 'tests passed|Total Test time' ctest.txt
+          } >> "$GITHUB_STEP_SUMMARY"
 
   unproven:
     needs: [go, python, cpp]
@@ -208,8 +193,7 @@ jobs:
           {
             printf '\n### UNPROVEN\n\nThis workflow builds what this repository contains, and nothing else. It ran none of:\n\n'
             printf -- '- the cross-language conformance harnesses, which compare bytes across all three languages and live in the private tree\n'
-            printf -- '- MSVC. The c++ job takes whichever of g++ or clang++ is on PATH, and this does not re-measure MSVC\n'
             printf -- '- any real transfer. Nothing here reaches a network, so no https fetcher is exercised on any platform\n'
             printf -- '- delegation to a real BITS, launchd or NAS tier, and no signed or installed artefact\n'
-            printf -- '- the siblings at any pinned revision. python and c++ take job, cas and watch at their default branch, so this is a statement about today.\n'
+            printf -- '- sibling revisions other than the explicit public commit pins tested by the Python and C++ jobs.\n'
           } >> "$GITHUB_STEP_SUMMARY"

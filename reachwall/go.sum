@@ -4,8 +4,8 @@ github.com/openabstractions/abstraction-config/go v0.3.0 h1:qzNZLP3BsLZDXrvO+CzU
 github.com/openabstractions/abstraction-config/go v0.3.0/go.mod h1:HCXZv8Pv5dKLAhIPHLn8O90eAgxebYXzOw6UA+n2nUE=
 github.com/openabstractions/abstraction-download/go v0.4.1 h1:nUM5Dn3+34wd4non3gT82aBGNStXp1SvPkZyqSQluJs=
 github.com/openabstractions/abstraction-download/go v0.4.1/go.mod h1:oFL8ei7KUI+zRN2drC593eyu8NFwGZqWFuvLRXMSvg8=
-github.com/openabstractions/abstraction-identity v0.1.0 h1:LtK+bZny4Dk9MVbo/E91C68+D0XGJSW+h1vHpNCrBuQ=
-github.com/openabstractions/abstraction-identity v0.1.0/go.mod h1:gv5sDQuTQqv/UY+fXY5Q74i1junNIEvf/5UsZxMxwKY=
+github.com/openabstractions/abstraction-identity v0.2.1-0.20260911220117-9b3c2c8c4576 h1:kSjEImomwrf9Cbft+Zv75kTFfoRXnJDSuD1IBh6ziWc=
+github.com/openabstractions/abstraction-identity v0.2.1-0.20260911220117-9b3c2c8c4576/go.mod h1:gv5sDQuTQqv/UY+fXY5Q74i1junNIEvf/5UsZxMxwKY=
 github.com/openabstractions/abstraction-job/go v0.4.1 h1:sedWnM1lh/f2BLw1AUR+oKE/vI1Co9DyPruP6LRm68g=
 github.com/openabstractions/abstraction-job/go v0.4.1/go.mod h1:WpdoOijYPoxt8OtVT49bhdEA8Kr9FVPmP7VPvFr4NvU=
 github.com/openabstractions/abstraction-storage/go v0.2.0 h1:aVg7v4gkftC83CJmdJeZzPNifvd5YB+uSl3RYaiEfzE=
