@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
@@ -213,51 +214,57 @@ func TestASilentFinaliseStopsHoldingTheLease(t *testing.T) {
 // lease is held for as long as the work keeps moving, however long that is, and
 // dropped once it stops.
 func TestAKeeperHoldsTheLeaseOnlyWhileTheWorkReports(t *testing.T) {
-	dir := t.TempDir()
-	store, err := job.NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := Submit(store, Spec{
-		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
-		Sink:    Sink{Final: filepath.Join(dir, "out", "model.bin")},
+	// Keep the short protocol intervals, but advance them only after runnable
+	// work (including the real FileStore renewal) has settled. A hosted
+	// scheduler pause must not impersonate a worker that stopped reporting.
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := job.NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := Submit(store, Spec{
+			Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
+			Sink:    Sink{Final: filepath.Join(dir, "out", "model.bin")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.Claim(id, "test-runner", 200*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		epoch := claimed.Lease.Epoch
+
+		r := NewRunner(store, "test-runner")
+		r.LeaseTTL = 200 * time.Millisecond
+		r.SilenceBudget = 500 * time.Millisecond
+
+		ctx, keep := r.keep(context.Background(), id, epoch)
+		defer keep.stop()
+
+		// Four times the lease and well past the budget, all of it reporting.
+		for i := 0; i < 20; i++ {
+			keep.beat()
+			time.Sleep(40 * time.Millisecond)
+		}
+		if ferr := keep.fenced(); ferr != nil {
+			t.Fatalf("work that was reporting throughout was stopped anyway: %v", ferr)
+		}
+		if _, uerr := store.Update(id, epoch, func(*job.Record) error { return nil }); uerr != nil {
+			t.Fatalf("the lease lapsed under work that was reporting: %v", uerr)
+		}
+
+		// And it ends when the reporting does.
+		select {
+		case <-ctx.Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("a keeper silent for its whole budget was still holding the lease")
+		}
+		if ferr := keep.stop(); !errors.Is(ferr, ErrStalled) {
+			t.Fatalf("stopped for the wrong reason: %v", ferr)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	claimed, err := store.Claim(id, "test-runner", 200*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	epoch := claimed.Lease.Epoch
-
-	r := NewRunner(store, "test-runner")
-	r.LeaseTTL = 200 * time.Millisecond
-	r.SilenceBudget = 500 * time.Millisecond
-
-	ctx, keep := r.keep(context.Background(), id, epoch)
-
-	// Four times the lease and well past the budget, all of it reporting.
-	for i := 0; i < 20; i++ {
-		keep.beat()
-		time.Sleep(40 * time.Millisecond)
-	}
-	if ferr := keep.fenced(); ferr != nil {
-		t.Fatalf("work that was reporting throughout was stopped anyway: %v", ferr)
-	}
-	if _, uerr := store.Update(id, epoch, func(*job.Record) error { return nil }); uerr != nil {
-		t.Fatalf("the lease lapsed under work that was reporting: %v", uerr)
-	}
-
-	// And it ends when the reporting does.
-	select {
-	case <-ctx.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("a keeper silent for its whole budget was still holding the lease")
-	}
-	if ferr := keep.stop(); !errors.Is(ferr, ErrStalled) {
-		t.Fatalf("stopped for the wrong reason: %v", ferr)
-	}
 }
 
 // Verifying a delivered file was the second half of the silence: gigabytes of
