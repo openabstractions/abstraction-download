@@ -6,6 +6,7 @@ with one reader.
 """
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 import http.server
 import os
 import socket
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 # The job layer is a sibling, not a copy. Copying it would let the two drift and
 # would defeat the point: this must run against the SAME record implementation
@@ -25,7 +27,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "abstraction-watch", "python")
 )
 
-from abstraction_job import FileStore, Record, TRANSFERRED, COMPLETE, FAILED
+from abstraction_job import FileStore, Record, TRANSFERRED, COMPLETE, FAILED, LeaseExpired
 import abstraction_download as dl
 
 
@@ -143,42 +145,41 @@ class DownloadTest(unittest.TestCase):
         The Go binding has the same shape of bug in two places -- this one, and a
         delegated finalise, which this binding does not have at all.
         """
+        # Advance the store clock and renewal clock together: filesystem speed
+        # must not decide whether a test owner loses its lease before its beat.
+        started = datetime.now(timezone.utc)
+        elapsed = 0.0
+        self.store = FileStore(self.dir.name, now=lambda: started + timedelta(seconds=elapsed))
         body, digest = payload(2 << 20)
         jid = dl.submit(self.store, self.spec("http://127.0.0.1:1/none", digest, len(body)))
         partial = self.stage(jid, body, len(body))
-
         r = dl.Runner(self.store, lease_ttl=0.3)
         held = self.store.claim(jid, r.owner, r.lease_ttl)
         epoch = held.lease.epoch
 
-        h = hashlib.sha256()
-        beat = r._renewing(jid, epoch)
-        chunks = 0
+        def advance_read():
+            nonlocal elapsed
+            elapsed += 0.2
 
-        def read_a_megabyte():
-            """A disk that takes 200 ms a megabyte, so this read outlives more
-            than one lease without any of it being a stall."""
-            nonlocal chunks
-            chunks += 1
-            time.sleep(0.2)
-            beat()
+        with patch.object(dl.time, "monotonic", lambda: elapsed):
+            beat = r._renewing(jid, epoch)
 
-        began = time.monotonic()
-        dl._hash_prefix(partial, len(body), h, read_a_megabyte)
-        took = time.monotonic() - began
+            def read_a_megabyte():
+                advance_read()
+                beat()
 
-        self.assertEqual(h.hexdigest(), hashlib.sha256(body).hexdigest())
-        self.assertGreater(took, r.lease_ttl, "the read did not outlive one lease, so this proves nothing")
+            h = hashlib.sha256()
+            dl._hash_prefix(partial, len(body), h, read_a_megabyte)
+            self.assertEqual(h.hexdigest(), hashlib.sha256(body).hexdigest())
+            self.assertGreater(elapsed, r.lease_ttl, "the read must outlive one lease")
+            self.store.update(jid, epoch, lambda rec: None)
 
-        # The owner was displaced by nobody, so its next write must land.
-        self.store.update(jid, epoch, lambda rec: None)
-
-        # And the test has teeth: the same wall clock without the beats loses it.
-        self.store.release(jid, epoch)
-        other = self.store.claim(jid, "somebody-else", 0.3)
-        time.sleep(took)
-        with self.assertRaises(Exception):
-            self.store.update(jid, other.lease.epoch, lambda rec: None)
+            # The same read without renewals must lose the lease, specifically.
+            self.store.release(jid, epoch)
+            other = self.store.claim(jid, "somebody-else", r.lease_ttl)
+            dl._hash_prefix(partial, len(body), hashlib.sha256(), advance_read)
+            with self.assertRaises(LeaseExpired):
+                self.store.update(jid, other.lease.epoch, lambda rec: None)
 
     def test_refuses_wrong_digest_and_deletes_the_partial(self):
         body, _ = payload(32 * 1024)
