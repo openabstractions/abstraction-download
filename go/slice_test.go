@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,20 +22,31 @@ import (
 // number this feature is about. A test that asserted on Slice.Fetched alone
 // would pass on an implementation that fetched everything and returned a slice.
 type served struct {
-	body []byte
-	sent atomic.Int64
-	reqs atomic.Int64
+	body     []byte
+	sent     atomic.Int64
+	reqs     atomic.Int64
+	handlers sync.WaitGroup
 }
 
 func (s *served) start(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.handlers.Add(1)
+		defer s.handlers.Done()
 		s.reqs.Add(1)
 		rec := &countingWriter{ResponseWriter: w, n: &s.sent}
 		http.ServeContent(rec, r, "artifact.bin", time.Unix(0, 0), bytes.NewReader(s.body))
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// bytesSent is called after a synchronous client operation has finished. Each
+// request enters the wait group before sending its response; completion also
+// includes the counter update after the final ResponseWriter.Write returns.
+func (s *served) bytesSent() int64 {
+	s.handlers.Wait()
+	return s.sent.Load()
 }
 
 type countingWriter struct {
@@ -67,7 +79,7 @@ func TestHeadFetchesTheHeadAndNotTheFile(t *testing.T) {
 	if len(head) != 4096 || string(head[:4]) != "GGUF" {
 		t.Fatalf("head is %d bytes starting %q", len(head), head[:4])
 	}
-	if sent := srv.sent.Load(); sent > 8192 {
+	if sent := srv.bytesSent(); sent > 8192 {
 		t.Fatalf("server sent %d bytes for a 4 KiB head of an 8 MiB file", sent)
 	}
 }
@@ -139,7 +151,7 @@ func TestZipMemberFetchesOnlyThatMember(t *testing.T) {
 	if n != int64(len(want)) || !bytes.Equal(out.Bytes(), want) {
 		t.Fatalf("got %q", out.Bytes())
 	}
-	sent := srv.sent.Load()
+	sent := srv.bytesSent()
 	if sent > 1<<16 {
 		t.Fatalf("server sent %d bytes of a %d byte archive for one 27 byte member", sent, len(archive))
 	}
@@ -158,12 +170,12 @@ func TestZipBombRefusedBeforeAnyBytesAreFetched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := srv.sent.Load()
+	before := srv.bytesSent()
 	_, err = a.Member(context.Background(), "bomb", io.Discard, 1<<20)
 	if !errors.Is(err, ErrExpansion) {
 		t.Fatalf("want ErrExpansion, got %v", err)
 	}
-	if srv.sent.Load() != before {
+	if srv.bytesSent() != before {
 		t.Fatal("the declared size was refused after fetching bytes for it")
 	}
 }
