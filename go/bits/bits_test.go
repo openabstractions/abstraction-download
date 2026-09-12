@@ -74,8 +74,29 @@ func cancelAtEnd(t *testing.T, d *Delegator, id string) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = d.Abandon(ctx, id)
+		if err := d.Abandon(ctx, id); err != nil {
+			t.Errorf("cleanup Abandon task-owned BITS job %q: %v", id, err)
+		}
+		st, err := d.Poll(ctx, id)
+		if err != nil || st.State != download.DelegateGone {
+			t.Errorf("unresolved task-owned BITS job %q: state=%q error=%v", id, st.State, err)
+		}
 	})
+}
+
+// Register cleanup at successful creation, before the runner can fail while
+// recording the returned handle in its private test store.
+type cleanupDelegator struct {
+	*Delegator
+	t *testing.T
+}
+
+func (d cleanupDelegator) Start(ctx context.Context, spec download.Spec, from int64) (string, error) {
+	id, err := d.Delegator.Start(ctx, spec, from)
+	if err == nil {
+		cancelAtEnd(d.t, d.Delegator, id)
+	}
+	return id, err
 }
 
 // waitFor polls until the job reaches one of want, or gives up. It returns the
@@ -423,6 +444,7 @@ func TestAbandonCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	cancelAtEnd(t, d, id)
 	if err := d.Abandon(ctx, id); err != nil {
 		t.Fatalf("Abandon: %v", err)
 	}
@@ -505,7 +527,7 @@ func TestRunnerDelegateAndReconcile(t *testing.T) {
 	}
 
 	runner := download.NewRunner(store, "bits-integration")
-	runner.Delegators = download.NewDelegators(d)
+	runner.Delegators = download.NewDelegators(cleanupDelegator{Delegator: d, t: t})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -520,8 +542,6 @@ func TestRunnerDelegateAndReconcile(t *testing.T) {
 	if !rec.Delegated() || rec.Delegation.System != "bits" {
 		t.Fatalf("delegation not recorded usably: %+v", rec.Delegation)
 	}
-	handle := rec.Delegation.ExternalID
-	cancelAtEnd(t, d, handle)
 	if !store.Claimable(rec) {
 		t.Fatal("Delegate kept the lease; nobody else could poll or finalise, which makes the delegation pointless")
 	}
