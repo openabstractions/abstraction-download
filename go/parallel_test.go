@@ -205,18 +205,11 @@ func TestParallelResumesFromARangeSetNotAPrefix(t *testing.T) {
 	if err := os.WriteFile(partial, staged, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	held, err := store.Claim(id, "dead-owner", 100*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proven := job.Ranges{{Start: 0, End: minRangeSize}, {Start: 2 * minRangeSize, End: 3 * minRangeSize}}
-	if _, err := store.Update(id, held.Lease.Epoch, func(rr *job.Record) error {
+	stageAbandonedProgress(t, store, id, "dead-owner", func(rr *job.Record) error {
 		rr.Progress.Done = covered(proven)
 		return setCheckpoint(rr, Checkpoint{Verified: proven})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(150 * time.Millisecond)
+	})
 
 	if err := r.Run(context.Background(), id); err != nil {
 		t.Fatalf("run: %v", err)

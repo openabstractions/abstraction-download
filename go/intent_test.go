@@ -298,13 +298,10 @@ func TestAPauseNobodyHonouredIsStillAdoptable(t *testing.T) {
 	srv := newParallelServer(t, body)
 	r, store, id := parallelJob(t, body, digest, srv.URL+"/blob.bin")
 
-	if _, err := store.Claim(id, "dead-owner", 50*time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
+	stageAbandonedProgress(t, store, id, "dead-owner", func(*job.Record) error { return nil })
 	if _, err := store.SetIntent(id, job.WantPause, "ui"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
 
 	orphans, err := store.Orphans()
 	if err != nil {

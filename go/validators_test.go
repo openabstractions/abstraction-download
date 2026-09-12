@@ -27,19 +27,12 @@ func stageResume(t *testing.T, store job.Store, id string, prefix []byte, v Vali
 	if err := os.WriteFile(partialOf(t, store, id), prefix, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	const ttl = 100 * time.Millisecond
-	held, err := store.Claim(id, "dead-owner", ttl)
-	if err != nil {
-		t.Fatalf("stage claim: %v", err)
-	}
 	n := int64(len(prefix))
-	if _, err := store.Update(id, held.Lease.Epoch, func(rr *job.Record) error {
+	stageAbandonedProgress(t, store, id, "dead-owner", func(rr *job.Record) error {
 		rr.Progress.Done = n
-		return rr.SetCheckpoint(Checkpoint{VerifiedPrefix: n, Validators: v})
-	}); err != nil {
-		t.Fatalf("stage progress: %v", err)
-	}
-	time.Sleep(ttl + 50*time.Millisecond) // let the lease lapse, as a crash would
+		return setCheckpoint(rr, Checkpoint{VerifiedPrefix: n, Validators: v})
+	})
+
 	rec, err := store.Load(id)
 	if err != nil {
 		t.Fatal(err)

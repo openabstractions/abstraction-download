@@ -429,12 +429,10 @@ func TestAdoptRescuesOrphans(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Claimed by someone who then died.
-		if _, err := store.Claim(id, "dead-owner", 50*time.Millisecond); err != nil {
-			t.Fatal(err)
-		}
+		// Claimed by someone who then died: manufacture the abandoned state,
+		// not a filesystem setup race against a 50ms claim.
+		stageAbandonedProgress(t, store, id, "dead-owner", func(*job.Record) error { return nil })
 	}
-	time.Sleep(100 * time.Millisecond)
 
 	n, err := r.Adopt(context.Background())
 	if err != nil {
