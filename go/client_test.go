@@ -198,7 +198,7 @@ func TestAFailedJobWaitsBeforeItIsTriedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := NewRunner(store, "test-owner")
-	r.LeaseTTL = 100 * time.Millisecond
+	// Failed runs explicitly release ownership; retry backoff needs no lease expiry.
 	id, err := Submit(store, Spec{
 		Sources: []Source{{Scheme: "http", Locator: "http://127.0.0.1:9/down"}},
 		Sink:    Sink{Final: "out/down.bin"},
@@ -212,6 +212,12 @@ func TestAFailedJobWaitsBeforeItIsTriedAgain(t *testing.T) {
 	rec, err := store.Load(id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if LastFailure(rec) == nil || !time.Now().Before(RetryAfter(rec)) {
+		t.Fatal("the failed attempt did not persist a future retry deadline")
+	}
+	if rec.Lease.Owner != "" {
+		t.Fatalf("failed attempt retained lease owner %q", rec.Lease.Owner)
 	}
 	if rec.State.Terminal() {
 		t.Fatalf("state = %s; a source that is down is not a source that said no", rec.State)
