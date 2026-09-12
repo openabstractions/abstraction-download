@@ -14,7 +14,7 @@ import (
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
-// A delegate whose Finalize takes real time and reports none of it — which is
+// A delegate whose Finalize takes time and reports none of it — which is
 // every delegate that has to bring a real model across a share, and is also the
 // honest worst case, because nothing about holding a lease may depend on a
 // delegate choosing to report.
@@ -68,54 +68,56 @@ func (d *slowFinalise) Abandon(ctx context.Context, externalID string) error { r
 // not complete — and it failed quietly first, because the progress steps were
 // refused for the same reason and their errors were thrown away.
 func TestADelegatedFinaliseOutlastsItsOwnLease(t *testing.T) {
-	dir := t.TempDir()
-	store, err := job.NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Advance protocol time only after runnable store and keeper work settles.
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := job.NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	body := []byte("a real one would be forty gigabytes of exactly this")
-	sum := sha256.Sum256(body)
-	final := filepath.Join(dir, "out", "model.bin")
-	id, err := Submit(store, Spec{
-		Artifact: Artifact{Size: int64(len(body)), Digest: "sha256:" + hex.EncodeToString(sum[:])},
-		Sources:  []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
-		Sink:     Sink{Final: final, Partial: final + ".part"},
+		body := []byte("a real one would be forty gigabytes of exactly this")
+		sum := sha256.Sum256(body)
+		final := filepath.Join(dir, "out", "model.bin")
+		id, err := Submit(store, Spec{
+			Artifact: Artifact{Size: int64(len(body)), Digest: "sha256:" + hex.EncodeToString(sum[:])},
+			Sources:  []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
+			Sink:     Sink{Final: final, Partial: final + ".part"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		r := NewRunner(store, "test-runner")
+		// Keep four full lease periods of work so successful delivery requires
+		// renewal throughout the delegated copy.
+		r.LeaseTTL = 2 * time.Second
+		r.Delegators = NewDelegators(&slowFinalise{body: body, take: 4 * r.LeaseTTL})
+
+		if err := r.Delegate(context.Background(), id); err != nil {
+			t.Fatalf("delegate: %v", err)
+		}
+		if err := r.Reconcile(context.Background(), id); err != nil {
+			t.Fatalf("an owner holding the right epoch, displaced by nobody, was refused: %v", err)
+		}
+
+		rec, err := store.Load(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.State != job.StateTransferred {
+			t.Fatalf("state %q, want %q — the terminal update never landed", rec.State, job.StateTransferred)
+		}
+		if !rec.Delegation.Delivered {
+			t.Fatal("the delegate was never marked delivered, so the next sweep will fetch it all again")
+		}
+		if rec.Progress.Done != int64(len(body)) {
+			t.Fatalf("progress done %d, want %d", rec.Progress.Done, len(body))
+		}
+		if got, err := os.ReadFile(final); err != nil || string(got) != string(body) {
+			t.Fatalf("the file is not at its final path: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	r := NewRunner(store, "test-runner")
-	// Keep four full lease periods of real work, but allow filesystem renewal
-	// latency on hosted runners. The old 300ms lease could expire during one
-	// scheduling/filesystem pause, testing machine load instead of renewal.
-	r.LeaseTTL = 2 * time.Second
-	r.Delegators = NewDelegators(&slowFinalise{body: body, take: 4 * r.LeaseTTL})
-
-	if err := r.Delegate(context.Background(), id); err != nil {
-		t.Fatalf("delegate: %v", err)
-	}
-	if err := r.Reconcile(context.Background(), id); err != nil {
-		t.Fatalf("an owner holding the right epoch, displaced by nobody, was refused: %v", err)
-	}
-
-	rec, err := store.Load(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.State != job.StateTransferred {
-		t.Fatalf("state %q, want %q — the terminal update never landed", rec.State, job.StateTransferred)
-	}
-	if !rec.Delegation.Delivered {
-		t.Fatal("the delegate was never marked delivered, so the next sweep will fetch it all again")
-	}
-	if rec.Progress.Done != int64(len(body)) {
-		t.Fatalf("progress done %d, want %d", rec.Progress.Done, len(body))
-	}
-	if got, err := os.ReadFile(final); err != nil || string(got) != string(body) {
-		t.Fatalf("the file is not at its final path: %v", err)
-	}
 }
 
 // A delegate that holds on and says nothing, forever. This is the hole a bare
@@ -156,53 +158,56 @@ func (d *silentFinalise) Abandon(ctx context.Context, externalID string) error {
 // renewing when the budget is spent, whether or not it managed to unblock
 // itself. Stopping is what lets the work move.
 func TestASilentFinaliseStopsHoldingTheLease(t *testing.T) {
-	dir := t.TempDir()
-	store, err := job.NewFileStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := Submit(store, Spec{
-		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
-		Sink:    Sink{Final: filepath.Join(dir, "out", "model.bin")},
+	// Advance protocol time only after runnable store and keeper work settles.
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := job.NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := Submit(store, Spec{
+			Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/model.bin"}},
+			Sink:    Sink{Final: filepath.Join(dir, "out", "model.bin")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		r := NewRunner(store, "test-runner")
+		r.LeaseTTL = 400 * time.Millisecond
+		r.SilenceBudget = 250 * time.Millisecond
+		r.Delegators = NewDelegators(&silentFinalise{cap: 5 * time.Second})
+
+		if err := r.Delegate(context.Background(), id); err != nil {
+			t.Fatalf("delegate: %v", err)
+		}
+
+		began := time.Now()
+		err = r.Reconcile(context.Background(), id)
+		took := time.Since(began)
+		if err == nil {
+			t.Fatal("a finalise that reported nothing for its whole budget was allowed to carry on")
+		}
+		if !errors.Is(err, ErrStalled) {
+			t.Fatalf("stopped for the wrong reason: %v", err)
+		}
+		if took > 3*time.Second {
+			t.Fatalf("the watchdog did not stop it; the delegate's own cap did, after %s", took.Truncate(time.Millisecond))
+		}
+
+		// And the point of stopping is that somebody else can have it. The lease was
+		// not broken by anyone — this owner stopped renewing and let it lapse.
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			if _, cerr := store.Claim(id, "somebody-else", time.Second); cerr == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the lease never lapsed, so the stalled work is stranded on this owner forever")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	r := NewRunner(store, "test-runner")
-	r.LeaseTTL = 400 * time.Millisecond
-	r.SilenceBudget = 250 * time.Millisecond
-	r.Delegators = NewDelegators(&silentFinalise{cap: 5 * time.Second})
-
-	if err := r.Delegate(context.Background(), id); err != nil {
-		t.Fatalf("delegate: %v", err)
-	}
-
-	began := time.Now()
-	err = r.Reconcile(context.Background(), id)
-	took := time.Since(began)
-	if err == nil {
-		t.Fatal("a finalise that reported nothing for its whole budget was allowed to carry on")
-	}
-	if !errors.Is(err, ErrStalled) {
-		t.Fatalf("stopped for the wrong reason: %v", err)
-	}
-	if took > 3*time.Second {
-		t.Fatalf("the watchdog did not stop it; the delegate's own cap did, after %s", took.Truncate(time.Millisecond))
-	}
-
-	// And the point of stopping is that somebody else can have it. The lease was
-	// not broken by anyone — this owner stopped renewing and let it lapse.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, cerr := store.Claim(id, "somebody-else", time.Second); cerr == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the lease never lapsed, so the stalled work is stranded on this owner forever")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 // The two halves, on the keeper itself, because the hash phase is the case that
