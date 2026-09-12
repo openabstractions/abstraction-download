@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +118,32 @@ func TestAStartWithNoNameIsRefused(t *testing.T) {
 	_, err := StartSupervisor(Starting{Exe: exe, Args: args})
 	if !errors.Is(err, ErrNoName) {
 		t.Fatalf("got %v, want ErrNoName", err)
+	}
+}
+
+func TestExplicitStartCreatesFreshLogDirectory(t *testing.T) {
+	exe, args := neverRuns(t)
+	logPath := filepath.Join(t.TempDir(), ".abstraction", "jobd.log")
+	got, err := StartSupervisor(Starting{Endpoint: endpoint(t), Exe: exe, Args: args, Log: logPath, Within: 5 * time.Second})
+	if !errors.Is(err, ErrNeverAnswered) || got.PID == 0 {
+		t.Fatalf("fresh-profile explicit start failed before child launch: result=%+v error=%v", got, err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("child log was not created: %v", err)
+	}
+}
+
+func TestExplicitStartRefusesUncreatableLogDirectory(t *testing.T) {
+	exe, args := neverRuns(t)
+	parent := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(parent, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := StartSupervisor(Starting{Endpoint: endpoint(t), Exe: exe, Args: args, Log: filepath.Join(parent, "nested", "jobd.log")})
+	if err == nil || !strings.Contains(err.Error(), "create supervisor log directory") || got.PID != 0 {
+		t.Fatalf("uncreatable log parent: result=%+v error=%v", got, err)
+	}
+	if contents, err := os.ReadFile(parent); err != nil || string(contents) != "preserve" {
+		t.Fatalf("existing parent changed: %q %v", contents, err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -88,6 +89,11 @@ func StartSupervisor(s Starting) (Started, error) {
 	cmd := exec.Command(s.Exe, s.Args...)
 	cmd.SysProcAttr = detached()
 	if s.Log != "" {
+		// Explicit activation owns its diagnostic destination. A fresh user may
+		// not have a store directory until the worker first starts.
+		if err := os.MkdirAll(filepath.Dir(s.Log), 0o700); err != nil {
+			return Started{Endpoint: s.Endpoint, Log: s.Log}, fmt.Errorf("create supervisor log directory: %w", err)
+		}
 		f, err := os.OpenFile(s.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return Started{Endpoint: s.Endpoint, Log: s.Log}, err
