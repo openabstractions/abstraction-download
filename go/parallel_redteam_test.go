@@ -144,20 +144,61 @@ func TestAFailingRangeTriesTheNextSource(t *testing.T) {
 	}
 }
 
-// slowStore is a file store whose Update returns late, standing in for a Sync
-// or a rename that takes a while on a share. It is called from inside
-// progress.proved, under the progress mutex.
+// slowStore holds a checkpoint until the keeper has renewed twice after pause.
+// The backing lease lasts long enough for hosted filesystem scheduling; the
+// runner's shorter TTL controls renewal cadence for this lock-order regression.
 type slowStore struct {
 	*job.FileStore
-	after time.Duration
-	once  sync.Once
+	once     sync.Once
+	paused   chan struct{}
+	renewed  chan struct{}
+	finished chan error
+}
+
+func (s *slowStore) Claim(id, owner string, _ time.Duration) (*job.Record, error) {
+	return s.FileStore.Claim(id, owner, 30*time.Second)
+}
+
+func (s *slowStore) Renew(id string, epoch int64, _ time.Duration) (*job.Record, error) {
+	rec, err := s.FileStore.Renew(id, epoch, 30*time.Second)
+	if err == nil {
+		select {
+		case <-s.paused:
+			if rec.Wants() == job.WantPause {
+				select {
+				case s.renewed <- struct{}{}:
+				default:
+				}
+			}
+		default:
+		}
+	}
+	return rec, err
 }
 
 func (s *slowStore) Update(id string, epoch int64, mutate func(*job.Record) error) (*job.Record, error) {
 	rec, err := s.FileStore.Update(id, epoch, mutate)
+	if err != nil {
+		return rec, err
+	}
 	s.once.Do(func() {
-		s.FileStore.SetIntent(id, job.WantPause, "ui")
-		time.Sleep(s.after)
+		if _, err = s.FileStore.SetIntent(id, job.WantPause, "ui"); err != nil {
+			s.finished <- err
+			return
+		}
+		close(s.paused)
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for i := 0; i < 2; i++ {
+			select {
+			case <-s.renewed:
+			case <-timer.C:
+				err = errors.New("keeper did not renew twice while paused checkpoint remained held")
+				s.finished <- err
+				return
+			}
+		}
+		s.finished <- nil
 	})
 	return rec, err
 }
@@ -176,7 +217,7 @@ func TestAPauseDuringASlowCheckpointMustNotCostTheLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &slowStore{FileStore: fs, after: 500 * time.Millisecond}
+	store := &slowStore{FileStore: fs, paused: make(chan struct{}), renewed: make(chan struct{}, 2), finished: make(chan error, 1)}
 	r := NewRunner(store, "test-runner")
 	r.Connections = 4
 	r.LeaseTTL = 300 * time.Millisecond
@@ -189,7 +230,15 @@ func TestAPauseDuringASlowCheckpointMustNotCostTheLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := r.Run(context.Background(), id); err != nil {
-		t.Fatalf("a pause during one slow checkpoint, shorter than two TTLs, ended as: %v", err)
+		t.Fatalf("a pause during a held checkpoint ended as: %v", err)
+	}
+	select {
+	case err := <-store.finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("the run did not exercise the held checkpoint")
 	}
 	rec, err := store.Load(id)
 	if err != nil {
