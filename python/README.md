@@ -1,5 +1,17 @@
 # abstraction-download, in Python
 
+## Application service path
+
+Normal applications use resolved durable jobs and generated download requests
+through [the facade](https://github.com/openabstractions/abstraction-facade).
+The service owns execution and shared stores. Preserve caller request identity
+and binding for recovery; waiting cancellation leaves accepted work alone.
+
+The file-store examples below are explicitly selected native provider APIs with
+separate lifecycle guarantees. Their historical conformance describes that
+provider profile. It does not qualify current service packages or every platform.
+
+
 A download that outlives the process that asked for it. What was asked for, how
 far it got and who may work on it live in a record on disk, so a transfer this
 process starts, the next launch — or another machine — can finish. Standard
@@ -28,7 +40,7 @@ Python 3.9 or later. The order is not a style: `pyproject.toml` names these
 dependencies by the names they would have on an index, and pip can only satisfy
 them from what is installed already.
 
-Copying the modules works too, and is the route the one shipped adopter takes.
+Copying the modules supplies the explicit legacy provider used by ComfyUI compatibility mode.
 `abstraction_cas.py`, `abstraction_watch.py`, `abstraction_job.py`,
 `abstraction_config.py` and `abstraction_download.py` are pure standard library,
 so a `_vendor/` directory of your own is a complete installation — see

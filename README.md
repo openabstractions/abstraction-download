@@ -1,6 +1,18 @@
 # abstraction-download
 
-**Ready.** Cross-language conformance passes and the example below runs as shown.
+## Application service path
+
+Normal applications use resolved durable jobs and generated download requests
+through [the facade](https://github.com/openabstractions/abstraction-facade).
+The service owns execution and shared stores. Preserve caller request identity
+and binding for recovery; waiting cancellation leaves accepted work alone.
+
+The file-store examples below are explicitly selected native provider APIs with
+separate lifecycle guarantees. Their historical conformance describes that
+provider profile. It does not qualify current service packages or every platform.
+
+
+**Legacy provider profile.** Recorded cross-language conformance passes and the example below runs as shown.
 No version number is typed on this page: a tag is the only thing that cannot
 drift, so [the tag list](https://github.com/openabstractions/abstraction-download/tags)
 is the answer to "which release".
