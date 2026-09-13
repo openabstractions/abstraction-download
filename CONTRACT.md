@@ -1251,3 +1251,41 @@ bytes**; and falling back to an in-process run when the delegate vanishes.
 
 **Not yet tested:** a real kill in the middle of a real multi-gigabyte transfer,
 and anything at NAS or BITS scale. Those need the service tier.
+
+## Required downstream submission recovery
+
+The Thrift-defined `downstream_recovery_guarantees` roster in `request.thrift`
+contains `abstraction.download/recoverable-submission@1`. Applications request it
+through job submission `required_guarantees`; a provider accepts it in the receipt
+only when its complete execution path preserves it. The same identifier is the
+adapter capability claim and persisted work requirement. The download request
+payload has no second requirements field. Job record `requires` is an extensible
+list of strings and carries this identifier unchanged.
+
+| Claim | Meaning |
+| --- | --- |
+| `survives_process_exit` | Execution can continue after the submitting process exits. It does not establish recovery of an uncertain acceptance reply. |
+| `abstraction.download/recoverable-submission@1` | Reconcile downstream acceptance under its original owner and stable request key after a lost reply or restart. Reconciliation never submits new work. |
+
+An advertising adapter retains the association between stable request identity,
+original arguments and accepted downstream operation. A fresh adapter instance
+must recover the same external handle. Conflicting argument reuse cannot become
+another operation. Retention must cover the accepted work's recovery lifetime;
+missing or expired history cannot imply definite nonacceptance.
+
+Selection checks both the explicit semantic claim and the existing `Locator`
+interface before `Start` when recovery is required. Method presence alone is
+insufficient. An absent or incapable provider refuses before downstream effects;
+it cannot downgrade to local fetching. This trusted claim requires independent
+behavioral evidence and grants no identity or authorization.
+
+After uncertain Start, retain the original owner and request key. Locate returns
+the existing handle, proven definite nonacceptance, or uncertainty. Only proven
+nonacceptance permits a new submission decision. An unreachable adapter, missing
+handle, timeout or unreadable history preserves uncertainty and never authorizes
+an alternate Start or local transfer. Settled handoffs retain their owner too.
+Waiting cancellation never cancels accepted work.
+
+This requirement uses existing job admission and adapter boundaries. It defines
+no adapter IPC server. Cross-language clients use the generated request guarantee
+roster with the existing generated job submission and receipt interfaces.

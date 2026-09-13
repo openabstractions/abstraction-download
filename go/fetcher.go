@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 
+	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
 	job "github.com/openabstractions/abstraction-job/go"
 
 	"github.com/openabstractions/abstraction-download/go/rec"
@@ -33,6 +34,10 @@ import (
 // not survive its own process, and neither of those facts is discoverable from
 // the source's scheme.
 type Capability string
+
+// CapRecoverableSubmission requires durable, truthful Locator reconciliation.
+// The identifier and semantic promise are defined by the generated contract.
+var CapRecoverableSubmission = Capability(request.DownstreamRecoveryGuarantees[0])
 
 const (
 	// CapResume can start from a byte offset rather than from zero.
@@ -82,10 +87,11 @@ const (
 // false claim costs is a thing the author has to walk past. Ungraded is not a
 // fifth grade: AllCapabilities does not list it and Assured says so.
 var capabilities = map[Capability]Assurance{
-	CapVerifies:            Checked,
-	CapResume:              Falsifiable,
-	CapSurvivesProcessExit: Recovered,
-	CapDelegates:           Trusted,
+	CapVerifies:              Checked,
+	CapResume:                Falsifiable,
+	CapSurvivesProcessExit:   Recovered,
+	CapDelegates:             Trusted,
+	CapRecoverableSubmission: Trusted,
 }
 
 // Assured reports how a claim to c is established, and false for a word this

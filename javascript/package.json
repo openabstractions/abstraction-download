@@ -1,0 +1,12 @@
+{
+  "name": "@openabstractions/download-request",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./js/abstraction/download/request/rec.mjs",
+  "files": [
+    "js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -160,6 +160,9 @@ var (
 	ErrNoDelegator = errors.New("download: no delegator for this job's sources")
 	// ErrNotDelegated means the job is not in someone else's hands.
 	ErrNotDelegated = errors.New("download: job is not delegated")
+	// ErrAlreadyDelegated requires reconciliation with the retained external
+	// owner before any new delegation can be considered.
+	ErrAlreadyDelegated = errors.New("download: job already has an external owner")
 	// ErrStrandedHere is a record already in somebody's hands, naming a system
 	// THIS process cannot speak to. Distinct from ErrNoDelegator, which is this
 	// process having nowhere to send a job in the first place: there the work is
@@ -190,6 +193,9 @@ var (
 	// the delegate is asked again on the next sweep, under the same request
 	// identity, and answers as soon as it can be reached.
 	ErrOutcomeUnknown = errors.New("download: the delegate's answer was lost and it may hold this work")
+	// ErrRecoverableSubmissionUnavailable keeps accepted work retryable while
+	// no eligible external adapter is available.
+	ErrRecoverableSubmissionUnavailable = errors.New("download: required recoverable external submission is unavailable")
 )
 
 // Locator is an OPTIONAL capability: a delegate that can be asked what it did
@@ -511,7 +517,18 @@ func (d *Delegators) WhyNot(spec Spec, src Source, requires []string) []Refusal 
 			out = append(out, Refusal{x.System(), why})
 			continue
 		}
+		if why := recoveryRefusal(x, requires); why != "" {
+			out = append(out, Refusal{x.System(), why})
+			continue
+		}
 		if !hasAllCaps(believed(x), requires) {
+			var missing []string
+			for _, capability := range requires {
+				if !hasAllCaps(believed(x), []string{capability}) {
+					missing = append(missing, capability)
+				}
+			}
+			out = append(out, Refusal{x.System(), "required capabilities unavailable: " + strings.Join(missing, ", ")})
 			continue
 		}
 		if why := declined(x, spec); why != "" {
@@ -526,7 +543,16 @@ func (d *Delegators) eligible(x Delegator, spec Spec, src Source, requires []str
 }
 
 func (d *Delegators) suits(x Delegator, src Source, requires []string) bool {
-	return has(x.Schemes(), src.Scheme) && hasAllCaps(believed(x), requires)
+	return has(x.Schemes(), src.Scheme) && hasAllCaps(believed(x), requires) && recoveryRefusal(x, requires) == ""
+}
+
+func recoveryRefusal(x Delegator, requires []string) string {
+	if has(requires, string(CapRecoverableSubmission)) {
+		if _, ok := x.(Locator); !ok {
+			return "required " + string(CapRecoverableSubmission) + " needs Locator reconciliation"
+		}
+	}
+	return ""
 }
 
 // believed is what a delegate claims, less what it has been caught not doing.
@@ -688,6 +714,15 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 		return err
 	}
 	epoch := rec.Lease.Epoch
+	// Direct callers need the same fence as DelegateAll. A replacement adapter
+	// cannot overwrite an accepted or uncertain handoff recorded by a predecessor.
+	if rec.Delegation != nil {
+		refusal := ErrAlreadyDelegated
+		if rec.Delegation.ExternalID == id {
+			refusal = ErrOutcomeUnknown
+		}
+		return errors.Join(refusal, r.release(id, epoch))
+	}
 
 	spec, err := SpecOf(rec)
 	if err != nil {
@@ -891,7 +926,7 @@ func (r *Runner) resolve(ctx context.Context, rec *job.Record, d Delegator) erro
 	if err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrOutcomeUnknown, d.System(), err)
 	}
-	claimed, err := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	claimed, err := r.claimDelegation(rec)
 	if err != nil {
 		return err
 	}
@@ -906,6 +941,33 @@ func (r *Runner) resolve(ctx context.Context, rec *job.Record, d Delegator) erro
 	}
 	r.Store.Release(rec.ID, epoch)
 	return err
+}
+
+// Bind an external observation to the ownership epoch and handoff it observed.
+// Claim reads current state; its success alone cannot validate an earlier reply.
+// Every Store advances the epoch by one on claim (JOB-R1). Checking the returned
+// epoch also catches an ABA handoff through the same system and external ID.
+func (r *Runner) claimDelegation(seen *job.Record) (*job.Record, error) {
+	var claimed *job.Record
+	var err error
+	if store, ok := r.Store.(interface {
+		ClaimFrom(*job.Record, string, time.Duration) (*job.Record, error)
+	}); ok {
+		claimed, err = store.ClaimFrom(seen, r.Owner, r.LeaseTTL)
+	} else {
+		claimed, err = r.Store.Claim(seen.ID, r.Owner, r.LeaseTTL)
+	}
+	if err != nil {
+		return nil, err
+	}
+	expectedState := seen.State
+	if expectedState == job.StatePending {
+		expectedState = job.StateRunning
+	}
+	if claimed.Lease.Epoch-1 != seen.Lease.Epoch || claimed.State != expectedState || claimed.Delegation == nil || seen.Delegation == nil || *claimed.Delegation != *seen.Delegation {
+		return nil, errors.Join(fmt.Errorf("%w: delegation changed while observing %s", job.ErrStaleEpoch, seen.ID), r.Store.Release(seen.ID, claimed.Lease.Epoch))
+	}
+	return claimed, nil
 }
 
 func refusedBy(rs []Refusal) string {
@@ -978,7 +1040,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 	// Found by asking whether any of this transfers to a real application, which
 	// is not a question the unit tests were ever going to answer.
 	if want := rec.Wants(); want != job.WantRun {
-		return r.honourDelegated(ctx, rec, want)
+		return r.honourDelegated(ctx, rec)
 	}
 
 	// Already delivered. Polling again would ask about a job the delegate
@@ -1016,6 +1078,14 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			return fmt.Errorf("%w: %s left a transfer suspended and cannot resume it",
 				ErrNoDelegator, d.System())
 		}
+		claimed, err := r.claimDelegation(rec)
+		if err != nil {
+			return err
+		}
+		defer r.Store.Release(id, claimed.Lease.Epoch)
+		if claimed.Wants() != job.WantRun {
+			return nil
+		}
 		if err := s.Resume(ctx, rec.Delegation.ExternalID); err != nil {
 			return err
 		}
@@ -1045,11 +1115,14 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 
 	// Claim only now: polling needs no lease, and taking one before we know
 	// there is something to do would block whoever else is watching.
-	claimed, err := r.Store.Claim(id, r.Owner, r.LeaseTTL)
+	claimed, err := r.claimDelegation(rec)
 	if err != nil {
 		return err
 	}
 	epoch := claimed.Lease.Epoch
+	if claimed.Wants() != job.WantRun {
+		return r.Store.Release(id, epoch)
+	}
 
 	switch st.State {
 	case DelegateRunning:
@@ -1254,7 +1327,7 @@ func (r *Runner) restarted(ctx context.Context, rec *job.Record, d Delegator, pr
 	err := fmt.Errorf("%w: %s, published by %s, was given %d proven bytes and reports %d",
 		ErrClaimFalsified, system, publisherOf(system), proven, done)
 
-	claimed, cerr := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	claimed, cerr := r.claimDelegation(rec)
 	if cerr != nil {
 		// Somebody else holds the lease and will poll it themselves; the
 		// disbelief above is process-wide and already stands.
@@ -1317,7 +1390,7 @@ func (r *Runner) stranded(rec *job.Record) error {
 		return err
 	}
 
-	claimed, cerr := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	claimed, cerr := r.claimDelegation(rec)
 	if cerr != nil {
 		// Somebody holds the lease, so somebody is working on it and this
 		// process has nothing to add. Not a second failure to report.
@@ -1486,20 +1559,20 @@ type ReportingFinalizer interface {
 // honoured by everything, because stopping is universal; pause must be honoured
 // only by implementations that advertise it, and one that cannot must fail the
 // job with a stated reason rather than continue as though nobody had asked.
-func (r *Runner) honourDelegated(ctx context.Context, rec *job.Record, want job.Want) error {
+func (r *Runner) honourDelegated(ctx context.Context, rec *job.Record) error {
 	d, ok := r.Delegators.BySystem(rec.Delegation.System)
 	if !ok {
 		// Nothing here understands that delegate's handle, so nothing here can
 		// act on it. Some other machine's supervisor will.
 		return nil
 	}
-	claimed, err := r.Store.Claim(rec.ID, r.Owner, r.LeaseTTL)
+	claimed, err := r.claimDelegation(rec)
 	if err != nil {
 		return err
 	}
 	epoch := claimed.Lease.Epoch
 
-	switch want {
+	switch claimed.Wants() {
 	case job.WantCancel:
 		// Abandon first, then record it. The other order can leave an external
 		// transfer running with nothing pointing at it — BITS would keep the job

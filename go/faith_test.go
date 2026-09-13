@@ -180,10 +180,11 @@ func TestADelegateThatDidNotLieIsNotAccused(t *testing.T) {
 // and a claim nobody grades is a promise that reads exactly like a measurement.
 func TestEveryCapabilitySaysWhatAFalseClaimCosts(t *testing.T) {
 	want := map[Capability]Assurance{
-		CapVerifies:            Checked,
-		CapResume:              Falsifiable,
-		CapSurvivesProcessExit: Recovered,
-		CapDelegates:           Trusted,
+		CapVerifies:              Checked,
+		CapResume:                Falsifiable,
+		CapSurvivesProcessExit:   Recovered,
+		CapDelegates:             Trusted,
+		CapRecoverableSubmission: Trusted,
 	}
 	all := AllCapabilities()
 	if len(all) != len(want) {

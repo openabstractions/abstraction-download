@@ -140,6 +140,11 @@ func (r *Runner) Run(ctx context.Context, id string) error {
 	defer job.KeepAwake(r.Store, rec).Release()
 
 	if err := r.run(ctx, rec, epoch); err != nil {
+		// A stopped host leaves work immediately recoverable. Its lifetime
+		// ending supplies no evidence that the source needs retry backoff.
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			return errors.Join(err, r.release(id, epoch))
+		}
 		// Record why, so a human reading the job later does not have to find
 		// the log of a process that no longer exists — and record whether this
 		// is over. A refusal that stays adoptable is fetched again on every
@@ -190,35 +195,31 @@ func (r *Runner) release(id string, epoch int64) error {
 }
 
 func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
-	// Somebody may ask this job to stop while it is running, from a process that
-	// holds no lease and never will. Honouring that is not optional: the job
-	// layer's contract says an owner observes intent at least as often as it
-	// checkpoints and moves toward it, and an owner that reads a record and
-	// ignores the field is not an implementation of the abstraction.
-	//
-	// The check therefore lives at the checkpoint, where the record is being
-	// written anyway — no extra reads, and the interval a person waits is the
-	// interval they already accepted for progress.
-	// Before anything is fetched, because this owner may have just adopted a job
-	// whose predecessor died between the pause being asked for and the pause
-	// being carried out. That record is left running under a lapsed lease, and
-	// the only way out of it is for the next owner to honour what was asked
-	// rather than start moving bytes and find out at its first checkpoint.
+	// Apply retained intent before starting work. During work, checkpoints and
+	// a bounded observer cover both active transfers and quiet source requests.
 	if want := rec.Wants(); want != job.WantRun {
 		return r.honour(want, rec.ID, epoch)
 	}
 
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	// Written by the keeper and by a worker, whichever notices the intent first.
+	// Written by the observer and by a worker, whichever notices intent first.
 	// Lock-free because the keeper is one of them, and a keeper that waits on a
 	// lock renews nothing — the same reason observe takes none.
 	var asked atomic.Pointer[job.Want]
 	intent := func(w job.Want) { asked.Store(&w); stop() }
+	finishIntentWatch := r.watchRunIntent(ctx, rec.ID, epoch, intent, stop)
+	defer finishIntentWatch()
 
 	spec, err := SpecOf(rec)
 	if err != nil {
 		return err
+	}
+	// This requirement reserves execution for a recoverable external handoff.
+	// An unavailable adapter leaves accepted work retryable; local adoption
+	// cannot discharge the downstream promise by marking it permanently failed.
+	if has(rec.Requires, string(CapRecoverableSubmission)) {
+		return ErrRecoverableSubmissionUnavailable
 	}
 	// Whatever this store has already proven goes ahead of every source the
 	// record names. On the machine that adopts a delegated job that is the
@@ -242,14 +243,20 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	}
 
 	total, got, seen, err := r.transfer(ctx, rec, spec, epoch, partial, intent)
+	if fence := finishIntentWatch(); fence != nil {
+		return fence
+	}
 	if want := asked.Load(); want != nil {
 		// Stopping because somebody asked is not a failure, and must not be
 		// recorded as one — the cancelled context surfaces here as an error, and
 		// letting it through would write "context canceled" into a record a
 		// person is looking at to see that their own button worked.
 		//
-		// Nothing is lost: the callback that noticed the intent had just synced
-		// and checkpointed, so the proven bytes are durable to the byte.
+		// The stopped stream persists its synced ranges before returning. Surface
+		// a failed checkpoint separately from the requested state transition.
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return errors.Join(r.honour(*want, rec.ID, epoch), err)
+		}
 		return r.honour(*want, rec.ID, epoch)
 	}
 	if err != nil {
@@ -476,13 +483,25 @@ func (r *Runner) stream(ctx context.Context, rec *job.Record, spec Spec, epoch i
 	// Close before verifying, not after. Windows refuses to delete or rename a
 	// file that is still open, so a mismatch discovered while the handle is held
 	// would leave the bad partial on disk for the next runner to resume onto.
-	if serr := f.Sync(); serr != nil && err == nil {
-		return total, "", seen, serr
+	if serr := f.Sync(); serr != nil {
+		return 0, "", seen, serr // Existing durable checkpoints remain authoritative.
 	}
-	if cerr := f.Close(); cerr != nil && err == nil {
-		return total, "", seen, cerr
+	if cerr := f.Close(); cerr != nil {
+		return 0, "", seen, cerr
 	}
 	closed = true
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		// Cancellation may arrive between byte-driven checkpoints. Preserve the
+		// full proven range set after sync, including ranges beyond a first gap.
+		_, checkpointErr := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+			rr.Progress.Done = proven.Total()
+			rr.Progress.UpdatedAt = job.At(time.Now())
+			return setCheckpoint(rr, Checkpoint{Verified: proven, Validators: seen})
+		})
+		if checkpointErr != nil {
+			return total, "", seen, checkpointErr
+		}
+	}
 	if err != nil {
 		return total, "", seen, err
 	}
