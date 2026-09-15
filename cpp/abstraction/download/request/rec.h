@@ -149,16 +149,26 @@ inline void enc_list(std::string& out, const std::vector<T>& v, int depth,
 
 inline const std::vector<std::string> kDownstreamRecoveryGuarantees = {"abstraction.download/recoverable-submission@1"};
 
+// Expected content identity and size. Empty digest and zero size mean unknown.
+// A supplied digest is verified before delivery.
 struct Artifact {
     std::string digest;
     std::int64_t size = 0;
 };
 
+// A location interpreted by its named source scheme. Execution providers
+// declare which schemes they support. Credentials require a separately
+// authorized capability.
 struct Source {
     std::string scheme;
     std::string locator;
 };
 
+// Service request payload for recoverable job admission with kind download. The
+// provider owns result allocation and all partial files. Request identity,
+// required guarantees and cancellation use the job service. This payload
+// contains no provider paths. The initial execution profile supports anonymous
+// HTTP(S); unsupported work is sealed as definitely not accepted.
 struct Request {
     Artifact artifact;
     std::vector<Source> sources;

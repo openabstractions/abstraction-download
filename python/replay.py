@@ -60,10 +60,13 @@ def models():
     # The failure class is never critical by its own rule: an unreadable class
     # and an absent class are one answer [DL-E16], so refusing the record over
     # it would contradict the payload's own fallback.
-    never = NEVER_CRITICAL | {dl.FAILURE_EXTENSION}
+    # The typed cause rides beside the class and never decides it, so it is not
+    # critical either.
+    failure = {dl.FAILURE_EXTENSION, dl.FAILURE_CAUSE_EXTENSION}
+    never = NEVER_CRITICAL | failure
     return "\n".join(
         f"{name} {'never-critical' if name in never else 'critical-ok'}"
-        for name in sorted(KNOWN_FEATURES | {dl.FAILURE_EXTENSION})
+        for name in sorted(KNOWN_FEATURES | failure)
     )
 
 

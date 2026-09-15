@@ -353,6 +353,15 @@ func TestASubmitIsWorkedHereWhenTheAnnouncedSupervisorDoesNotAnswer(t *testing.T
 	if rec.Error == "" && !rec.State.Terminal() {
 		t.Fatalf("the record shows nobody worked it: %+v", rec)
 	}
+	// The worker releases its lease after recording the failure. Waiting for
+	// it keeps that write out of the store directory the test cleanup removes.
+	for svc.(*client).working(h.ID()) {
+		select {
+		case <-ctx.Done():
+			t.Fatal("worker never stopped")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // B8, the other half: a supervisor that answers is handed the job and this

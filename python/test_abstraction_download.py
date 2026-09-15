@@ -584,7 +584,6 @@ class DownloadTest(unittest.TestCase):
             "work",
             "work/" + other,
             "work/" + other + "/part",
-            "services.json",
             "supervisor.json",
             "supervisor.json.tmp",
             "supervisor.sock",
@@ -609,7 +608,7 @@ class DownloadTest(unittest.TestCase):
             "models/x.gguf",
             "jobsy/x.json",
             "a/jobs/x.json",
-            "services.json.bak",
+            "services.json",
             "D:\\models\\x.gguf",
             "/mnt/models/x.gguf",
         ):
@@ -629,7 +628,6 @@ class DownloadTest(unittest.TestCase):
         src = [dl.Source(scheme="https", locator="https://example.invalid/x.gguf")]
         for sink in (
             dl.Sink(final="jobs/1757000000001-cafebabe.json"),
-            dl.Sink(final="services.json"),
             dl.Sink(final="models/x.gguf", partial="jobs/1757000000001-cafebabe.json"),
             dl.Sink(final="models/x.gguf", partial="work/1757000000001-cafebabe"),
         ):
@@ -772,6 +770,39 @@ class ClientTest(unittest.TestCase):
         # directory the test is deleting. There is no Close on a Client, in
         # either language.
         self.svc.deliver(first, timeout=30)
+
+    def test_asking_again_while_it_runs_starts_no_second_worker(self):
+        """Injected scheduling: the first worker is held inside its run while
+        the same request arrives again. A second worker claims under the same
+        owner name, which the store lets re-claim a held lease, and races the
+        first over one partial -- one renames it while the other opens it."""
+        _, digest, url = self.serve_bytes()
+        spec = lambda: dl.Spec(  # noqa: E731
+            artifact=dl.Artifact(digest=digest, size=64 * 1024),
+            sources=[dl.Source(scheme="http", locator=url)],
+            sink=dl.Sink(final=os.path.join(self.dir.name, "models", "held.bin")),
+        )
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        original = self.svc.runner.run
+
+        def held(job_id):
+            calls.append(threading.current_thread().name)
+            entered.set()
+            if not release.wait(30):
+                raise TimeoutError("test never released the first worker")
+            return original(job_id)
+
+        with patch.object(self.svc.runner, "run", held):
+            first = self.svc.submit(spec())
+            self.assertTrue(entered.wait(10), "the first worker never started")
+            self.assertEqual(self.svc.submit(spec()), first)
+            alive = [t for t in self.svc._workers if t.is_alive()]
+            release.set()
+            self.assertEqual(len(alive), 1, "a second worker started for work this client already runs")
+            rec = self.svc.deliver(first, timeout=30)
+        self.assertEqual(rec.state, COMPLETE)
+        self.assertEqual(len(calls), 1)
 
     def test_a_finished_download_does_not_block_a_fresh_one(self):
         """"Download it again" is a real request. A completed record is history,
@@ -1688,6 +1719,22 @@ class FailureCorpus(unittest.TestCase):
             with open(os.path.join(CORPUS, name + ".json"), "rb") as f:
                 rec = Record.from_json(f.read())
             self.assertEqual(failure_class(dl.last_failure(rec)), want, name)
+
+    def test_a_failure_cause_from_the_corpus_reads_the_same_here(self):
+        """failure@2 as the Go service runner writes it: the typed cause comes
+        back, and a record without a readable payload yields ""."""
+        causes = {}
+        with open(os.path.join(CORPUS, "causes.txt"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    name, cause = line.split()[:2]
+                    causes[name] = cause
+        self.assertTrue(causes, "causes.txt names no record")
+        for name in corpus():
+            with open(os.path.join(CORPUS, name + ".json"), "rb") as f:
+                rec = Record.from_json(f.read())
+            self.assertEqual(dl.last_failure_cause(rec), causes.get(name, ""), name)
 
     def test_the_corpus_table_names_every_record_in_the_directory(self):
         want = corpus()

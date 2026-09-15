@@ -34,10 +34,30 @@ import (
 // sitting above it. MODELGET_STORE is still honoured, because stores exist on
 // disk under it and silently ignoring it would orphan jobs.
 func StoreRoot() (string, error) {
+	root, _, err := StoreRootOrigin()
+	return root, err
+}
+
+// StoreRootOrigin finds jobd's store and names what chose it: MODELGET_STORE,
+// ABSTRACTION_STORE, the configuration file that set it, or the default location.
+func StoreRootOrigin() (root, origin string, err error) {
 	if v := os.Getenv("MODELGET_STORE"); v != "" {
-		return v, nil
+		return v, "MODELGET_STORE", nil
 	}
-	return config.JobStore()
+	if c := config.LegacyLoad(); c.Store != "" {
+		o := c.Origins["store"]
+		switch {
+		case o.Path != "":
+			origin = o.Path
+		case os.Getenv("ABSTRACTION_STORE") != "":
+			origin = "ABSTRACTION_STORE"
+		default:
+			origin = "configuration"
+		}
+		return c.Store, origin, nil
+	}
+	root, err = config.LegacyJobStore()
+	return root, "the default location", err
 }
 
 // OpenRunner uses the same discovery every other application uses.

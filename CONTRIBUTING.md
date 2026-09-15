@@ -32,7 +32,7 @@ Resolve through the runtime bootstrap, invoke the selected typed client, then
 repeat with an isolated absent bootstrap and require an explicit failure. Check
 that the application creates no provider-owned files. Keep provider deployment
 and application dependencies separate. Go's primary facade and `/client` should
-have service-client dependencies; `/legacy` is an explicit migration choice.
+have service-client dependencies.
 
 For durable work, preserve request identity, logical owner and negotiated
 promises across lost replies. Reconcile at the original binding. Record refusal,
@@ -154,6 +154,42 @@ scenarios using the suite instructions above.
 Report the exact commands, selected revisions, platform, outcomes and skipped
 checks. A missing test entrypoint or unavailable toolchain is an explicit gap.
 Include an outside-consumer check when changing packaging or public imports.
+
+### Writing a contract
+
+A new or changed `.thrift` definition answers these ten rules. They come from
+the maintainers' protocol lessons audit of 2026-09-15. Rules marked (checked)
+are enforced by `idl/inventory.py`; existing definitions that break them are
+listed in `idl/contract_rules.recorded`, and a new break fails the check.
+
+1. One outcome enum per call; refusals never travel as transport error codes.
+   A call a policy may gate reserves `forbidden`, `unavailable` and `invalid`;
+   a call addressing a record reserves `unknown`; a conditional write reserves
+   `conflict`. Name the outcome of an unreachable decision point. (checked)
+2. Every retained record states its identity and retry dimension, a retention
+   the caller can read, loss as a typed terminal state, who may retire it, and
+   what a replay reads after retirement.
+3. A failure carries a class and a typed cause. Cause enums declare
+   `unknown = "grant"` with `other`; a kind-specific cause has a namespaced
+   string slot. (checked)
+4. A catalogue of names applications will extend is open: `<owner>/<name>`,
+   registered through a revision-conditional operator call, with the generated
+   constant as a seed. A catalogue closed by rule says why with
+   `closed_by = "<rule tag>"` and reserves the next name. (checked)
+5. Every identity field names the party that asserts it and the mechanism that
+   established it. The absent-claim case is defined, and a relay appends and
+   never overwrites.
+6. Bytes larger than one control frame cross a handoff or an advertised bound
+   carried in the resource struct; a number in a doc string is a floor.
+7. Enums a reader only displays are `unknown = "grant"`; enums a reader must act
+   on are `unknown = "refuse"`; every enum says which. An incompatible record
+   change is a new versioned key. (checked)
+8. A rule names the entry point it judges; a second default for the same role
+   gets its own rule.
+9. `duplicate_keys = "refuse"`, unless the definition states why `last`.
+10. The first definition of a contract records a "none" entry in the base
+    protocol change log, and its review answers rules 1 to 6 in writing before
+    generation.
 
 ### What we owe you
 

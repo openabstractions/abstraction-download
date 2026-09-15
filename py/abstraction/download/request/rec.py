@@ -131,18 +131,28 @@ def enc_list(out, v, depth, enc):
 DOWNSTREAM_RECOVERY_GUARANTEES = ["abstraction.download/recoverable-submission@1"]
 
 
+# Expected content identity and size. Empty digest and zero size mean unknown. A
+# supplied digest is verified before delivery.
 class Artifact:
     def __init__(self, **kw):
         self.digest = kw.get("digest", "")
         self.size = kw.get("size", 0)
 
 
+# A location interpreted by its named source scheme. Execution providers declare
+# which schemes they support. Credentials require a separately authorized
+# capability.
 class Source:
     def __init__(self, **kw):
         self.scheme = kw.get("scheme", "")
         self.locator = kw.get("locator", "")
 
 
+# Service request payload for recoverable job admission with kind download. The
+# provider owns result allocation and all partial files. Request identity,
+# required guarantees and cancellation use the job service. This payload
+# contains no provider paths. The initial execution profile supports anonymous
+# HTTP(S); unsupported work is sealed as definitely not accepted.
 class Request:
     def __init__(self, **kw):
         self.artifact = kw.get("artifact", Artifact())

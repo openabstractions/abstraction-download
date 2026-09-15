@@ -112,6 +112,26 @@ See [`wire-truncated-body`](testdata/scenarios/wire-truncated-body.txt),
 [`wire-short-range`](testdata/scenarios/wire-short-range.txt) and
 [`wire-undeclared-length`](testdata/scenarios/wire-undeclared-length.txt).
 
+**A stalled transfer is checkpointed on time alone.** A source that stops sending
+makes no write, and a checkpoint that only a write can trigger leaves the bytes
+already on disk unrecorded until the next one. A crash during that silence loses
+them. The Go runner syncs and checkpoints the bytes its file accepted every
+`PersistInterval` while a transfer is open, including while it waits. A resumed
+run keeps the checkpoint's proven prefix and truncates everything past it.
+
+**Resumed bytes are proven by the digest.** A checkpoint records how many bytes
+were synced. A crash can still leave corrupt bytes inside that prefix. When a run
+that started from proven bytes fails its digest, the runner deletes the partial
+and its checkpoint [DL-R16] and marks the error `ErrResumedMismatch`. The failure
+stays *not now*, and the next run fetches from byte zero. A service profile that
+ends digest mismatches, `download-http-request-v1`, ends a mismatch over bytes
+fetched from zero.
+
+**Progress carries a total when one is known.** A declared artifact size is the
+record's `progress.total` before any byte moves. Without a declared size, the
+first response that discloses a length sets it, and delivery sets it to the
+delivered size.
+
 **It refuses bytes that do not match their digest** [DL-R15], deletes the partial
 rather than leaving known-bad bytes for the next runner to resume onto [DL-R16],
 and records why in the job so a human can read it without finding the log of a
@@ -323,6 +343,19 @@ consequences, and none of them optional:
   over a socket carry the same record, so they recover the same class. Service
   availability may change coordination and isolation; it may not change what a
   failure means.
+
+**A typed cause rides under its own key.** `extensions["abstraction.download/failure@2"]`
+carries the failure@1 shape plus `cause`, one of `digest_mismatch`, `oversize`,
+`short_transfer`, `unauthorized`, `not_found`, `refused`, `server_error`,
+`transport` or `other`. An empty cause is unreported. Only a runner whose owner
+opts in writes failure@2, always beside failure@1 in the same write, and
+failure@1 never carries `cause`. The class is failure@1's `permanent`; a cause
+never decides it. A reader that knows only failure@1 keeps the class, and
+records written without the opt-in are byte-identical to before. A service
+execution profile may end failures beyond this layer's refusals when its own
+contract names them. `download-http-request-v1` ends `digest_mismatch` and
+`oversize` as permanent, so its record is `failed` and says permanent under
+both keys.
 
 **An older record keeps its meaning, and says less than it looks like it does.**
 A record written before this key existed carries a sentence and no class. It
@@ -706,8 +739,8 @@ them on this page rather than in a defect:
 - Abandoning removes files inside the delegate's store — the job's own partial,
   and the final when no other unfinished record names it. Nothing above says a
   requester may delete there.
-- `wanted/` is not reserved. `job.Reserved` covers `jobs/`, `work/` and
-  `services.json`, and this layer adds `supervisor.json` and `supervisor.sock`;
+- `wanted/` is not reserved. `job.Reserved` covers `jobs/` and `work/`, and
+  this layer adds `supervisor.json` and `supervisor.sock`;
   the drop folder is in neither list, so `DL-R22` does not reach it.
 - A failure crosses with its class. The remote record carries it where
   [DL-E16] says, the delegate's status report carries it beside the sentence,
@@ -930,7 +963,6 @@ Measured from the store root, with `.` and `..` resolved first:
 |---|---|
 | `jobs`, and anything under it | the record, its claim tokens, its temporaries |
 | `work`, and anything under it except `work/<this job's id>` | another job's scratch |
-| `services.json` at the root | the discovery registry |
 | `supervisor.json`, `supervisor.json.tmp`, `supervisor.sock` at the root | this layer's heartbeat, and one name it reserves that nothing binds |
 
 `supervisor.sock` is that name. The bus is not a file in the store, so nothing

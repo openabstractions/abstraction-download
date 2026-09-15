@@ -1,6 +1,17 @@
 {
   "name": "@openabstractions/download-request",
   "version": "0.0.0",
+  "description": "Generated JavaScript codecs for the portable download request vocabulary, with named record codecs for importing definitions.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openabstractions/abstraction-download.git",
+    "directory": "javascript"
+  },
+  "homepage": "https://github.com/openabstractions/abstraction-download#readme",
+  "bugs": {
+    "url": "https://github.com/openabstractions/abstraction-download/issues"
+  },
   "type": "module",
   "exports": "./js/abstraction/download/request/rec.mjs",
   "files": [

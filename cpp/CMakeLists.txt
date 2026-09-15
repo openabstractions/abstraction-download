@@ -104,18 +104,6 @@ target_compile_features(abstraction_download INTERFACE cxx_std_17)
 set_target_properties(abstraction_download PROPERTIES EXPORT_NAME download)
 add_library(abstraction::download ALIAS abstraction_download)
 
-# Its own target, one that abstraction_job neither links nor is linked by, so
-# the forbidden dependency of job on discovery cannot form by accident.
-add_library(abstraction_discovery STATIC src/discovery_client.cpp)
-target_include_directories(abstraction_discovery PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-)
-target_link_libraries(abstraction_discovery PUBLIC abstraction::json abstraction::ipc)
-target_compile_features(abstraction_discovery PUBLIC cxx_std_17)
-set_target_properties(abstraction_discovery PROPERTIES EXPORT_NAME discovery)
-add_library(abstraction::discovery ALIAS abstraction_discovery)
-
 # WinHTTP on Windows: a platform facility, already installed, already trusted,
 # and its certificate trust is the machine's own store rather than a root
 # bundle frozen into our binary. macOS has NSURLSession, which is the same
@@ -146,16 +134,11 @@ add_library(abstraction::download_runner ALIAS abstraction_download_runner)
 if(ABSTRACTION_BUILD_TESTS)
     enable_testing()
 
-    # This one stands up a real listener -- a named pipe on Windows, a unix
-    # socket elsewhere -- so it needs threads.
-    add_executable(test_discovery_client test/test_discovery_client.cpp)
-    target_link_libraries(test_discovery_client PRIVATE abstraction_discovery Threads::Threads)
-    add_test(NAME DiscoveryClient COMMAND test_discovery_client)
     add_executable(test_local_stream test/test_local_stream.cpp)
     target_link_libraries(test_local_stream PRIVATE Threads::Threads abstraction::ipc)
     target_compile_features(test_local_stream PRIVATE cxx_std_17)
     add_test(NAME LocalStream COMMAND test_local_stream)
-    set_tests_properties(DiscoveryClient LocalStream PROPERTIES TIMEOUT 10)
+    set_tests_properties(LocalStream PROPERTIES TIMEOUT 10)
 
     add_executable(test_sink_containment test/test_sink_containment.cpp)
     target_link_libraries(test_sink_containment PRIVATE abstraction_download)
@@ -201,7 +184,7 @@ if(ABSTRACTION_DOWNLOAD_STANDALONE)
     endforeach()
 
     install(TARGETS
-        abstraction_download abstraction_discovery abstraction_download_runner
+        abstraction_download abstraction_download_runner
         ${ABSTRACTION_DOWNLOAD_EXTRA}
         EXPORT abstraction_downloadTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -226,7 +209,7 @@ if(ABSTRACTION_DOWNLOAD_STANDALONE)
         DESTINATION ${ABSTRACTION_DOWNLOAD_CMAKEDIR})
 else()
     set_property(GLOBAL APPEND PROPERTY ABSTRACTION_SOURCE_TARGETS
-        abstraction_download abstraction_discovery abstraction_download_runner)
+        abstraction_download abstraction_download_runner)
     set_property(GLOBAL APPEND PROPERTY ABSTRACTION_SOURCE_INCLUDES
         ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 endif()

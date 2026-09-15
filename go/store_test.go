@@ -90,6 +90,16 @@ func TestBytesAnotherToolAlreadyHasAreNotDownloaded(t *testing.T) {
 		t.Fatalf("the network was used %d time(s) for bytes already on this disk", n)
 	}
 	t.Logf("delivered %d bytes from ollama's cache, %d network requests", len(got), hits)
+	// The worker still releases its lease after the record reaches
+	// transferred. Waiting for it keeps that write out of the store directory
+	// the test cleanup removes.
+	for svc.(*client).working(h.ID()) {
+		select {
+		case <-deadline:
+			t.Fatal("worker never stopped")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // Without a digest there is nothing to match against, so the network is used —
@@ -130,6 +140,16 @@ func TestWithoutADigestItStillFetches(t *testing.T) {
 	}
 	if atomic.LoadInt64(&hits) == 0 {
 		t.Fatal("nothing was fetched, but nothing on this machine could have matched")
+	}
+	// The worker still releases its lease after the record reaches
+	// transferred. Waiting for it keeps that write out of the store directory
+	// the test cleanup removes.
+	for svc.(*client).working(h.ID()) {
+		select {
+		case <-deadline:
+			t.Fatal("worker never stopped")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

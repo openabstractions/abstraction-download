@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	download "github.com/openabstractions/abstraction-download/go"
@@ -64,15 +65,31 @@ func TestHTTPResultRefusesEscapingLink(t *testing.T) {
 }
 
 func TestHTTPFailureClassificationPreservesUnknown(t *testing.T) {
-	for _, c := range []struct{ raw, errorText, want string }{
-		{`{"error":"private diagnostic","permanent":true}`, "", "permanent"},
-		{`{"error":""}`, "", "retryable"},
-		{`{"invalid":true}`, "private diagnostic", "unknown"},
+	for _, c := range []struct {
+		raw, causeRaw, errorText string
+		state                    job.State
+		want, cause              string
+	}{
+		{`{"error":"private diagnostic","permanent":true}`, "", "", job.StateFailed, "permanent", ""},
+		// Permanent class on nonterminal work contradicts JOB-A8.
+		{`{"error":"private diagnostic","permanent":true}`, "", "", job.StatePending, "unknown", ""},
+		{`{"error":""}`, "", "", job.StatePending, "retryable", ""},
+		{`{"error":""}`, "", "", job.StateFailed, "unknown", ""},
+		{`{"error":"private diagnostic"}`, `{"error":"private diagnostic","cause":"server_error"}`, "", job.StatePending, "retryable", "server_error"},
+		{`{"error":"private diagnostic","permanent":true}`, `{"error":"private diagnostic","permanent":true,"cause":"digest_mismatch"}`, "", job.StateFailed, "permanent", "digest_mismatch"},
+		{`{"error":"private diagnostic","permanent":true}`, `{"error":"private diagnostic","permanent":true,"cause":"future_word"}`, "", job.StateFailed, "permanent", "other"},
+		// failure@2 names a cause; only failure@1 decides the class.
+		{`{"error":"private diagnostic"}`, `{"error":"private diagnostic","permanent":true,"cause":"not_found"}`, "", job.StatePending, "retryable", "not_found"},
+		{`{"error":"private diagnostic","permanent":true}`, `{"unreadable":1}`, "", job.StateFailed, "permanent", ""},
+		{`{"invalid":true}`, "", "private diagnostic", job.StatePending, "unknown", ""},
 	} {
-		record := &job.Record{Error: c.errorText, Extensions: map[string]json.RawMessage{download.FailureExtension: json.RawMessage(c.raw)}}
+		record := &job.Record{State: c.state, Error: c.errorText, Extensions: map[string]json.RawMessage{download.FailureExtension: json.RawMessage(c.raw)}}
+		if c.causeRaw != "" {
+			record.Extensions[download.FailureCauseExtension] = json.RawMessage(c.causeRaw)
+		}
 		failure := (HTTPExecution{}).OperationFailure(record)
-		if failure == nil || failure.Classification != c.want || failure.Message == "private diagnostic" {
-			t.Fatalf("failure: %+v", failure)
+		if failure == nil || failure.Classification != c.want || failure.Cause != c.cause || strings.Contains(failure.Message, "private diagnostic") {
+			t.Fatalf("%s in %s: %+v", c.raw, c.state, failure)
 		}
 	}
 }

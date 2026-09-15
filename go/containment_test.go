@@ -202,7 +202,6 @@ func TestSinkMayNotNameTheStoresOwnFiles(t *testing.T) {
 		"work",
 		"work/" + other,
 		"work/" + other + "/part",
-		"services.json",
 		"supervisor.json",
 		"supervisor.json.tmp",
 		"supervisor.sock",
@@ -231,7 +230,7 @@ func TestSinkMayNotNameTheStoresOwnFiles(t *testing.T) {
 		"models/x.gguf",
 		"jobsy/x.json",
 		"a/jobs/x.json",
-		"services.json.bak",
+		"services.json",
 		`D:\models\x.gguf`,
 		"/mnt/models/x.gguf",
 	} {
@@ -266,7 +265,6 @@ func TestSubmitAndLocalSinkRefuseAReservedSink(t *testing.T) {
 
 	for _, sink := range []Sink{
 		{Final: "jobs/1757000000001-cafebabe.json"},
-		{Final: "services.json"},
 		{Final: "models/x.gguf", Partial: "jobs/1757000000001-cafebabe.json"},
 		{Final: "models/x.gguf", Partial: "work/1757000000001-cafebabe"},
 	} {

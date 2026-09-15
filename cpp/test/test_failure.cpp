@@ -41,9 +41,9 @@ static std::string read(const fs::path& p) {
 // The corpus and what each record must still MEAN, read off the table that
 // ships beside it rather than restated here: a second copy of the answers is a
 // second thing to keep true.
-static std::map<std::string, std::string> corpus(const fs::path& dir) {
+static std::map<std::string, std::string> corpus_table(const fs::path& table) {
     std::map<std::string, std::string> want;
-    std::istringstream lines(read(dir / "expect.txt"));
+    std::istringstream lines(read(table));
     std::string line;
     while (std::getline(lines, line)) {
         std::istringstream fields(line);
@@ -54,6 +54,10 @@ static std::map<std::string, std::string> corpus(const fs::path& dir) {
         want[name] = cls;
     }
     return want;
+}
+
+static std::map<std::string, std::string> corpus(const fs::path& dir) {
+    return corpus_table(dir / "expect.txt");
 }
 
 static std::string failure_class(const Record& r) {
@@ -80,9 +84,17 @@ int main(int argc, char** argv) {
     const auto want = corpus(dir);
     check("the corpus table names at least one record", !want.empty());
 
+    // failure@2 as the Go service runner writes it: the typed cause causes.txt
+    // names comes back, and a record it does not name yields "".
+    const auto causes = corpus_table(dir / "causes.txt");
+    check("causes.txt names at least one record", !causes.empty());
     for (const auto& [name, cls] : want) {
         const Record r = Record::decode(read(dir / (name + ".json")));
         check(name + " means " + cls, failure_class(r) == cls);
+        const auto it = causes.find(name);
+        const std::string cause = it == causes.end() ? std::string() : it->second;
+        check(name + " carries cause '" + cause + "'",
+              abstraction::download::last_failure_cause(r) == cause);
     }
 
     // A record added to the directory and left out of the table is asserted

@@ -464,7 +464,7 @@ func Program() string {
 // export it, which invited every other program to ask the download package a
 // question about jobs.
 func storeFor() (job.Store, error) {
-	root, err := config.JobStore()
+	root, err := config.LegacyJobStore()
 	if err != nil {
 		return nil, err
 	}

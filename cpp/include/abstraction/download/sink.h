@@ -272,8 +272,8 @@ inline std::string escapes_root(const std::string& p) {
     return "download: sink path escapes the store root: " + p;
 }
 
-// What this layer keeps in the store root, beside the store's own jobs/, work/
-// and services.json: the supervisor heartbeat, its temporary, and the nudge
+// What this layer keeps in the store root, beside the store's own jobs/ and
+// work/: the supervisor heartbeat, its temporary, and the nudge
 // socket. Written by the Go and Python supervisors; named here because a reader
 // has to refuse the same sinks a runner would.
 inline bool beside_the_store(const std::string& name) {

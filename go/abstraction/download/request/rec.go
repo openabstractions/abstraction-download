@@ -206,16 +206,26 @@ func encList[T any](out []byte, v []T, depth int, enc func([]byte, *T, int) []by
 
 var DownstreamRecoveryGuarantees = []string{"abstraction.download/recoverable-submission@1"}
 
+// Expected content identity and size. Empty digest and zero size mean unknown.
+// A supplied digest is verified before delivery.
 type Artifact struct {
 	Digest string
 	Size   int64
 }
 
+// A location interpreted by its named source scheme. Execution providers
+// declare which schemes they support. Credentials require a separately
+// authorized capability.
 type Source struct {
 	Scheme  string
 	Locator string
 }
 
+// Service request payload for recoverable job admission with kind download. The
+// provider owns result allocation and all partial files. Request identity,
+// required guarantees and cancellation use the job service. This payload
+// contains no provider paths. The initial execution profile supports anonymous
+// HTTP(S); unsupported work is sealed as definitely not accepted.
 type Request struct {
 	Artifact Artifact
 	Sources  []Source

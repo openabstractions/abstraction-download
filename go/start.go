@@ -94,7 +94,14 @@ func StartSupervisor(s Starting) (Started, error) {
 		if err := os.MkdirAll(filepath.Dir(s.Log), 0o700); err != nil {
 			return Started{Endpoint: s.Endpoint, Log: s.Log}, fmt.Errorf("create supervisor log directory: %w", err)
 		}
-		f, err := os.OpenFile(s.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		// Concurrent starters race to create the log. On darwin a creator
+		// that loses a plain O_CREAT race can fail with ENOENT
+		// (golang/go#81246). O_EXCL makes the loser see ErrExist, and the
+		// loser then opens the file the winner created.
+		f, err := os.OpenFile(s.Log, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			f, err = os.OpenFile(s.Log, os.O_WRONLY|os.O_APPEND, 0o644)
+		}
 		if err != nil {
 			return Started{Endpoint: s.Endpoint, Log: s.Log}, err
 		}

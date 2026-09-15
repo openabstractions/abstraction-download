@@ -113,13 +113,18 @@ def esc(out, s):
     out += b'"'
 
 
-FAILURE_NAMES = ["abstraction.download/failure@1"]
+FAILURE_NAMES = ["abstraction.download/failure@1", "abstraction.download/failure@2"]
 
 
+# Cause appears only under failure@2. When a writer knows it, it is one word:
+# digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
+# server_error, transport or other. Empty means unreported. The class is
+# permanent alone.
 class Failure:
     def __init__(self, **kw):
         self.error = kw.get("error", "")
         self.permanent = kw.get("permanent", False)
+        self.cause = kw.get("cause", "")
 
 
 def enc_failure(out, v, depth):
@@ -136,6 +141,13 @@ def enc_failure(out, v, depth):
         esc(out, "permanent")
         out += b": "
         out += b"true" if v.permanent else b"false"
+    if v.cause:
+        out += b","
+        out += b"\n"
+        pad(out, depth + 1)
+        esc(out, "cause")
+        out += b": "
+        esc(out, v.cause)
     out += b"\n"
     pad(out, depth)
     out += b"}"
@@ -471,6 +483,11 @@ def _decode_failure(r):
                     raise r.refuse("duplicate_field")
                 seen |= 2
                 v.permanent = r.boolean()
+            elif key == "cause":
+                if seen & 4:
+                    raise r.refuse("duplicate_field")
+                seen |= 4
+                v.cause = r.string()
             else:
                 raise r.refuse("unknown_field")
             r.ws()

@@ -57,12 +57,14 @@ std::string fixture() {
     return v == nullptr ? std::string() : std::string(v);
 }
 
+// `wanted` fetches the dropped requests' http sources, so it needs the same
+// network fetcher `wire` does. A build without one (Linux: fetchers.cpp,
+// https_available) claimed `wanted` anyway, ran the scenario, and every http
+// request ended "no fetcher" -- a contradiction of the contract that was really a
+// capability this driver does not have.
 std::string capabilities() {
-    if (fixture().empty()) {
+    if (fixture().empty() || !abstraction::download::https_available()) {
         return "store transfer";
-    }
-    if (!abstraction::download::https_available()) {
-        return "store transfer wanted";
     }
     return "store transfer wire wanted";
 }
@@ -74,14 +76,17 @@ std::string capabilities() {
 std::string models() {
     std::vector<std::string> names = abstraction::job::known_features();
     const std::string& failure = abstraction::download::failure_extension();
+    const std::string& cause = abstraction::download::failure_cause_extension();
     names.push_back(failure);
+    names.push_back(cause);
     std::sort(names.begin(), names.end());
     std::ostringstream o;
     for (const std::string& name : names) {
         // The failure class is never critical by its own rule: an unreadable
         // class and an absent class are one answer [DL-E16], so refusing the
-        // record over it would contradict the payload's own fallback.
-        const bool never = abstraction::job::is_never_critical_feature(name) || name == failure;
+        // record over it would contradict the payload's own fallback. The typed
+        // cause rides beside it and never decides the class, so it is not either.
+        const bool never = abstraction::job::is_never_critical_feature(name) || name == failure || name == cause;
         o << name << (never ? " never-critical" : " critical-ok") << "\n";
     }
     return o.str();

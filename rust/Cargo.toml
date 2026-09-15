@@ -1,0 +1,7 @@
+[package]
+name = "abstraction-download-request-api"
+version = "0.0.0"
+edition = "2021"
+description = "Generated OpenAbstractions portable download request Rust records and named codecs"
+[lib]
+path = "../rs/abstraction/download/request/rec.rs"

@@ -53,6 +53,15 @@ type Runner struct {
 	// authenticate it. The record only ever holds the name; see credentials.go.
 	Credentials Credentials
 
+	// Terminal lets this runner's owner end failures beyond the library's
+	// refusals. Nil keeps Permanent alone. A matching error is recorded as
+	// permanent and the record becomes failed, so class and state agree.
+	Terminal func(error) bool
+
+	// RecordCause writes the typed failure@2 payload beside failure@1. Off keeps
+	// records byte-identical to other implementations' replay transcripts.
+	RecordCause bool
+
 	// Reach is asked for every host before a connection is opened to it, at the
 	// same last moment a credential is resolved. Nil reaches everything.
 	Reach Reach
@@ -152,11 +161,20 @@ func (r *Runner) Run(ctx context.Context, id string) error {
 		// record can ever stop waiting. So a refused write travels back with the
 		// failure: it is the only way the caller learns that the record it will
 		// go on to read says nothing about any of this.
+		if r.Terminal != nil && r.Terminal(err) {
+			err = Terminal(err)
+		}
 		_, wrote := r.Store.Update(id, epoch, func(rr *job.Record) error {
 			if Permanent(err) {
 				rr.State = job.StateFailed
 			}
-			return setFailure(rr, err)
+			if werr := setFailure(rr, err); werr != nil {
+				return werr
+			}
+			if r.RecordCause {
+				setFailureCause(rr, err)
+			}
+			return nil
 		})
 		// And let go. This owner has stopped working, so holding the lease until
 		// it lapses only makes the job unadoptable while nobody is moving any
@@ -242,6 +260,9 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		return err
 	}
 
+	// A run that starts from proven bytes cannot prove them against the digest
+	// until the end; a mismatch then restarts from zero instead of ending the job.
+	resumed := rec.Progress.Done > 0
 	total, got, seen, err := r.transfer(ctx, rec, spec, epoch, partial, intent)
 	if fence := finishIntentWatch(); fence != nil {
 		return fence
@@ -269,7 +290,11 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// than "the hash is wrong".
 	if spec.Artifact.Size > 0 && total != spec.Artifact.Size {
 		r.keepProven(rec.ID, epoch, total, seen)
-		return fmt.Errorf("%w: got %d bytes, expected %d", ErrShortTransfer, total, spec.Artifact.Size)
+		reason := ErrShortTransfer
+		if total > spec.Artifact.Size {
+			reason = ErrOversize
+		}
+		return fmt.Errorf("%w: got %d bytes, expected %d", reason, total, spec.Artifact.Size)
 	}
 
 	if want := spec.Artifact.Digest; want != "" {
@@ -299,7 +324,11 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 				rr.Progress.Done = 0
 				return setCheckpoint(rr, Checkpoint{})
 			})
-			return errors.Join(fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, got, want), swept, cleared)
+			mismatch := fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, got, want)
+			if resumed {
+				mismatch = fmt.Errorf("%w: %w", ErrResumedMismatch, mismatch)
+			}
+			return errors.Join(mismatch, swept, cleared)
 		}
 	}
 
@@ -311,6 +340,9 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// wanted them has not said so yet. See job.StateTransferred.
 	_, err = r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 		rr.Progress.Done = total
+		if rr.Progress.Total == 0 {
+			rr.Progress.Total = total
+		}
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		rr.State = job.StateTransferred
 		clearFailure(rr)
@@ -412,9 +444,14 @@ func (r *Runner) stream(ctx context.Context, rec *job.Record, spec Spec, epoch i
 	}
 
 	proven := plan.Have
-	if rec.Progress.Done != proven.Total() {
+	// A declared size is the progress total before any byte moves.
+	declared := rec.Progress.Total == 0 && spec.Artifact.Size > 0
+	if rec.Progress.Done != proven.Total() || declared {
 		r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
 			rr.Progress.Done = proven.Total()
+			if rr.Progress.Total == 0 && spec.Artifact.Size > 0 {
+				rr.Progress.Total = spec.Artifact.Size
+			}
 			return setCheckpoint(rr, Checkpoint{Verified: proven, Validators: plan.Validators})
 		})
 	}
@@ -511,6 +548,47 @@ func (r *Runner) stream(ctx context.Context, rec *job.Record, spec Spec, epoch i
 		return total, "", seen, nil
 	}
 	return total, "sha256:" + hex.EncodeToString(h.Sum(nil)), seen, nil
+}
+
+// acceptedBytes adds the bytes its destination accepted to n.
+type acceptedBytes struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c acceptedBytes) Write(p []byte) (int, error) {
+	written, err := c.w.Write(p)
+	c.n.Add(int64(written))
+	return written, err
+}
+
+// persistOnTimer calls tick with mu held every PersistInterval until stopped.
+// A write-driven checkpoint never fires for a source that stalls mid-transfer,
+// and a crash during that silence would lose a prefix already on disk.
+func (r *Runner) persistOnTimer(mu *sync.Mutex, tick func()) (stop func()) {
+	if r.PersistInterval <= 0 {
+		return func() {}
+	}
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(r.PersistInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				mu.Lock()
+				tick()
+				mu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // removeEmptyPartial takes away the working file a transfer opened and never
@@ -624,6 +702,13 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 	// attempt began at, and left alone it would hold a number the file no
 	// longer reaches — so nothing would be checkpointed until the transfer had
 	// re-covered the ground it just threw away.
+	// mu guards the persistence bookkeeping, the proven ranges and the
+	// validators between the transfer's callbacks and the quiet-transfer timer.
+	var mu sync.Mutex
+	// onDisk counts bytes the file accepted since `from`. Progress callbacks are
+	// throttled, so the quiet-transfer timer checkpoints this count instead.
+	var onDisk atomic.Int64
+	totalKnown := rec.Progress.Total > 0 || spec.Artifact.Size > 0
 	lastPersist := from
 	lastPersistAt := time.Now()
 	// Zero, so the first checkpoint of the transfer renews. That renewal is
@@ -631,6 +716,8 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 	// somebody else's.
 	var lastRenew time.Time
 	restart := func() error {
+		mu.Lock()
+		defer mu.Unlock()
 		if err := f.Truncate(0); err != nil {
 			return err
 		}
@@ -640,6 +727,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		h.Reset()
 		from = 0
 		to = 0
+		onDisk.Store(0)
 		restarted = true
 		*proven = nil
 		*seen = Validators{}
@@ -693,8 +781,113 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		if rolling {
 			w = io.MultiWriter(f, h)
 		}
+		w = acceptedBytes{w: w, n: &onDisk}
+		mu.Lock()
 		lastPersist = from
 		lastPersistAt = time.Now()
+		onDisk.Store(0)
+		mu.Unlock()
+		var latestTotal int64
+		// report runs with mu held, from the transfer's own progress callback or
+		// from the quiet-transfer timer below.
+		report := func(written, total int64, quiet bool) {
+			at := from + written
+			latestTotal = total
+			// Bytes OR time, whichever comes first. The byte threshold
+			// keeps a fast link from writing the record constantly; the
+			// interval keeps a slow one from never writing it at all. A
+			// source that stops sending triggers no callback, so the timer
+			// checkpoints what already landed; a crash then keeps that prefix.
+			// The first report of a size nobody declared records the total.
+			enough := at-lastPersist >= r.PersistEvery
+			overdue := r.PersistInterval > 0 && time.Since(lastPersistAt) >= r.PersistInterval
+			firstTotal := total > 0 && !totalKnown
+			if !enough && !overdue && !quiet && !firstTotal {
+				return
+			}
+			lastPersist = at
+			lastPersistAt = time.Now()
+			// Durability before the claim: recording "the first N bytes are
+			// proven" while N of them are still in a buffer would make a
+			// crash resume from bytes that were never written.
+			if err := f.Sync(); err != nil {
+				return
+			}
+			next, ferr := fold(at)
+			if ferr != nil {
+				return
+			}
+			updated, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+				// Proven bytes, not an offset. The two are the same number
+				// for a prefix and only the first means anything once a
+				// transfer has holes in it — a sparse file reaches its
+				// furthest written byte and says nothing about what is
+				// between here and there.
+				rr.Progress.Done = next.Total()
+				// Only ever fill an unknown size in. A caller that supplied
+				// one at submission — modelget resolves it from the registry
+				// before any byte moves — has better information than a
+				// response header, and a source that lies about its length
+				// must not be able to overwrite the number the digest was
+				// chosen against.
+				if rr.Progress.Total == 0 && total > 0 {
+					rr.Progress.Total = total
+				}
+				rr.Progress.UpdatedAt = job.At(time.Now())
+				// The validators go down with the proven bytes, in the same
+				// write. A checkpoint that records how far it got but not
+				// WHICH version it got that far through is the checkpoint
+				// this whole change exists to stop existing.
+				return setCheckpoint(rr, Checkpoint{Verified: next, Validators: *seen})
+			})
+			if err != nil {
+				// A checkpoint refused for a stale epoch or a lapsed lease
+				// is the store saying this owner no longer holds the work,
+				// and it says so one write earlier than the renewal below
+				// would. Treating it as advisory is what let a fenced owner
+				// go on writing bytes until its next renewal.
+				if fencing(err) {
+					lost = err
+					dropped()
+				}
+				return
+			}
+			*proven = next
+			if total > 0 {
+				totalKnown = true
+			}
+			// The record was just read and written, so what somebody wants
+			// is in hand at no extra cost. Stopping here rather than at the
+			// end of the transfer is the difference between a pause button
+			// that works and one that takes effect in forty minutes.
+			if w := updated.Wants(); w != job.WantRun {
+				onIntent(w)
+				return
+			}
+			// Three renewals per TTL, the interval keeper.hold already
+			// holds a lease at, rather than one per checkpoint: the
+			// checkpoint interval is a property of the link and on a fast
+			// one it renewed a thirty-second lease a hundred times in six
+			// seconds. Losing the lease is still noticed at every
+			// checkpoint, because the Update above is refused for the same
+			// two reasons a renewal is.
+			if time.Since(lastRenew) < renewEvery(r.LeaseTTL) {
+				return
+			}
+			lastRenew = time.Now()
+			_, rerr := r.Store.Renew(rec.ID, epoch, r.LeaseTTL)
+			if rerr != nil {
+				lost = rerr
+				dropped()
+			}
+		}
+		stopQuiet := r.persistOnTimer(&mu, func() {
+			// Bytes the file accepted are in the kernel; report's Sync makes them
+			// durable before the checkpoint claims them.
+			if n := onDisk.Load(); from+n > lastPersist {
+				report(n, latestTotal, true)
+			}
+		})
 		res, err := fetcher.Fetch(fetchCtx, Request{
 			Source:     src,
 			From:       from,
@@ -704,91 +897,18 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 			Headers:    headers,
 			Reach:      r.Reach,
 			Restart:    restart,
-			Observed:   func(v Validators) { *seen = v },
+			Observed: func(v Validators) {
+				mu.Lock()
+				defer mu.Unlock()
+				*seen = v
+			},
 			Report: func(written, total int64) {
-				at := from + written
-				// Bytes OR time, whichever comes first. The byte threshold
-				// keeps a fast link from writing the record constantly; the
-				// interval keeps a slow one from never writing it at all.
-				enough := at-lastPersist >= r.PersistEvery
-				overdue := r.PersistInterval > 0 && time.Since(lastPersistAt) >= r.PersistInterval
-				if !enough && !overdue {
-					return
-				}
-				lastPersist = at
-				lastPersistAt = time.Now()
-				// Durability before the claim: recording "the first N bytes are
-				// proven" while N of them are still in a buffer would make a
-				// crash resume from bytes that were never written.
-				if err := f.Sync(); err != nil {
-					return
-				}
-				next, ferr := fold(at)
-				if ferr != nil {
-					return
-				}
-				updated, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
-					// Proven bytes, not an offset. The two are the same number
-					// for a prefix and only the first means anything once a
-					// transfer has holes in it — a sparse file reaches its
-					// furthest written byte and says nothing about what is
-					// between here and there.
-					rr.Progress.Done = next.Total()
-					// Only ever fill an unknown size in. A caller that supplied
-					// one at submission — modelget resolves it from the registry
-					// before any byte moves — has better information than a
-					// response header, and a source that lies about its length
-					// must not be able to overwrite the number the digest was
-					// chosen against.
-					if rr.Progress.Total == 0 && total > 0 {
-						rr.Progress.Total = total
-					}
-					rr.Progress.UpdatedAt = job.At(time.Now())
-					// The validators go down with the proven bytes, in the same
-					// write. A checkpoint that records how far it got but not
-					// WHICH version it got that far through is the checkpoint
-					// this whole change exists to stop existing.
-					return setCheckpoint(rr, Checkpoint{Verified: next, Validators: *seen})
-				})
-				if err != nil {
-					// A checkpoint refused for a stale epoch or a lapsed lease
-					// is the store saying this owner no longer holds the work,
-					// and it says so one write earlier than the renewal below
-					// would. Treating it as advisory is what let a fenced owner
-					// go on writing bytes until its next renewal.
-					if fencing(err) {
-						lost = err
-						dropped()
-					}
-					return
-				}
-				*proven = next
-				// The record was just read and written, so what somebody wants
-				// is in hand at no extra cost. Stopping here rather than at the
-				// end of the transfer is the difference between a pause button
-				// that works and one that takes effect in forty minutes.
-				if w := updated.Wants(); w != job.WantRun {
-					onIntent(w)
-					return
-				}
-				// Three renewals per TTL, the interval keeper.hold already
-				// holds a lease at, rather than one per checkpoint: the
-				// checkpoint interval is a property of the link and on a fast
-				// one it renewed a thirty-second lease a hundred times in six
-				// seconds. Losing the lease is still noticed at every
-				// checkpoint, because the Update above is refused for the same
-				// two reasons a renewal is.
-				if time.Since(lastRenew) < renewEvery(r.LeaseTTL) {
-					return
-				}
-				lastRenew = time.Now()
-				_, rerr := r.Store.Renew(rec.ID, epoch, r.LeaseTTL)
-				if rerr != nil {
-					lost = rerr
-					dropped()
-				}
+				mu.Lock()
+				defer mu.Unlock()
+				report(written, total, false)
 			},
 		})
+		stopQuiet()
 		// Whatever landed is proven to the same standard the prefix was held to,
 		// so fold it in before answering — success or failure. On failure that
 		// is the difference between a stop that keeps its bytes and one that

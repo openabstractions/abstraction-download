@@ -49,8 +49,7 @@ var ErrReservedPath = forever("download: sink path is reserved by the store")
 var ErrForeignPath = errors.New("download: sink path names another platform's filesystem")
 
 // besideTheStore are the names this layer keeps in the store root. The store
-// owns jobs/, work/ and services.json; these are ours, and a sink must not name
-// them either.
+// owns jobs/ and work/; these are ours, and a sink must not name them either.
 //
 // Spelled from the constants rather than beside them, so a heartbeat that gets
 // renamed cannot leave this list pointing at a file nobody writes any more.

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(download_request_consumer LANGUAGES CXX)
 find_package(abstraction_download_request CONFIG REQUIRED)
-foreach(dependency download download_runner discovery job job_layout cas ipc Threads::Threads)
+foreach(dependency download download_runner job job_layout cas ipc Threads::Threads)
     if(TARGET abstraction::${dependency} OR TARGET ${dependency})
         message(FATAL_ERROR "Request vocabulary pulled provider dependency ${dependency}")
     endif()

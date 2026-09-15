@@ -267,13 +267,21 @@ func TestAnAbsoluteSinkIsNotHandedToASupervisor(t *testing.T) {
 			t.Fatal(err)
 		}
 		if rec.Error != "" {
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("nobody worked it: state %s, error %q — it was left to a "+
 				"supervisor that cannot reach the sink", rec.State, rec.Error)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	// The worker records the error before it releases its lease. Waiting for it
+	// keeps that write out of the store directory the test cleanup removes.
+	for svc.(*client).working(h.ID()) {
+		if time.Now().After(deadline) {
+			t.Fatal("worker never stopped")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

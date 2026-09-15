@@ -132,11 +132,16 @@ inline void esc(std::string& out, const std::string& s) {
     out += '"';
 }
 
-inline const std::vector<std::string> kFailureNames = {"abstraction.download/failure@1"};
+inline const std::vector<std::string> kFailureNames = {"abstraction.download/failure@1", "abstraction.download/failure@2"};
 
+// Cause appears only under failure@2. When a writer knows it, it is one word:
+// digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
+// server_error, transport or other. Empty means unreported. The class is
+// permanent alone.
 struct Failure {
     std::string error;
     bool permanent = false;
+    std::string cause;
 };
 
 inline void enc_failure(std::string& out, const Failure& v, int depth) {
@@ -153,6 +158,14 @@ inline void enc_failure(std::string& out, const Failure& v, int depth) {
         esc(out, "permanent");
         out += ": ";
         out += v.permanent ? "true" : "false";
+    }
+    if (!v.cause.empty()) {
+        out += ',';
+        out += '\n';
+        pad(out, depth + 1);
+        esc(out, "cause");
+        out += ": ";
+        esc(out, v.cause);
     }
     out += '\n';
     pad(out, depth);
@@ -497,6 +510,10 @@ inline Failure decode_failure(Reader& r) {
                 if (seen & 2u) r.refuse("duplicate_field");
                 seen |= 2u;
                 v.permanent = r.boolean();
+            } else if (key == "cause") {
+                if (seen & 4u) r.refuse("duplicate_field");
+                seen |= 4u;
+                v.cause = r.str();
             } else {
                 r.refuse("unknown_field");
             }

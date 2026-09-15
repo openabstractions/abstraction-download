@@ -154,7 +154,6 @@ static void test_sink_may_not_name_the_stores_own_files() {
         "work",
         "work/" + other,
         "work/" + other + "/part",
-        "services.json",
         "supervisor.json",
         "supervisor.json.tmp",
         "supervisor.sock",
@@ -181,7 +180,7 @@ static void test_sink_may_not_name_the_stores_own_files() {
         "models/x.gguf",
         "jobsy/x.json",
         "a/jobs/x.json",
-        "services.json.bak",
+        "services.json",
         "D:\\models\\x.gguf",
         "/mnt/models/x.gguf",
     };

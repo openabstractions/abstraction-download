@@ -241,7 +241,7 @@ function validUtf8(b) {
 }
 
 class Reader {
-  constructor(buf) { this.buf = buf; this.pos = 0; this.depth = 0; }
+  constructor(buf) { this.buf = buf; this.pos = 0; this.depth = 0; this.limit = DEPTH_LIMIT; }
 
   refuse(word) { return new Refusal(word, this.pos); }
 
@@ -253,7 +253,7 @@ class Reader {
 
   enter() {
     this.depth++;
-    if (this.depth > DEPTH_LIMIT) throw this.refuse("depth_exceeded");
+    if (this.depth > this.limit) throw this.refuse("depth_exceeded");
   }
 
   string() {
@@ -492,14 +492,24 @@ function decodeList(r, elem) {
   return out;
 }
 
+// Expected content identity and size. Empty digest and zero size mean unknown.
+// A supplied digest is verified before delivery.
 export function newArtifact() {
   return { digest: "", size: 0n };
 }
 
+// A location interpreted by its named source scheme. Execution providers
+// declare which schemes they support. Credentials require a separately
+// authorized capability.
 export function newSource() {
   return { scheme: "", locator: "" };
 }
 
+// Service request payload for recoverable job admission with kind download. The
+// provider owns result allocation and all partial files. Request identity,
+// required guarantees and cancellation use the job service. This payload
+// contains no provider paths. The initial execution profile supports anonymous
+// HTTP(S); unsupported work is sealed as definitely not accepted.
 export function newRequest() {
   return { artifact: newArtifact(), sources: [] };
 }
@@ -634,4 +644,167 @@ export const refusals = ["malformed", "bad_string", "number_spelling", "wrong_ty
 
 export function refusalRank(word) {
   return refusals.indexOf(word);
+}
+
+const _namedRecords = Object.create(null);
+_namedRecords["Artifact"] = [["digest","string","zero"],["size","i64","zero"],];
+_namedRecords["Source"] = [["scheme","string","never"],["locator","string","never"],];
+_namedRecords["Request"] = [["artifact","Artifact","never"],["sources","list<Source>","never"],];
+function _namedCheck(kind, value, depth = 0, limit = DEPTH_LIMIT) {
+  if (depth > limit) throw new Refusal("depth_exceeded", 0);
+  let valid = false;
+  if (kind === "string") {
+    valid = typeof value === "string";
+    if (valid) for (const ch of value) {
+      const cp = ch.codePointAt(0);
+      if (cp >= 0xd800 && cp <= 0xdfff) throw new Refusal("bad_string", 0);
+    }
+  } else if (kind === "i32") {
+    valid = typeof value === "number" && Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+  } else if (kind === "i64") {
+    valid = typeof value === "bigint" && value >= -9223372036854775808n && value <= 9223372036854775807n;
+  } else if (kind === "bool") valid = typeof value === "boolean";
+  else if (kind === "json") {
+    valid = typeof value === "string" || value instanceof Uint8Array;
+    if (valid) { const r = new Reader(typeof value === "string" ? ENC.encode(value) : value); r.depth = depth; r.ws(); r.rawValue(); r.ws(); if (r.pos !== r.buf.length) throw r.refuse("trailing_bytes"); }
+  } else if (kind.startsWith("list<")) {
+    valid = Array.isArray(value);
+    if (valid) for (const item of value) _namedCheck(kind.slice(5,-1), item, depth + 1, limit);
+  } else if (kind.startsWith("map<string,")) {
+    valid = value !== null && typeof value === "object" && !Array.isArray(value);
+    if (valid) for (const [key,item] of Object.entries(value)) { _namedCheck("string",key,depth+1,limit); _namedCheck(kind.slice(11,-1),item,depth+1,limit); }
+  } else {
+    const fields = _namedRecords[kind];
+    valid = fields !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
+    if (valid) for (const [name,type,omit] of fields) {
+      if (!Object.hasOwn(value,name)) throw new Refusal("missing_field",0);
+      const item = value[name];
+      if (omit === "absent" && item === null) continue;
+      _namedCheck(type,item,depth+1,limit);
+    }
+  }
+  if (!valid) throw new Refusal("wrong_type", 0);
+}
+
+export function checkArtifact(v, depth = 0, limit = DEPTH_LIMIT) {
+  _namedCheck("Artifact", v, depth, Math.min(limit, DEPTH_LIMIT));
+}
+
+export function checkSource(v, depth = 0, limit = DEPTH_LIMIT) {
+  _namedCheck("Source", v, depth, Math.min(limit, DEPTH_LIMIT));
+}
+
+export function checkRequest(v, depth = 0, limit = DEPTH_LIMIT) {
+  _namedCheck("Request", v, depth, Math.min(limit, DEPTH_LIMIT));
+}
+
+export function decodeArtifactAt(data, depth, limit) {
+  const r = new Reader(data);
+  if (depth < 0 || limit < 1) throw r.refuse("depth_exceeded");
+  r.depth = depth;
+  r.limit = Math.min(limit, DEPTH_LIMIT);
+  r.ws();
+  const v = decode_artifact(r);
+  return [v, r.pos];
+}
+
+export function encodeArtifactAt(v, depth) {
+  if (depth < 0 || depth >= DEPTH_LIMIT) throw new Refusal("depth_exceeded", 0);
+  checkArtifact(v, depth, DEPTH_LIMIT);
+  const out = new Out();
+  enc_artifact(out, v, depth);
+  const bytes = out.bytes();
+  decodeArtifactAt(bytes, depth, DEPTH_LIMIT);
+  return bytes;
+}
+
+export function encodeArtifact(v) {
+  const bytes = encodeArtifactAt(v, 0);
+  const out = new Uint8Array(bytes.length + 1);
+  out.set(bytes);
+  out[bytes.length] = 0x0a;
+  return out;
+}
+
+export function decodeArtifact(data) {
+  const [v, n] = decodeArtifactAt(data, 0, DEPTH_LIMIT);
+  const r = new Reader(data);
+  r.pos = n;
+  r.ws();
+  if (r.pos !== r.buf.length) throw r.refuse("trailing_bytes");
+  return v;
+}
+
+export function decodeSourceAt(data, depth, limit) {
+  const r = new Reader(data);
+  if (depth < 0 || limit < 1) throw r.refuse("depth_exceeded");
+  r.depth = depth;
+  r.limit = Math.min(limit, DEPTH_LIMIT);
+  r.ws();
+  const v = decode_source(r);
+  return [v, r.pos];
+}
+
+export function encodeSourceAt(v, depth) {
+  if (depth < 0 || depth >= DEPTH_LIMIT) throw new Refusal("depth_exceeded", 0);
+  checkSource(v, depth, DEPTH_LIMIT);
+  const out = new Out();
+  enc_source(out, v, depth);
+  const bytes = out.bytes();
+  decodeSourceAt(bytes, depth, DEPTH_LIMIT);
+  return bytes;
+}
+
+export function encodeSource(v) {
+  const bytes = encodeSourceAt(v, 0);
+  const out = new Uint8Array(bytes.length + 1);
+  out.set(bytes);
+  out[bytes.length] = 0x0a;
+  return out;
+}
+
+export function decodeSource(data) {
+  const [v, n] = decodeSourceAt(data, 0, DEPTH_LIMIT);
+  const r = new Reader(data);
+  r.pos = n;
+  r.ws();
+  if (r.pos !== r.buf.length) throw r.refuse("trailing_bytes");
+  return v;
+}
+
+export function decodeRequestAt(data, depth, limit) {
+  const r = new Reader(data);
+  if (depth < 0 || limit < 1) throw r.refuse("depth_exceeded");
+  r.depth = depth;
+  r.limit = Math.min(limit, DEPTH_LIMIT);
+  r.ws();
+  const v = decode_request(r);
+  return [v, r.pos];
+}
+
+export function encodeRequestAt(v, depth) {
+  if (depth < 0 || depth >= DEPTH_LIMIT) throw new Refusal("depth_exceeded", 0);
+  checkRequest(v, depth, DEPTH_LIMIT);
+  const out = new Out();
+  enc_request(out, v, depth);
+  const bytes = out.bytes();
+  decodeRequestAt(bytes, depth, DEPTH_LIMIT);
+  return bytes;
+}
+
+export function encodeRequest(v) {
+  const bytes = encodeRequestAt(v, 0);
+  const out = new Uint8Array(bytes.length + 1);
+  out.set(bytes);
+  out[bytes.length] = 0x0a;
+  return out;
+}
+
+export function decodeRequest(data) {
+  const [v, n] = decodeRequestAt(data, 0, DEPTH_LIMIT);
+  const r = new Reader(data);
+  r.pos = n;
+  r.ws();
+  if (r.pos !== r.buf.length) throw r.refuse("trailing_bytes");
+  return v;
 }

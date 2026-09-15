@@ -71,15 +71,16 @@ func capabilities() string {
 // negotiates over and it belongs where a harness can diff it against the other
 // two.
 func models() string {
-	names := append(job.KnownFeatures(), dl.FailureExtension)
+	names := append(job.KnownFeatures(), dl.FailureExtension, dl.FailureCauseExtension)
 	sort.Strings(names)
 	var lines []string
 	for _, name := range names {
 		// The failure class is never critical by its own rule: an unreadable
 		// class and an absent class are one answer [DL-E16], so refusing the
-		// record over it would contradict the payload's own fallback.
+		// record over it would contradict the payload's own fallback. The typed
+		// cause rides beside it and never decides the class, so it is not either.
 		mark := "critical-ok"
-		if job.NeverCritical(name) || name == dl.FailureExtension {
+		if job.NeverCritical(name) || name == dl.FailureExtension || name == dl.FailureCauseExtension {
 			mark = "never-critical"
 		}
 		lines = append(lines, name+" "+mark)

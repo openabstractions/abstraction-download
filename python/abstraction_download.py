@@ -206,7 +206,7 @@ def vouched_host(locator: str) -> str:
     authority is therefore compared with the bytes it was made from.
     """
     if locator.startswith("\\\\"):
-        return _plain_host(re.split(r"[/\\?#]", locator[2:], 1)[0], locator)
+        return _plain_host(re.split(r"[/\\?#]", locator[2:], maxsplit=1)[0], locator)
     try:
         parts = urllib.parse.urlsplit(locator)
         host, netloc = parts.hostname, parts.netloc
@@ -241,7 +241,7 @@ def _authority_bytes(locator: str) -> str:
     after = locator.split("://", 1)[1] if "://" in locator else (
         locator[2:] if locator.startswith("//") else None
     )
-    return "" if after is None else re.split(r"[/?#]", after, 1)[0]
+    return "" if after is None else re.split(r"[/?#]", after, maxsplit=1)[0]
 
 
 def _plain_host(host: str, locator: str) -> str:
@@ -474,6 +474,25 @@ def _read_failure(payload: Any) -> Tuple[Optional[str], bool]:
     if not isinstance(mark, bool):
         return None, False
     return str(text), mark
+
+
+# The name a record carries the last failure's typed cause under: failure@1's
+# shape plus `cause`, written only beside failure@1 by a runner whose owner opts
+# in (the Go service runner does). download.thrift's `failure_names`, second entry.
+FAILURE_CAUSE_EXTENSION = "abstraction.download/failure@2"
+
+
+def last_failure_cause(rec: Record) -> str:
+    """The typed cause of a record's last failure, or "" when no readable
+    failure@2 payload is present. It never decides the class: that is
+    last_failure's, from failure@1 alone [DL-E16]."""
+    payload = rec.extensions.get(FAILURE_CAUSE_EXTENSION)
+    if not isinstance(payload, dict) or set(payload) - {"error", "permanent", "cause"}:
+        return ""
+    if not isinstance(payload.get("error"), str) or not isinstance(payload.get("permanent", False), bool):
+        return ""
+    cause = payload.get("cause", "")
+    return cause if isinstance(cause, str) else ""
 
 
 # How long a job that recorded a failure is left alone before anybody tries it
@@ -1101,8 +1120,8 @@ def escapes_root(p: str) -> str:
     return ""
 
 
-# The names this layer keeps in the store root, beside the store's own jobs/,
-# work/ and services.json. Spelled from the constants the writers use rather
+# The names this layer keeps in the store root, beside the store's own jobs/
+# and work/. Spelled from the constants the writers use rather
 # than beside them, so a heartbeat that gets renamed cannot leave this list
 # pointing at a file nobody writes any more.
 # supervisor.sock is bound by nothing since the bus, but CONTRACT.md and the
@@ -1453,7 +1472,9 @@ def store_root() -> str:
     at all, so a store chosen in the control panel was invisible here and work
     was submitted into a directory nobody was watching.
     """
-    return _config.job_store()[0]
+    # The download provider owns this legacy store; older config copies lack the
+    # explicit name.
+    return _config.legacy_job_store()[0]
 
 
 @dataclass
@@ -2527,6 +2548,14 @@ class Client:
         # -- and a test that walks away from a transfer leaves it writing into a
         # directory the test is deleting. Kept so a test can settle.
         self._workers: List[threading.Thread] = []
+        # One worker per job in this Client. Every worker claims under the same
+        # runner.owner, and the store lets an owner re-claim a lease it already
+        # holds, so a second worker would take a new epoch beside the first and
+        # race it over one partial: the first renames it to the final name while
+        # the second is opening it. The lease cannot fence two holders who share
+        # an owner name; this map does.
+        self._running: Dict[str, threading.Thread] = {}
+        self._running_lock = threading.Lock()
 
     def get(self, source: str, destination: str = "") -> str:
         """Fetch source to destination. A directory takes the name from the
@@ -2706,6 +2735,11 @@ class Client:
         finds this job as an orphan if this process dies mid-transfer, and
         nothing in the record tells it not to.
         """
+        if self._working(job_id):
+            # This Client already works the job. Its worker's outcome is the
+            # current one; clearing the failure or claiming here would take the
+            # lease out from under it.
+            return
         self._clear_last_error(job_id)
         bound_here = not _relative_everywhere(spec.sink.final)
         sup, live = supervisor_of(self.store)
@@ -2714,9 +2748,19 @@ class Client:
             # the process that wrote it, an endpoint does not.
             if nudge(self.store) != NOBODY:
                 return
-        worker = threading.Thread(target=self._run_here, args=(job_id,), daemon=True)
-        self._workers.append(worker)
-        worker.start()
+        with self._running_lock:
+            current = self._running.get(job_id)
+            if current is not None and current.is_alive():
+                return
+            worker = threading.Thread(target=self._run_here, args=(job_id,), daemon=True)
+            self._running[job_id] = worker
+            self._workers.append(worker)
+            worker.start()
+
+    def _working(self, job_id: str) -> bool:
+        with self._running_lock:
+            current = self._running.get(job_id)
+            return current is not None and current.is_alive()
 
     def _clear_last_error(self, job_id: str) -> None:
         """A new attempt is not the previous attempt's failure.
@@ -2756,21 +2800,26 @@ class Client:
         and is refused. It will lapse, because the owner is gone. Anything else
         stops the loop, and the record is where the outcome lives either way.
         """
-        deadline = time.monotonic() + 2 * self.runner.lease_ttl + 5
-        while True:
-            try:
-                self.runner.run(job_id)
-                return
-            except LeaseHeld:
-                pass
-            except Exception:
-                return  # on the record already; nobody is listening here
-            if time.monotonic() > deadline:
-                return
-            rec = self.store.load(job_id)
-            if rec.terminal() or rec.state == TRANSFERRED:
-                return
-            time.sleep(1)
+        try:
+            deadline = time.monotonic() + 2 * self.runner.lease_ttl + 5
+            while True:
+                try:
+                    self.runner.run(job_id)
+                    return
+                except LeaseHeld:
+                    pass
+                except Exception:
+                    return  # on the record already; nobody is listening here
+                if time.monotonic() > deadline:
+                    return
+                rec = self.store.load(job_id)
+                if rec.terminal() or rec.state == TRANSFERRED:
+                    return
+                time.sleep(1)
+        finally:
+            with self._running_lock:
+                if self._running.get(job_id) is threading.current_thread():
+                    del self._running[job_id]
 
 
 def discover(store: Optional[Store] = None) -> Client:

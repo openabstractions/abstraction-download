@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
@@ -159,6 +160,14 @@ func NewClient(r *Runner, opts ...Option) Client {
 type client struct {
 	runner *Runner
 	opts   Options
+
+	// running holds the jobs this client has a worker for. Every worker claims
+	// under runner.Owner, and the store lets an owner re-claim a lease it
+	// already holds, so a second worker would take a new epoch beside the first
+	// and race it over one partial. The lease cannot fence two holders who share
+	// an owner name; this set does.
+	mu      sync.Mutex
+	running map[string]bool
 }
 
 func (s *client) Open(id string) Handle {
@@ -462,16 +471,41 @@ func (s *client) inFlight(spec Spec) string {
 // — can still see it. A returned error would be visible only to whoever happened
 // to still be running, which is the audience that does not need telling.
 func (s *client) begin(id string, spec Spec) {
+	if s.working(id) {
+		// This client already works the job. Its worker's outcome is the current
+		// one; clearing the failure would claim the lease out from under it.
+		return
+	}
 	s.clearLastError(id)
 	if _, here := s.performer(spec); here {
-		go s.runHere(id)
+		s.startHere(id)
 		return
 	}
 	// The heartbeat predicts and the connection decides: a beat outlives the
 	// process that wrote it, an endpoint does not.
 	if err := Nudge(s.runner.Store); errors.Is(err, ErrNoSupervisor) && s.opts.Execution != ExecuteDelegated {
-		go s.runHere(id)
+		s.startHere(id)
 	}
+}
+
+func (s *client) working(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running[id]
+}
+
+// startHere starts one worker per job for this client.
+func (s *client) startHere(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running[id] {
+		return
+	}
+	if s.running == nil {
+		s.running = map[string]bool{}
+	}
+	s.running[id] = true
+	go s.runHere(id)
 }
 
 // unknownCapability refuses a word nothing here has ever heard of.
@@ -683,6 +717,11 @@ func couldDeliverHere(sup Supervisor) bool {
 // is gone. Anything else — the job finishing, someone else adopting it, a real
 // error — stops the loop, and the record is where the outcome lives either way.
 func (s *client) runHere(id string) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.running, id)
+		s.mu.Unlock()
+	}()
 	ctx := context.Background()
 	deadline := time.Now().Add(2*s.runner.LeaseTTL + 5*time.Second)
 	for {

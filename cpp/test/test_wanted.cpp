@@ -86,7 +86,6 @@ void test_the_door_refuses_what_a_share_could_aim_at_the_supervisor() {
     check("traversal spelled with a detour", refuses(url + "models/../../evil"));
     check("job record", refuses(url + "jobs/x.json"));
     check("another job's scratch", refuses(url + "work/other"));
-    check("the registry", refuses(url + "services.json"));
     check("the heartbeat", refuses(url + "supervisor.json"));
     check("the drop folder itself", refuses(url + "wanted/again.txt"));
     check("the drop folder, any case", refuses(url + "Wanted/again.txt"));

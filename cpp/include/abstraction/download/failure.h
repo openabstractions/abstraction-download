@@ -26,6 +26,11 @@ namespace download {
 // payload's version, so a change to the shape is a change to both.
 inline const std::string& failure_extension() { return rec::kFailureNames.front(); }
 
+// The name a record carries the typed cause under: failure@1's shape plus
+// `cause`, written only beside failure@1 by a runner whose owner opts in (the Go
+// service runner does). The definition's second name.
+inline const std::string& failure_cause_extension() { return rec::kFailureNames.at(1); }
+
 // Whether trying this job again, unchanged, is pointless. Two names and not a
 // membership list: this layer's own refusals say so where they are thrown, and
 // the job layer's Invalid means the record itself will never be readable, which
@@ -77,6 +82,20 @@ inline std::optional<Error> last_failure(const job::Record& r) {
         return std::nullopt;
     }
     return Error(r.error, false);
+}
+
+// The typed cause of a record's last failure, or "" when no readable failure@2
+// payload is present. It never decides the class: that is last_failure's, from
+// failure@1 alone [DL-E16].
+inline std::string last_failure_cause(const job::Record& r) {
+    if (!r.extensions.contains(failure_cause_extension())) {
+        return "";
+    }
+    try {
+        return rec::decode(r.extensions.at(failure_cause_extension()).dump()).cause;
+    } catch (const rec::Refusal&) {
+        return "";
+    }
 }
 
 }  // namespace download

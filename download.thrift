@@ -66,7 +66,11 @@ refusal {
 // because there is one version. An incompatible change to the shape below is a
 // SECOND entry and a second key, never an edit to this one — which is the whole
 // reason the shape can afford to refuse an unknown field.
-const list<string> failure_names = ["abstraction.download/failure@1"]
+//
+// failure@2 is that second key. It carries the same shape plus `cause`, is
+// written only beside failure@1 by a runner whose owner opts in, and failure@1
+// never carries `cause`. A reader that knows only failure@1 keeps the class.
+const list<string> failure_names = ["abstraction.download/failure@1", "abstraction.download/failure@2"]
 
 // Why the last attempt ended, and whether trying again could ever help.
 //
@@ -88,4 +92,5 @@ const list<string> failure_names = ["abstraction.download/failure@1"]
 struct Failure {
   1: required string error
   2: optional bool permanent (omit = "zero")
-} (document = "true", unknown_fields = "refuse")
+  3: optional string cause (omit = "zero")
+} (document = "true", unknown_fields = "refuse", doc="Cause appears only under failure@2. When a writer knows it, it is one word: digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused, server_error, transport or other. Empty means unreported. The class is permanent alone.")

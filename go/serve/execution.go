@@ -63,17 +63,40 @@ func (HTTPExecution) Prepare(id, kind string, raw []byte) ([]byte, error) {
 }
 
 func (e HTTPExecution) Serve(ctx context.Context, store job.Store) error {
-	return serveExecution(ctx, store, e.OnError, nil)
+	return serveExecutionWith(ctx, store, e.OnError, nil, httpTerminal)
 }
 
+// httpTerminal ends the failures the download-http-request-v1 profile treats as
+// final beyond the library's refusals [JOB-A8]: bytes that fail their digest and
+// a source larger than the requested size. Trying the same operation again
+// fetches the same answer; a caller retries through a new attempt [JOB-A7].
+// Network errors and 5xx answers stay retryable.
+// A mismatch over a resumed prefix stays retryable: the runner restarts from
+// zero, and only a mismatch over bytes fetched from zero ends the operation.
+func httpTerminal(err error) bool {
+	mismatch := errors.Is(err, download.ErrDigestMismatch) && !errors.Is(err, download.ErrResumedMismatch)
+	return mismatch || errors.Is(err, download.ErrOversize)
+}
+
+// configureRunner lets tests shorten the service runner's intervals.
+var configureRunner = func(*download.Runner) {}
+
 func serveExecution(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator) error {
+	return serveExecutionWith(ctx, store, onError, delegates, nil)
+}
+
+func serveExecutionWith(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator, terminal func(error) bool) error {
 	runner := download.NewRunner(store, "service-"+job.NewID())
+	runner.Terminal = terminal
+	// A service profile with its own terminal policy also reports typed causes.
+	runner.RecordCause = terminal != nil
 	runner.Fetchers = download.NewFetchers(download.HTTP{})
 	if delegates != nil {
 		runner.Delegators = download.NewDelegators(delegates...)
 	}
 	runner.SharedStore = true
 	runner.Credentials = noExecutionCredentials{}
+	configureRunner(runner)
 	defer runner.Close()
 	watch := job.Watch(store, download.Kind)
 	defer watch.Close()

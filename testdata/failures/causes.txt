@@ -1,0 +1,10 @@
+# The typed cause each reader must recover from a record's
+# abstraction.download/failure@2 payload. A record this table does not name
+# carries no readable failure@2, and every reader must say "" for it.
+#
+# go-service-cause was written by the Go runner with RecordCause on, which is how
+# the service runner runs (serve/execution.go). The cause never decides the
+# class: expect.txt holds that, from failure@1 alone [DL-E16].
+#
+# name                  cause
+go-service-cause        digest_mismatch

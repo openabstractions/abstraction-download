@@ -156,7 +156,7 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 		}
 		if again.StatusCode != http.StatusOK {
 			again.Body.Close()
-			return nil, fmt.Errorf("download: %s: %s", req.Source.Locator, again.Status)
+			return nil, &StatusError{Code: again.StatusCode, text: fmt.Sprintf("download: %s: %s", req.Source.Locator, again.Status)}
 		}
 		return again, nil
 	}
@@ -324,9 +324,42 @@ func refused(status int) bool {
 	return false
 }
 
+// StatusError is an HTTP status that ended an attempt. A status on the refused
+// list unwraps to ErrRefused and is permanent; every other status is not now.
+type StatusError struct {
+	Code    int
+	text    string
+	refused bool
+}
+
+func (e *StatusError) Error() string { return e.text }
+
+func (e *StatusError) Unwrap() error {
+	if e.refused {
+		return ErrRefused
+	}
+	return nil
+}
+
+// Cause names the status in the failure payload's cause vocabulary.
+func (e *StatusError) Cause() string {
+	switch {
+	case e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden || e.Code == http.StatusProxyAuthRequired:
+		return "unauthorized"
+	case e.Code == http.StatusNotFound || e.Code == http.StatusGone:
+		return "not_found"
+	case e.Code >= 500:
+		return "server_error"
+	case e.refused:
+		return "refused"
+	default:
+		return "other"
+	}
+}
+
 // answered names the source and what it said, as a refusal nothing will retry.
 func answered(locator string, resp *http.Response) error {
-	return fmt.Errorf("%w: %s: %s", ErrRefused, locator, resp.Status)
+	return &StatusError{Code: resp.StatusCode, text: fmt.Sprintf("%v: %s: %s", ErrRefused, locator, resp.Status), refused: true}
 }
 
 // statusError is answered for a status on the list above and an ordinary "not
@@ -340,7 +373,7 @@ func statusError(locator string, resp *http.Response) error {
 	if refused(resp.StatusCode) {
 		return answered(locator, resp)
 	}
-	return fmt.Errorf("download: %s: %s", locator, resp.Status)
+	return &StatusError{Code: resp.StatusCode, text: fmt.Sprintf("download: %s: %s", locator, resp.Status)}
 }
 
 func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
@@ -366,7 +399,7 @@ func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
 		if refused(resp.StatusCode) {
 			return answered(req.Source.Locator, resp)
 		}
-		return fmt.Errorf("download: asked for bytes %d-%d, server answered %s", req.Range.Start, last, resp.Status)
+		return &StatusError{Code: resp.StatusCode, text: fmt.Sprintf("download: asked for bytes %d-%d, server answered %s", req.Range.Start, last, resp.Status)}
 	}
 	// A sequential fetch can trust its own offset because it only ever appends.
 	// A range is written into the middle of a file, so a proxy answering with a

@@ -49,3 +49,4 @@ legacy-no-key           retryable  go/v0.1.0, before the key existed
 forged-unknown-field    retryable  forged: a payload from a newer writer
 empty-retryable retryable synthetic: valid empty diagnostic regression
 empty-permanent permanent synthetic: valid empty diagnostic regression
+go-service-cause        retryable  abstraction-download/go runner with RecordCause (the service's setting), ErrDigestMismatch; the one edit is the locator's test-server port

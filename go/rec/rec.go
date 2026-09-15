@@ -187,11 +187,16 @@ func esc(out []byte, s string) []byte {
 	return append(out, '"')
 }
 
-var FailureNames = []string{"abstraction.download/failure@1"}
+var FailureNames = []string{"abstraction.download/failure@1", "abstraction.download/failure@2"}
 
+// Cause appears only under failure@2. When a writer knows it, it is one word:
+// digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
+// server_error, transport or other. Empty means unreported. The class is
+// permanent alone.
 type Failure struct {
 	Error     string
 	Permanent bool
+	Cause     string
 }
 
 func encFailure(out []byte, v *Failure, depth int) []byte {
@@ -212,6 +217,14 @@ func encFailure(out []byte, v *Failure, depth int) []byte {
 		} else {
 			out = append(out, 'f', 'a', 'l', 's', 'e')
 		}
+	}
+	if v.Cause != "" {
+		out = append(out, ',')
+		out = append(out, '\n')
+		out = pad(out, depth+1)
+		out = esc(out, "cause")
+		out = append(out, ':', ' ')
+		out = esc(out, v.Cause)
 	}
 	out = append(out, '\n')
 	out = pad(out, depth)
@@ -749,6 +762,16 @@ func (r *reader) decodeFailure() (*Failure, error) {
 					return nil, err
 				}
 				v.Permanent = x
+			case "cause":
+				if seen&4 != 0 {
+					return nil, r.refuse("duplicate_field")
+				}
+				seen |= 4
+				x, err := r.str()
+				if err != nil {
+					return nil, err
+				}
+				v.Cause = x
 			default:
 				return nil, r.refuse("unknown_field")
 			}

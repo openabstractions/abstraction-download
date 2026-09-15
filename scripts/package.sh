@@ -76,7 +76,8 @@ fi
 cd "$ROOT"
 ORG="${ABSTRACTION_ORG:-openabstractions}"
 SPLIT="${ABSTRACTION_SPLIT:-$ROOT/.split}"
-SERIES="$ROOT/research/gate/series.tsv"
+# scripts/check.sh points this at a scratch copy unless it runs with --record.
+SERIES="${ABSTRACTION_SERIES:-$ROOT/research/gate/series.tsv}"
 OUTDIR="$ROOT/research/pkg157"
 TABLE="$OUTDIR/PACKAGES.md"
 DATE="$(date +%Y-%m-%d)"

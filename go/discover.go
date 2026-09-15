@@ -57,7 +57,7 @@ func DiscoverIn(store job.Store) *Runner {
 // read all over this package and this method writes it; a process that also
 // reads it elsewhere publishes what it needs instead of reading across.
 func (r *Runner) Rebind() string {
-	cfg := config.Load()
+	cfg := config.LegacyLoad()
 	if stamp := cfg.Stamp() + "|" + strings.Join(r.NotServing, ","); stamp != r.bound || r.Delegators == nil {
 		r.bound = stamp
 		ds := NewDelegators(available(cfg)...)

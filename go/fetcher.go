@@ -258,7 +258,51 @@ var (
 	// A range lands in the middle of a file other ranges share, so the surplus
 	// would be written over a neighbour a different stream has already proven.
 	ErrOverrun = errors.New("download: the source sent more than the range it named")
+	// ErrOversize means a whole transfer delivered more bytes than the artifact
+	// size the request named. The library class stays "not now"; a service
+	// execution profile may end it through Runner.Terminal.
+	ErrOversize = errors.New("download: source sent more than the expected size")
+	// ErrResumedMismatch marks a digest mismatch over bytes that included a
+	// resumed prefix, which a crash may have left corrupt. The partial and its
+	// checkpoint are already discarded, so the next run starts from zero.
+	ErrResumedMismatch = errors.New("download: resumed bytes failed the digest; restarting from zero")
 )
+
+// Terminal marks err as final for this attempt's owner, keeping the original
+// error reachable through errors.Is and errors.As. Nil and already permanent
+// errors are returned unchanged.
+func Terminal(err error) error {
+	if err == nil || Permanent(err) {
+		return err
+	}
+	return permanent{err}
+}
+
+// CauseOf names why an attempt ended in the failure payload's cause vocabulary:
+// digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
+// server_error, transport or other. It returns "" for nil.
+func CauseOf(err error) string {
+	var status *StatusError
+	var transport interface{ Timeout() bool }
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrDigestMismatch):
+		return "digest_mismatch"
+	case errors.Is(err, ErrOversize):
+		return "oversize"
+	case errors.Is(err, ErrShortTransfer):
+		return "short_transfer"
+	case errors.As(err, &status):
+		return status.Cause()
+	case errors.Is(err, ErrRefused):
+		return "refused"
+	case errors.As(err, &transport):
+		return "transport"
+	default:
+		return "other"
+	}
+}
 
 // permanent marks an error as one that says no rather than not now, and forever
 // builds one.
@@ -271,6 +315,9 @@ var (
 type permanent struct{ error }
 
 func forever(text string) error { return permanent{errors.New(text)} }
+
+// Unwrap keeps the classified error's own identity reachable.
+func (p permanent) Unwrap() error { return p.error }
 
 // Permanent reports whether trying this job again, unchanged, is pointless.
 //
@@ -320,7 +367,41 @@ func setFailure(rr *job.Record, err error) error {
 		rr.Extensions = map[string]json.RawMessage{}
 	}
 	rr.Extensions[FailureExtension] = EncodeFailure(FailureOf(err))
+	// A cause from an earlier attempt never describes this one.
+	delete(rr.Extensions, FailureCauseExtension)
 	return nil
+}
+
+// FailureCauseExtension carries the failure@2 payload: failure@1's shape plus a
+// typed cause. It is written only beside failure@1, by a runner whose owner
+// opts in, so a reader that knows only failure@1 keeps the class [DL-E16].
+var FailureCauseExtension = rec.FailureNames[1]
+
+// setFailureCause adds failure@2 for the failure setFailure just recorded.
+func setFailureCause(rr *job.Record, err error) {
+	if err == nil || rr.Extensions == nil {
+		return
+	}
+	f := FailureOf(err)
+	f.Cause = CauseOf(err)
+	rr.Extensions[FailureCauseExtension] = EncodeFailure(f)
+}
+
+// LastFailureCause returns the typed cause of a record's last failure, or ""
+// when no readable failure@2 payload is present. It never decides the class.
+func LastFailureCause(r *job.Record) string {
+	if r == nil {
+		return ""
+	}
+	raw, ok := r.Extensions[FailureCauseExtension]
+	if !ok {
+		return ""
+	}
+	f, err := DecodeFailure(raw)
+	if err != nil {
+		return ""
+	}
+	return f.Cause
 }
 
 // clearFailure takes back both halves. Leaving the class behind when the
@@ -328,6 +409,7 @@ func setFailure(rr *job.Record, err error) error {
 func clearFailure(rr *job.Record) {
 	rr.Error = ""
 	delete(rr.Extensions, FailureExtension)
+	delete(rr.Extensions, FailureCauseExtension)
 }
 
 // LastFailure rebuilds the error a record's last attempt ended with, class
