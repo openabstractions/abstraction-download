@@ -90,22 +90,22 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-job
-          ref: fd81f613abbb1af3215b3c69285a06817ae50c27
+          ref: bc5b108eb6ce780f71638727d960d5b9b29cfdae
           path: abstraction-job
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-cas
-          ref: 22dd17e641e272e7e7c588321433d8cf3f714ecc
+          ref: ffe30f27e1753a37f5857ecd2d555e264fe6be79
           path: abstraction-cas
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-watch
-          ref: a4c1a93ad7de4e41605d265d870a8c97ac20f53a
+          ref: e3f37ca28f7d16dd4f7c97ef117b9718962b37ee
           path: abstraction-watch
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-config
-          ref: e441cd521a36549e0ae7a6d08b2d85cf00b0cacf
+          ref: fcf2e3253dae07e20cde8eaa93e8e9e78250e7c5
           path: abstraction-config
 
       - name: test
@@ -142,23 +142,23 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-job
-          ref: fd81f613abbb1af3215b3c69285a06817ae50c27
+          ref: bc5b108eb6ce780f71638727d960d5b9b29cfdae
           path: abstraction-job
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-cas
-          ref: 22dd17e641e272e7e7c588321433d8cf3f714ecc
+          ref: ffe30f27e1753a37f5857ecd2d555e264fe6be79
           path: abstraction-cas
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-watch
-          ref: a4c1a93ad7de4e41605d265d870a8c97ac20f53a
+          ref: e3f37ca28f7d16dd4f7c97ef117b9718962b37ee
           path: abstraction-watch
 
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: openabstractions/abstraction-identity
-          ref: 9b3c2c8c45763c3400da9aa8abe5f67cb071a5e1
+          ref: dd4b34fe3d059174283a2c5fa9562684357e8c10
           path: abstraction-identity
 
       # Exercise the shipped build graph, including discovery's shared IPC
