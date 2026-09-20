@@ -111,6 +111,9 @@ func TestPlatformSource(t *testing.T) {
 	switch {
 	case runtime.GOOS == "windows":
 		if err != nil {
+			if expectedPlatformUnavailable(err) {
+				t.Skipf("Windows Server has no Network List Manager cost source: %v", err)
+			}
 			t.Fatalf("Windows NLM source: %v", err)
 		}
 	case inWSL():
