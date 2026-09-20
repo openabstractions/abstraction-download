@@ -3,6 +3,7 @@ package download
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -429,28 +430,46 @@ func TestRenewalErasesConcurrentWrites(t *testing.T) {
 type corruptAfterEachRange struct {
 	RangeFetcher
 	partial string
+	byte    byte
 }
 
 func (c corruptAfterEachRange) FetchRange(ctx context.Context, req RangeRequest) error {
-	err := c.RangeFetcher.FetchRange(ctx, req)
-	if f, ferr := os.OpenFile(c.partial, os.O_WRONLY, 0); ferr == nil {
-		f.WriteAt([]byte{'!'}, 0)
-		f.Close()
+	if err := c.RangeFetcher.FetchRange(ctx, req); err != nil {
+		return err
 	}
-	return err
+	f, err := os.OpenFile(c.partial, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open partial for stray write: %w", err)
+	}
+	n, writeErr := f.WriteAt([]byte{c.byte}, 0)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return fmt.Errorf("stray write: %w", writeErr)
+	}
+	if n != 1 {
+		return fmt.Errorf("stray write wrote %d bytes, want 1", n)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close stray writer: %w", closeErr)
+	}
+	return nil
 }
 
 // The file is hashed after the last range, by path, with nothing holding it. If
 // the bytes change between the two, the digest catches it and everything is
 // thrown away. The parallel path is honest here; this pins that it stays so.
 func TestHashIsOverTheFileNotTheStream(t *testing.T) {
-	body, digest := payload(t, minParallel+7)
+	body, _ := payload(t, minParallel+7)
+	// Pin the byte that made the old fixture probabilistic: writing a constant
+	// '!' did not corrupt an artifact that already began with '!'.
+	body[0] = '!'
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
 	srv := newParallelServer(t, body)
 	r, store, id := parallelJob(t, body, digest, srv.URL+"/blob.bin")
 	partial := partialOf(t, store, id)
 
 	r.Connections = 2
-	r.Fetchers = NewFetchers(corruptAfterEachRange{HTTP{}, partial})
+	r.Fetchers = NewFetchers(corruptAfterEachRange{RangeFetcher: HTTP{}, partial: partial, byte: body[0] ^ 0xff})
 
 	err := r.Run(context.Background(), id)
 	if !errors.Is(err, ErrDigestMismatch) {

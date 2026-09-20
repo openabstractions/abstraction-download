@@ -145,7 +145,7 @@ func TestDelegationExecutionRecoversLostReplyAfterProviderRestart(t *testing.T) 
 		t.Fatalf("unknown submission retried/switched: original=%d fallback=%d", original.starts, fallback.starts)
 	}
 	unknown, err := p.BindOperations("authenticated-caller").ObserveWork(id)
-	if err != nil || unknown.Snapshot == nil || unknown.Snapshot.State != "running" {
+	if err != nil || unknown.Snapshot == nil || unknown.Snapshot.State.String() != "running" {
 		t.Fatal(unknown, err)
 	}
 	// New provider, runner and adapter instances know only their persisted roots.
@@ -167,27 +167,27 @@ func TestDelegationExecutionRecoversLostReplyAfterProviderRestart(t *testing.T) 
 		}
 	}
 	result, err := p.Bind("authenticated-caller").Reconcile(id)
-	if err != nil || result.Receipt == nil || result.Receipt.OperationId != accepted.Receipt.OperationId {
+	if err != nil || result.Receipt == nil || result.Receipt.OperationID != accepted.Receipt.OperationID {
 		t.Fatal(result, err)
 	}
 	observed, err := p.BindOperations("authenticated-caller").ObserveWork(id)
-	if err != nil || observed.Snapshot == nil || observed.Snapshot.State != "complete" {
+	if err != nil || observed.Snapshot == nil || observed.Snapshot.State.String() != "complete" {
 		t.Fatal(observed, err)
 	}
 	var got []byte
 	for {
 		part, err := p.BindOperations("authenticated-caller").ReadResult(id, int64(len(got)), 65536)
-		if err != nil || part.Chunk == nil || part.Outcome != "data" {
+		if err != nil || part.Chunk == nil || part.Outcome.String() != "data" {
 			t.Fatal(part, err)
 		}
-		if part.Chunk.Receipt.OperationId != accepted.Receipt.OperationId {
+		if part.Chunk.Receipt.OperationID != accepted.Receipt.OperationID {
 			t.Fatal("receipt changed")
 		}
-		if part.Chunk.Offset != int64(len(got)) || part.Chunk.Total != int64(len(body)) || len(part.Chunk.Data) > 65536 || (!part.Chunk.Eof && len(part.Chunk.Data) == 0) {
+		if part.Chunk.Offset != int64(len(got)) || part.Chunk.Total != int64(len(body)) || len(part.Chunk.Data) > 65536 || (!part.Chunk.EOF && len(part.Chunk.Data) == 0) {
 			t.Fatal("result bounds changed")
 		}
 		got = append(got, part.Chunk.Data...)
-		if part.Chunk.Eof {
+		if part.Chunk.EOF {
 			break
 		}
 	}

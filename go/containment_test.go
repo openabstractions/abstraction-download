@@ -65,9 +65,7 @@ func TestRefusalNamesThePathFromTheRecord(t *testing.T) {
 	if err == nil {
 		t.Fatal("no error")
 	}
-	// Spelled out in full, because Python and C++ must print this same string:
-	// see abstraction-download/python/test_abstraction_download.py and
-	// abstraction-download/cpp/test/test_sink_containment.cpp.
+	// Spelled out in full: the refusal text is what a caller reads.
 	const want = "download: sink path escapes the store root: ../../../Users/victim/.ssh/authorized_keys"
 	if err.Error() != want {
 		t.Fatalf("refusal reads\n  %s\nwant\n  %s", err, want)

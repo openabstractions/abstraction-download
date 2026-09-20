@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
-	"slices"
+	"regexp"
 	"strings"
 
 	download "github.com/openabstractions/abstraction-download/go"
@@ -13,31 +13,45 @@ import (
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
 )
 
+// credentialWord finds the credential:<outcome>:<name> word a credential
+// failure records.
+var credentialWord = regexp.MustCompile(`\b(credential:[a-z_]{1,32}:[A-Za-z0-9_.-]{1,64})`)
+
+// OperationWaiting reports the word a waiting attempt records [DL-N5, JOB-A15].
+func (HTTPExecution) OperationWaiting(record *job.Record) string {
+	return download.Waiting(record)
+}
+
 // OperationFailure reports the recorded class, checked against the record
 // state [JOB-A8], and the typed cause. Messages carry no locator or path.
 func (HTTPExecution) OperationFailure(record *job.Record) *api.WorkFailure {
 	if raw, ok := record.Extensions[download.FailureExtension]; ok {
 		if failure, err := download.DecodeFailure(raw); err == nil {
-			class := "unknown"
+			class := api.FailureClassUnknown
 			switch terminal := record.State == job.StateFailed; {
 			case terminal && failure.Permanent:
-				class = "permanent"
+				class = api.FailureClassPermanent
 			case !terminal && !failure.Permanent && !record.State.Terminal():
-				class = "retryable"
+				class = api.FailureClassRetryable
 			}
-			cause := download.LastFailureCause(record)
-			if cause != "" && !slices.Contains(api.FailureCauseNames, cause) {
+			cause := api.FailureCause(download.LastFailureCause(record))
+			if cause != "" && !cause.Known() {
 				cause = api.FailureCauseOther
 			}
 			message := "download attempt failed"
 			if cause != "" {
-				message += ": " + strings.ReplaceAll(cause, "_", " ")
+				message += ": " + strings.ReplaceAll(string(cause), "_", " ")
+			}
+			// A credential failure names the applier's outcome and the credential,
+			// never a secret: credential:<outcome>:<name>.
+			if word := credentialWord.FindStringSubmatch(failure.Error); cause == api.FailureCauseCredential && word != nil {
+				message = "download attempt failed: " + word[1]
 			}
 			return &api.WorkFailure{Classification: class, Message: message, Cause: cause}
 		}
 	}
 	if record.Error != "" || record.State == job.StateFailed {
-		return &api.WorkFailure{Classification: "unknown", Message: "download reported an unclassified failure"}
+		return &api.WorkFailure{Classification: api.FailureClassUnknown, Message: "download reported an unclassified failure"}
 	}
 	return nil
 }

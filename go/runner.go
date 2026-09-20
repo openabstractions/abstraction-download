@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/openabstractions/abstraction-download/go/netcost"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
@@ -65,6 +66,11 @@ type Runner struct {
 	// Reach is asked for every host before a connection is opened to it, at the
 	// same last moment a credential is resolved. Nil reaches everything.
 	Reach Reach
+
+	// Network is the cost source a job requiring network: unmetered waits on
+	// [DL-N3]. Nil means this runner cannot honour the constraint, and such a
+	// job is not now here (ErrNoNetworkCost).
+	Network netcost.Source
 
 	// SharedStore says the store this runner works may be written by machines
 	// other than this one — a NAS share, an SMB mount. On such a store an
@@ -161,10 +167,25 @@ func (r *Runner) Run(ctx context.Context, id string) error {
 		// record can ever stop waiting. So a refused write travels back with the
 		// failure: it is the only way the caller learns that the record it will
 		// go on to read says nothing about any of this.
+		if errors.Is(err, ErrWaiting) {
+			// Waiting is not a failure. The record says what it waits for, the
+			// bytes proven so far stay checkpointed, and the lease goes back so
+			// the work reads pending while nothing moves [DL-N4, DL-N5].
+			word := waitingWord(err)
+			_, wrote := r.Store.Update(id, epoch, func(rr *job.Record) error {
+				setWaiting(rr, word)
+				return nil
+			})
+			if letGo := r.release(id, epoch); wrote != nil || letGo != nil {
+				return errors.Join(wrote, letGo)
+			}
+			return err
+		}
 		if r.Terminal != nil && r.Terminal(err) {
 			err = Terminal(err)
 		}
 		_, wrote := r.Store.Update(id, epoch, func(rr *job.Record) error {
+			clearWaiting(rr)
 			if Permanent(err) {
 				rr.State = job.StateFailed
 			}
@@ -237,6 +258,9 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// An unavailable adapter leaves accepted work retryable; local adoption
 	// cannot discharge the downstream promise by marking it permanently failed.
 	if has(rec.Requires, string(CapRecoverableSubmission)) {
+		if refused := r.Delegators.refusal(rec.ID); refused != nil {
+			return refused
+		}
 		return ErrRecoverableSubmissionUnavailable
 	}
 	// Whatever this store has already proven goes ahead of every source the
@@ -244,6 +268,29 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// delegate's own earlier delivery, which the submitter cannot see and the
 	// record therefore cannot name.
 	spec.Sources = append(proven(r.Store, spec.Artifact.Digest, rec.ID), spec.Sources...)
+
+	// A network constraint is evaluated before anything is opened, and its
+	// gate rides the context so every later open asks it again [DL-N3].
+	gctx, gate, err := r.gateNetwork(ctx, rec, spec)
+	if err != nil {
+		return err
+	}
+	defer gate.stop()
+	// This attempt is now the record's last one, and an earlier attempt's
+	// failure no longer describes it. Left in place, that failure charged
+	// retry backoff to this attempt however it ended: a runtime stopped for an
+	// upgrade released the work and its successor waited out a minute of
+	// backoff for a failure from two attempts before [JOB-B2]. The failure
+	// that ends this attempt, if any, is recorded again when it ends.
+	if Waiting(rec) != "" || LastFailure(rec) != nil {
+		if _, err := r.Store.Update(rec.ID, epoch, func(rr *job.Record) error {
+			clearWaiting(rr)
+			clearFailure(rr)
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 
 	// The record's paths may be relative to the store, which is what lets the
 	// same record be worked on by this machine or by a NAS that mounts the store
@@ -263,7 +310,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	// A run that starts from proven bytes cannot prove them against the digest
 	// until the end; a mismatch then restarts from zero instead of ending the job.
 	resumed := rec.Progress.Done > 0
-	total, got, seen, err := r.transfer(ctx, rec, spec, epoch, partial, intent)
+	total, got, seen, err := r.transfer(gctx, rec, spec, epoch, partial, intent)
 	if fence := finishIntentWatch(); fence != nil {
 		return fence
 	}
@@ -283,6 +330,9 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 	if err != nil {
 		r.keepProven(rec.ID, epoch, total, seen)
 		removeEmptyPartial(partial)
+		if gate.held() || errors.Is(err, ErrWaiting) {
+			return ErrWaiting
+		}
 		return err
 	}
 
@@ -346,6 +396,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		rr.Progress.UpdatedAt = job.At(time.Now())
 		rr.State = job.StateTransferred
 		clearFailure(rr)
+		clearWaiting(rr)
 		return setCheckpoint(rr, Checkpoint{VerifiedPrefix: total, Validators: seen})
 	})
 	return err
@@ -614,6 +665,7 @@ func (r *Runner) honour(want job.Want, id string, epoch int64) error {
 		_, err := r.Store.Update(id, epoch, func(rr *job.Record) error {
 			rr.State = job.StateCancelled
 			clearFailure(rr)
+			clearWaiting(rr)
 			return nil
 		})
 		return err
@@ -751,10 +803,15 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 	defer dropped()
 
 	var lastErr error
+	requires := r.fetcherRequires(rec.Requires)
 	for _, src := range sources {
-		fetcher, ok := r.Fetchers.For(src, rec.Requires)
+		// Before each open, and so before each resumed range [DL-N3].
+		if err := networkAllows(ctx); err != nil {
+			return proven.VerifiedPrefix(), restarted, err
+		}
+		fetcher, ok := r.Fetchers.For(src, requires)
 		if !ok {
-			lastErr = noFetcherFor(r.Fetchers, src, rec.Requires)
+			lastErr = noFetcherFor(r.Fetchers, src, requires)
 			continue
 		}
 		if err := r.Reach.check(src.Locator); err != nil {
@@ -888,7 +945,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				report(n, latestTotal, true)
 			}
 		})
-		res, err := fetcher.Fetch(fetchCtx, Request{
+		res, err := fetcher.Fetch(withCredentialHops(fetchCtx, src, r.Credentials, headers), Request{
 			Source:     src,
 			From:       from,
 			To:         to,
@@ -1033,10 +1090,21 @@ func (r *Runner) Adopt(ctx context.Context) (int, error) {
 		if spec, err := SpecOf(o); err == nil && r.refuseUnportableSink(spec.Sink) != nil {
 			continue
 		}
-		if time.Now().Before(RetryAfter(o)) {
+		// Work already recorded as waiting stays unclaimed while the path is
+		// metered; the cost notice that ends the wait brings the next sweep
+		// [DL-N4]. Work not yet recorded as waiting is run, so it says so.
+		waiting := Waiting(o) != ""
+		if waiting && r.networkHolds(o) {
 			continue
 		}
-		if err := r.Run(ctx, o.ID); err != nil {
+		// A wait is no failed attempt, so the backoff of an earlier failure
+		// does not delay resuming it.
+		if !waiting && time.Now().Before(RetryAfter(o)) {
+			continue
+		}
+		if err := r.Run(ctx, o.ID); errors.Is(err, ErrWaiting) {
+			continue
+		} else if err != nil {
 			// One bad job must not stop the rest being rescued -- and must not
 			// disappear either. A bare `continue` here meant a job that failed
 			// every single sweep was indistinguishable from one nobody needed

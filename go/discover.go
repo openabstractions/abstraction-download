@@ -1,37 +1,18 @@
 package download
 
 import (
+	"os"
 	"strings"
 
 	config "github.com/openabstractions/abstraction-config/go"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
-// Discover is the whole integration, for an application that knows nothing.
-//
-//	r, err := download.Discover()
-//
-// It reads what this machine has — from the location a setup step wrote once,
-// not from anything the caller supplies — registers every tier that is present
-// AND reachable, and returns a Runner. A machine with a NAS set up delegates
-// there. A Windows machine without one delegates to BITS. A machine with neither
-// downloads in-process. The application branches on none of it and contains no
-// path, no hostname and no flag. Presence is the configuration.
-//
-// Presence is the configuration is right for a shipped application and unusable
-// in a test, in an embedded context, and for anybody who will not accept their
-// program's behaviour changing because something got installed. Those callers
-// name the executor with NewClient(DiscoverIn(store), WithExecution(...)) and
-// keep the store they chose. See Execution.
-func Discover() (*Runner, error) {
-	store, err := storeFor()
-	if err != nil {
-		return nil, err
-	}
-	return DiscoverIn(store), nil
-}
-
-// DiscoverIn is Discover against a store the caller already has open.
+// DiscoverIn builds a runner over a store the caller already has open. It
+// registers every delegation tier this machine's configuration names and can
+// reach, and the default refusals. Callers that will not accept their program's
+// behaviour changing because something got installed name the executor with
+// NewClient(DiscoverIn(store), WithExecution(...)). See Execution.
 func DiscoverIn(store job.Store) *Runner {
 	r := NewRunner(store, Owner())
 	r.Reach = DefaultRefusals().Check
@@ -57,7 +38,7 @@ func DiscoverIn(store job.Store) *Runner {
 // read all over this package and this method writes it; a process that also
 // reads it elsewhere publishes what it needs instead of reading across.
 func (r *Runner) Rebind() string {
-	cfg := config.LegacyLoad()
+	cfg := machineConfig()
 	if stamp := cfg.Stamp() + "|" + strings.Join(r.NotServing, ","); stamp != r.bound || r.Delegators == nil {
 		r.bound = stamp
 		ds := NewDelegators(available(cfg)...)
@@ -85,4 +66,16 @@ func (r *Runner) Tier() string {
 		return "here"
 	}
 	return r.Delegators.all[0].System()
+}
+
+// machineConfig is this process's reading of the machine's delegation tiers:
+// the configuration files with this process's own ABSTRACTION_* values as the
+// run overrides. The legacy download client is the provider that owns those
+// values; the config layer exports no process-environment loader since 0.1.8.
+func machineConfig() config.Config {
+	values := map[string]string{}
+	for _, name := range config.EnvVars {
+		values[name] = os.Getenv(name)
+	}
+	return config.LoadWithOverrides(values)
 }

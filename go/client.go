@@ -18,17 +18,15 @@ import (
 // Client is downloading, for an application that holds no store, no runner and
 // no opinion about who does the work.
 //
-// Submit, and who executes is settled below this line. If a supervisor is
-// watching this machine's store, it takes the work and this process may exit.
-// If not, this process does it — and if it exits mid-transfer, the record and
-// the partial are durable, the lease lapses, and the next supervisor or the
-// next launch adopts it.
+// Submit, and this process does the work. If it exits mid-transfer, the record
+// and the partial are durable, the lease lapses, and the next launch adopts it.
+// Work that must outlive the application goes through the runtime's job service
+// instead (`openabstractions download`, the facade's resolved job clients).
 //
 // An application that does have an opinion says so with WithExecution, and it
 // is still the same store: see Execution.
 //
-// Applications get one from abstraction.Discover; a program that only
-// downloads calls Open.
+// A program that holds a store builds one with NewClient(DiscoverIn(store)).
 type Client interface {
 	// Get fetches source to destination. If destination is a directory, the
 	// name is taken from the source.
@@ -113,14 +111,13 @@ type Client interface {
 type Execution string
 
 const (
-	// ExecuteAnywhere is discovery: a supervisor if one is watching, this
-	// process otherwise. The default, and what every existing caller gets.
+	// ExecuteAnywhere is the default and works the job in this process.
 	ExecuteAnywhere Execution = ""
 	// ExecuteHere works the job in this process and never hands it away.
 	ExecuteHere Execution = "here"
-	// ExecuteDelegated demands a supervisor, and Submit refuses with
-	// ErrNoDelegator when none is watching. Refusing is the point: silently
-	// running here instead is the collapse this option exists to prevent.
+	// ExecuteDelegated demands a store supervisor, and Submit refuses with
+	// ErrNoDelegator. No store supervisor exists since 0.1.8, so this always
+	// refuses; silently running here instead is the collapse it prevents.
 	ExecuteDelegated Execution = "delegated"
 )
 
@@ -168,6 +165,10 @@ type client struct {
 	// an owner name; this set does.
 	mu      sync.Mutex
 	running map[string]bool
+
+	// idle records submissions and starts no worker, for tests that measure
+	// submission alone and run every job explicitly.
+	idle bool
 }
 
 func (s *client) Open(id string) Handle {
@@ -226,32 +227,15 @@ func (s *client) Deliver(ctx context.Context, id string) (*job.Record, error) {
 
 // unattended reports that nothing is working this job right now.
 //
-// A delegated job holds no lease here and never will, so "claimable" says yes
-// about a transfer a NAS is actively performing. What answers for it is the
-// supervisor: it is the thing that reconciles the delegate into the record, and
-// if it is gone then so is every report the far side would ever have made.
+// A delegated job holds no lease here and never will. Nothing in this process
+// reconciles a delegate into the record, and the store supervisor that did was
+// removed in 0.1.8 (docs/REMOVED.md), so a delegated job waited on here is
+// unattended.
 func (s *client) unattended(rec *job.Record) bool {
 	if rec.Delegated() {
-		_, live := SupervisorOf(s.runner.Store)
-		return !live
+		return true
 	}
 	return s.runner.Store.Claimable(rec)
-}
-
-// Open is discovery plus a client, for a program that only downloads.
-//
-// It also hands back the job store, as the job.Store interface and never the
-// binding, for programs inside this layer — the reference CLI, the supervisor —
-// that read and render records. Applications above this layer call
-// abstraction.Discover instead and are handed no store at all.
-func Open() (Client, job.Store, error) {
-	r, err := Discover()
-	if err != nil {
-		return nil, nil, err
-	}
-	// Whatever content-addressed stores this machine has, so a download that is
-	// already on the disk becomes a local copy instead of a transfer.
-	return NewClient(r, WithStorage(storage.New(storage.Discover()...))), r.Store, nil
 }
 
 func (s *client) Jobs() job.Subscription { return job.Watch(s.runner.Store, Kind) }
@@ -265,34 +249,14 @@ func (s *client) Where() string {
 // it is the ONLY rule that decides either.
 //
 // One rule because the answer is published. A delegate is reached only through
-// a supervisor — begin nudges one or calls runHere, and runHere goes to
-// Fetchers and never to Delegators — so on a machine with nothing watching the
-// store, the delegation chain's head is a tier the work will never touch. Two
-// rules answering this drifted apart and named that tier in seven of ten runs
-// while it performed two, and it is the string an application shows a person to
-// tell them their download survives closing the app.
-func (s *client) performer(spec Spec) (name string, runsHere bool) {
-	if s.opts.Execution == ExecuteHere {
-		return "here", true
-	}
-	sup, live := SupervisorOf(s.runner.Store)
+// a store supervisor, and runHere goes to Fetchers and never to Delegators. No
+// store supervisor exists since 0.1.8, so this process works every job it
+// submits, and a client that demands delegation names nobody.
+func (s *client) performer(Spec) (name string, runsHere bool) {
 	if s.opts.Execution == ExecuteDelegated {
-		if !live {
-			return "nobody", false
-		}
-		return supervising(sup), false
+		return "nobody", false
 	}
-	if !live || (boundHere(spec) && !couldDeliverHere(sup)) {
-		return "here", true
-	}
-	return supervising(sup), false
-}
-
-func supervising(sup Supervisor) string {
-	if sup.Tier != "" {
-		return sup.Tier
-	}
-	return "the system downloader"
+	return "here", true
 }
 
 // Performer names who is working a job, read from the record that describes it
@@ -477,13 +441,7 @@ func (s *client) begin(id string, spec Spec) {
 		return
 	}
 	s.clearLastError(id)
-	if _, here := s.performer(spec); here {
-		s.startHere(id)
-		return
-	}
-	// The heartbeat predicts and the connection decides: a beat outlives the
-	// process that wrote it, an endpoint does not.
-	if err := Nudge(s.runner.Store); errors.Is(err, ErrNoSupervisor) && s.opts.Execution != ExecuteDelegated {
+	if _, here := s.performer(spec); here && !s.idle {
 		s.startHere(id)
 	}
 }
@@ -622,9 +580,6 @@ func (s *client) noExecutor() error {
 	if s.opts.Execution != ExecuteDelegated {
 		return nil
 	}
-	if _, live := SupervisorOf(s.runner.Store); live {
-		return nil
-	}
 	return fmt.Errorf("%w: nothing is watching this store", ErrNoDelegator)
 }
 
@@ -652,53 +607,6 @@ func (s *client) clearLastError(id string) {
 		return nil
 	})
 	s.runner.Store.Release(id, held.Lease.Epoch)
-}
-
-// boundHere reports whether the sink names a path only this machine has.
-//
-// A relative sink resolves against whichever store adopts the job, so any
-// machine watching can finish it. An ABSOLUTE one names this filesystem, and a
-// supervisor on a NAS handed that job would write to a directory that exists
-// here and not there — the bytes land somewhere useless, or nowhere, and the
-// application waits for a file that was never coming.
-//
-// So the fence is here, at the moment of deciding who works: a job nobody else
-// could deliver is not offered to anybody else. It is not the whole fence. A
-// supervisor sweeping a shared store still finds this job as an orphan if this
-// process dies mid-transfer, and nothing in the record tells it not to. That
-// wants a spec that can say "this sink is local to the submitter", which is a
-// contract change in three languages and has not been made.
-func boundHere(spec Spec) bool { return !relativeEverywhere(spec.Sink.Final) }
-
-// couldDeliverHere reports whether a supervisor could write a sink only this
-// machine's filesystem has: it shares the filesystem, and it runs as the account
-// whose tree the path is in.
-//
-// The fence was drawn one step too wide twice, in opposite directions, and both
-// were the same mistake — a correct statement about one tier generalised into a
-// rule about every tier.
-//
-// Too wide: a supervisor running HERE was refused work it could obviously
-// finish, because the reason the rule was written down was a NAS. The submitting
-// process ran it itself instead, so a ComfyUI download did not survive ComfyUI
-// closing, which is the headline this project makes.
-//
-// Not wide enough: "same machine" answers a question about the filesystem and
-// the question is about authority. A machine-wide supervisor running as
-// LocalSystem shares this filesystem and does not share this account's rights,
-// so a job whose sink is in a person's own models tree would be written — if it
-// were written at all — by a service reaching into user space. That is refused
-// here rather than discovered at the write. See Supervisor.User.
-//
-// Only the per-user case is admitted, and only when the supervisor says which it
-// is. A supervisor that names no host, or no account, is somebody else's process
-// answering nothing, and a missing answer is not a yes.
-func couldDeliverHere(sup Supervisor) bool {
-	if !announcedHere(sup) {
-		return false
-	}
-	me := Account()
-	return me != "" && sup.User != "" && strings.EqualFold(sup.User, me)
 }
 
 // runHere works the job in this process, waiting out a dead owner's lease.

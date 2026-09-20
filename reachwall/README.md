@@ -1,13 +1,14 @@
-# reachwall — the refused list, in the platform's own packet filter
+# reachwall — enforce a download refusal in the platform firewall
 
-`Refusals` (`abstraction-download/go/reach.go`) is a file of hosts this machine will not
-reach, each with a reason. The runner refuses them for every program that asks
-its seat. This compiles the same file into rules the platform enforces on
-programs that never asked: Windows Firewall, or nftables. The reason stays in
-our file and our error; the platform gets the host and the verdict.
+Give one host-refusal list to the download provider and the operating system.
+The provider returns the recorded reason to OA callers. `reachwall` compiles the
+same hosts into Windows Firewall or nftables rules, covering programs outside
+the OA service boundary. The native firewall receives the host and refusal
+verdict; the local `Refusals` file retains the human explanation.
 
-Front end in the `ufw` / `firewalld` sense: one small policy compiled into the
-native ruleset, replacing its own rules on every run. Go, standard library.
+It is a policy compiler in the `ufw` / `firewalld` sense: one small policy
+replaces reachwall's own rules on every run. The implementation uses the Go
+standard library.
 
 ## Run
 

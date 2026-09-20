@@ -2,11 +2,9 @@ package download
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,30 +23,6 @@ func withDelegate(t *testing.T) (*Runner, job.Store, string) {
 	return r, store, root
 }
 
-func watching(t *testing.T, store job.Store, tier string) {
-	t.Helper()
-	if err := Heartbeat(store, "test-supervisor@host:1", tier, "", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// watchingElsewhere is a supervisor on another machine, which is what makes an
-// absolute sink one it could not deliver.
-func watchingElsewhere(t *testing.T, store job.Store, tier string) {
-	t.Helper()
-	watching(t, store, tier)
-	b, err := json.Marshal(Supervisor{
-		Owner: "test-supervisor@elsewhere:1", Host: "elsewhere", PID: 1,
-		Seen: job.At(time.Now()), Every: time.Minute.String(), Tier: tier,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(heartbeatPath(store), b, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A delegate is reached only by a supervisor. Naming one when nothing is
 // watching the store tells a person their download survives closing the app,
 // and then this process runs it and the download dies with the app.
@@ -56,38 +30,6 @@ func TestWhereNamesNoDelegateNothingWouldReach(t *testing.T) {
 	r, _, _ := withDelegate(t)
 	if got := NewClient(r).Where(); got != "here" {
 		t.Fatalf("Where() = %q with nothing watching the store, want %q", got, "here")
-	}
-}
-
-func TestWhereNamesTheSupervisorThatWouldTakeIt(t *testing.T) {
-	r, store, _ := withDelegate(t)
-	watching(t, store, "fake-service")
-	if got := NewClient(r).Where(); got != "fake-service" {
-		t.Fatalf("Where() = %q with a supervisor watching, want %q", got, "fake-service")
-	}
-}
-
-// Where is published and begin dispatches, and they must not be able to
-// disagree: the string an application shows a person is the string that decides.
-func TestWhereAndBeginAgreeAboutWhoPerforms(t *testing.T) {
-	r, store, root := withDelegate(t)
-	svc := NewClient(r).(*client)
-	watchingElsewhere(t, store, "fake-service")
-
-	// A sink only this machine can resolve, and a supervisor that is not on
-	// this machine. begin runs it here; Where must say so.
-	local := Spec{
-		Sources: []Source{{Scheme: "http", Locator: "http://127.0.0.1:1/x.bin"}},
-		Sink:    Sink{Final: filepath.Join(root, "x.bin")},
-	}
-	name, here := svc.performer(local)
-	if !here || name != "here" {
-		t.Fatalf("performer(absolute sink, supervisor elsewhere) = %q here=%v, want \"here\" true", name, here)
-	}
-	portable := local
-	portable.Sink = Sink{Final: "out/x.bin"}
-	if name, here := svc.performer(portable); here || name != "fake-service" {
-		t.Fatalf("performer(portable sink) = %q here=%v, want \"fake-service\" false", name, here)
 	}
 }
 
@@ -279,17 +221,6 @@ func TestADelegateOnlyCapabilityIsRefusedAsRetryableWithNoSupervisor(t *testing.
 	}
 }
 
-func TestADelegateOnlyCapabilityIsAcceptedWhenASupervisorIsWatching(t *testing.T) {
-	r, store, _ := withDelegate(t)
-	watching(t, store, "fake-service")
-	if _, err := NewClient(r).Submit(Spec{
-		Sources: []Source{{Scheme: "http", Locator: "http://example.invalid/x.bin"}},
-		Sink:    Sink{Final: "out/x.bin"},
-	}, string(CapSurvivesProcessExit)); err != nil {
-		t.Fatalf("Submit refused work a watching supervisor's delegate promises: %v", err)
-	}
-}
-
 // offRoster is a plugin promising something this core has never named, which
 // Assured deliberately ignores rather than refuses so that a newer plugin
 // talking to an older core simply gets less.
@@ -303,15 +234,17 @@ func (offRoster) Capabilities() []Capability {
 // A word off the roster is a typo only when nothing registered claims it. A
 // plugin's own promise is not a typo.
 func TestAWordAPluginPromisesIsNotATypo(t *testing.T) {
-	r, store, _ := newRunner(t)
+	r, _, _ := newRunner(t)
 	r.Delegators = NewDelegators(offRoster{newFakeDelegate(nil)})
-	watching(t, store, "plugin")
 	spec := Spec{
 		Sources: []Source{{Scheme: "http", Locator: "http://example.invalid/x.bin"}},
 		Sink:    Sink{Final: "out/x.bin"},
 	}
-	if _, err := NewClient(r).Submit(spec, "nas_native_copy"); err != nil {
-		t.Fatalf("Submit refused a capability a registered plugin promises: %v", err)
+	// Only a delegate promises it and no store supervisor reaches a delegate,
+	// so the refusal is the retryable one that names the delegate.
+	if _, err := NewClient(r).Submit(spec, "nas_native_copy"); !errors.Is(err, ErrNoDelegator) ||
+		strings.Contains(err.Error(), "is not a capability") {
+		t.Fatalf("Submit called a capability a registered plugin promises a typo: %v", err)
 	}
 	if _, err := NewClient(r).Submit(spec, "nas_native_kopy"); err == nil {
 		t.Fatal("Submit accepted a word nothing has heard of")

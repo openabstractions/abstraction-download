@@ -112,6 +112,22 @@ See [`wire-truncated-body`](testdata/scenarios/wire-truncated-body.txt),
 [`wire-short-range`](testdata/scenarios/wire-short-range.txt) and
 [`wire-undeclared-length`](testdata/scenarios/wire-undeclared-length.txt).
 
+**A range fetched in parallel keeps what it landed** [DL-R34]. Each range still
+arriving is checkpointed as the part from its start to the last byte written,
+after a sync, every persistence interval and when the transfer stops. The next
+owner asks only for the rest of that range, and a fallback source in the same
+run is asked only for the rest as well. A qualification run on Windows had
+restarted a 16 MiB range from its first byte after 4 MiB had landed. Go only;
+see `serve/range_resume_test.go`.
+
+**Stopped work is adopted within its lease** [DL-R35]. An attempt clears the
+failure an earlier attempt recorded when it starts, and records its own failure
+again if it fails. Retry backoff [JOB-B2] follows only a failed last attempt. A runtime that stops gracefully releases the lease, and its successor
+adopts the work on its first sweep. A runtime that is killed leaves the lease to
+expire, and the successor adopts the work within the lease TTL (30 s) plus one
+sweep. Go only; `serve/range_resume_test.go` holds a graceful successor to 5 s and a
+crashed one to the lease plus 5 s.
+
 **A stalled transfer is checkpointed on time alone.** A source that stops sending
 makes no write, and a checkpoint that only a write can trigger leaves the bytes
 already on disk unrecorded until the next one. A crash during that silence loses
@@ -215,7 +231,7 @@ never sees it, and a path in this machine's own convention is not foreign —
 supervisor's authority, where a record somebody else wrote chose. A relative
 sink is the portable, contained form and the only one such a supervisor
 accepts; an absolute sink is legitimate only for a caller writing to its own
-machine, which `dl -o` is and an adopted record never is. The refusal is *not
+machine, which `Client.Get` to a local path is and an adopted record never is. The refusal is *not
 now*: the record is valid where it was written. See
 [`deputy-absolute-sink`](testdata/scenarios/deputy-absolute-sink.txt).
 
@@ -347,7 +363,9 @@ consequences, and none of them optional:
 **A typed cause rides under its own key.** `extensions["abstraction.download/failure@2"]`
 carries the failure@1 shape plus `cause`, one of `digest_mismatch`, `oversize`,
 `short_transfer`, `unauthorized`, `not_found`, `refused`, `server_error`,
-`transport` or `other`. An empty cause is unreported. Only a runner whose owner
+`transport`, `credential` or `other`. `credential` is a named credential the
+service could not apply, and the error carries `credential:<outcome>:<name>`
+with the applier's outcome. An empty cause is unreported. Only a runner whose owner
 opts in writes failure@2, always beside failure@1 in the same write, and
 failure@1 never carries `cause`. The class is failure@1's `permanent`; a cause
 never decides it. A reader that knows only failure@1 keeps the class, and
@@ -355,7 +373,9 @@ records written without the opt-in are byte-identical to before. A service
 execution profile may end failures beyond this layer's refusals when its own
 contract names them. `download-http-request-v1` ends `digest_mismatch` and
 `oversize` as permanent, so its record is `failed` and says permanent under
-both keys.
+both keys. An ending is a property of the bytes rather than of the route they
+arrived by: a digest a delegate's delivery fails ends the operation exactly as
+one this process fetched itself does, under the same profile.
 
 **An older record keeps its meaning, and says less than it looks like it does.**
 A record written before this key existed carries a sentence and no class. It
@@ -384,6 +404,55 @@ the job is left adoptable: a machine that binds the name to that host runs the
 same record unchanged. See
 [`deputy-credential`](testdata/scenarios/deputy-credential.txt) and
 [`credential-bound`](testdata/scenarios/credential-bound.txt).
+
+**A service applies a named credential for the caller that submitted the work**
+[DL-R30]. In the service profile a request `Source.credential` names a
+credential registered with `abstraction.credentials/holder@1`, and the request
+requires `abstraction.download/credentials@1`, which a provider advertises only
+with a credentials applier. Preparation records the name and the submitting
+caller's opaque scope in the source attributes; neither goes on the wire. For
+every request, redirect and resumed range the executor asks
+`abstraction.credentials/applier@1` with consumer
+`abstraction.download/http-execution@1`, sends the returned headers once and
+keeps them out of the record. An applier refusal ends the attempt *no*, with
+message `credential:<outcome>:<name>` and cause `credential`; an applier that
+cannot answer is *not now*, with the same cause and the outcome `unavailable`.
+A service with no applier answers every such request `unavailable`. The
+environment reader `EnvCredentials` is the library's own bridge and is never
+configured in the service.
+
+**Admission refuses a credential the caller may not apply** [DL-K1]. Before the
+job provider journals a submission naming a credential, the service asks the
+applier's `Check` for the submitting caller, consumer
+`abstraction.download/http-execution@1`, the credential and each source host
+(job CONTRACT JOB-A16). Any outcome other than `applied` and `unavailable`
+refuses the submission `invalid` with reason `credential:<outcome>:<name>`, and
+`unavailable` refuses it `unavailable` with `credential:unavailable:<name>`.
+Nothing is journaled or sealed, and the same identity is admissible once the
+credential or its rule changes. A credential revoked between admission and
+execution ends the attempt as DL-R30 says.
+
+**Each redirect host is its own use** [DL-K2]. A redirect of a request that
+carried an applied credential drops that credential's headers and asks the
+applier again for the redirect target. The credential's own target list
+decides: `target_refused` sends the redirected request without the credential,
+`applied` sends the headers applied for that host, including on a same-host
+redirect, and any other refusal ends the request as DL-R30 says. Headers the
+request itself supplied follow a redirect only to the source host and its
+subdomains.
+
+**Delegation carries the credential name, never its value** [DL-K3]. Delegated
+execution accepts a request naming a credential when a configured delegate
+claims `abstraction.download/credentials@1`. The remote job delegate submits
+the generated request with each source's credential name to a remote
+OpenAbstractions job service over mutually authenticated TLS; the local caller
+scope, applied headers and secret bytes never cross. The remote service applies
+its own credential in the scope its host maps from the verified client
+certificate, and its own rights decide. A remote admission refusal
+`credential:<outcome>:<name>` ends the local operation with that reason
+unchanged and cause `credential`, and the local service fetches nothing itself.
+The remote result bytes are read back into the local destination and verified
+there.
 
 **A host this machine will not reach is *not now*** [DL-E8]. Before a source is
 handed to a fetcher — the same last moment a credential is resolved — the runner
@@ -437,7 +506,7 @@ so somebody else's lock (`409`, `423`) was permanent too. **Listed, not ranged**
 was written here, implemented nowhere, and enforced by nothing.
 
 **The wire is a scenario surface like any other.**
-[`scripts/behaviour-conformance.sh`](https://github.com/openabstractions/abstractions/blob/main/scripts/behaviour-conformance.sh) starts
+The internal `behaviour-conformance.sh` maintainer check starts
 [`testdata/fixture.py`](testdata/fixture.py) and a scenario names the answer it
 wants in the URL — a range honoured, a range ignored, a `416`, a `206` starting
 somewhere else, a `Content-Range` that lies about the body, a body that
@@ -489,49 +558,38 @@ a resume that cannot name its version. See
 [`wire-version-modified`](testdata/scenarios/wire-version-modified.txt) and
 [`wire-obsolete-date`](testdata/scenarios/wire-obsolete-date.txt).
 
-## jobd — the supervisor
+## The sweep
 
 `Fetcher` and `Delegator` both leave the same gap: they only run when something
 calls them. A delegated transfer that finishes while no application is open sits
 there — BITS will not release the file until someone calls `Complete()`, and
-nothing verifies the digest until someone asks. Without a supervisor that happens
-the next time a human types a command, which may be days later.
+nothing verifies the digest until someone asks.
 
-```bash
-jobd once          # one sweep — what a scheduled task runs
-jobd run           # supervise until stopped
-jobd status        # what is in the store, and what is stalled
-jobd install       # prints the schtasks lines; does not run them for you
-```
+The sweep closes that gap. It does not move bytes. It reconciles delegated jobs,
+finalises and verifies the finished ones, and adopts orphans. Reconcile runs
+before adopt, so the orphan pass never picks up work a delegate has in fact
+already completed. The installed runtime runs it (`serve.Pass`) inside its
+download execution profile whenever its job store changes.
 
-It does not move bytes. It reconciles delegated jobs, finalises and verifies the
-finished ones, and adopts orphans. Reconcile runs before adopt, so the orphan
-pass never picks up work a delegate has in fact already completed.
-
-**Proved** ([`docs/results/SUPERVISOR1.txt`](https://github.com/openabstractions/abstractions/blob/main/docs/results/SUPERVISOR1.txt)): a
-real 313 MB download killed with `SIGKILL`, then **no human runs the downloader
-again** — a single `jobd once` finds the abandoned job, finishes it, and delivers
-a file matching the digest HuggingFace published. A second sweep correctly does
-nothing.
-
-**A scheduled task, not a Windows service, and on purpose.** A real service means
-SCM plumbing and a dependency, and buys exactly one thing: jobs owned by
-LocalSystem keep running while the user is *logged off*, because that account is
-always logged on. Under a normal user account BITS still survives the application
-closing and a reboot — it suspends at logoff and resumes at logon. For a desktop
-that is nearly the whole win, at no cost and with no elevation. Note that BITS
-itself never needed elevation; only the SYSTEM account does.
-
-`jobd install` prints the `schtasks` commands rather than running them.
-Registering a scheduled task changes your machine and you should see exactly what
-it is first.
+`jobd`, the separate supervisor program that ran the sweep over the legacy job
+store from a scheduled task or the Windows supervisor, was removed in 0.1.8 with
+its `supervisor.json` heartbeat and its bus
+([docs/REMOVED.md](https://github.com/openabstractions/abstractions/blob/main/docs/REMOVED.md)).
+Before its removal it **proved** the sweep
+([`docs/results/SUPERVISOR1.txt`](https://github.com/openabstractions/abstractions/blob/main/docs/results/SUPERVISOR1.txt)):
+a real 313 MB download killed with `SIGKILL`, then **no human runs the
+downloader again** — a single `jobd once` found the abandoned job, finished it,
+and delivered a file matching the digest HuggingFace published. A second sweep
+correctly did nothing.
 
 ### `wanted/` — asking without a program
 
 Every other door into this layer is a call. A person with a share and no
-toolchain has a folder, so the supervisor watches one: a text file put in
+toolchain has a folder, so a sweep can watch one: a text file put in
 `wanted/` inside the store is a request, and the folder answers it by renaming
-the file.
+the file. No shipped program has watched `wanted/` since jobd was removed in
+0.1.8. `download.Wanted` implements the rules below, and the
+[`wanted`](testdata/scenarios/wanted.txt) scenario judges them.
 
 ```
 https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct-GGUF/resolve/main/smollm2-135m-instruct-q8_0.gguf
@@ -582,24 +640,11 @@ program can write.
 
 ### Authority is designation, not identity
 
-The bus is where a process reaches this supervisor: a local transport whose name
-the supervisor invents at startup and publishes in its heartbeat, never a path
-in the store, because two spellings of one path would be two names. Every
-request on it arrives with its caller bound and checked by the `identity` layer
-first, and a caller the machine cannot name is answered with the refusal and
-nothing else — no wakeup, no owner, no tier.
-
-**It carries no authority in either direction**: two requests, `look` meaning
-"look now" and `who` meaning "who is there, and who do you take me for", one
-JSON line each way, no job id, no payload, nothing granted. Being named is a
-floor a stranger fails, never a grant. That is not modesty about the feature. It
-is the design consequence of a measurement — **what a platform says about the
-other end of a local socket can name the wrong process**, so nothing here is
-decided by who a caller is.
-
-A machine where the identity layer cannot name a caller at all gets no bus. The
-supervisor says why, announces no endpoint, and is reached through the store
-alone, sweeping on its timer; nothing that worked without a bus stops working.
+The supervisor bus, a local transport jobd listened on for `look` and `who`, was
+removed with jobd in 0.1.8. It carried no authority in either direction, and
+the measurement behind that choice still decides this layer: **what a platform
+says about the other end of a local socket can name the wrong process**, so
+nothing here is decided by who a caller is.
 
 Those platform facilities — `SO_PEERCRED`, macOS `LOCAL_PEERTOKEN` plus a
 code-signing requirement, `GetNamedPipeClientProcessId` — are how local IPC here
@@ -740,7 +785,7 @@ them on this page rather than in a defect:
   and the final when no other unfinished record names it. Nothing above says a
   requester may delete there.
 - `wanted/` is not reserved. `job.Reserved` covers `jobs/` and `work/`, and
-  this layer adds `supervisor.json` and `supervisor.sock`;
+  this layer reserves `supervisor.json` and `supervisor.sock`;
   the drop folder is in neither list, so `DL-R22` does not reach it.
 - A failure crosses with its class. The remote record carries it where
   [DL-E16] says, the delegate's status report carries it beside the sentence,
@@ -809,7 +854,7 @@ read `got sha256:1fc70f… want 1fc70f…` — the same digest twice — and a c
 1.5 GB download was deleted and fetched again.
 
 So each implementation ships a **`specread`** that prints the meaning it arrived
-at, and [`scripts/spec-conformance.sh`](https://github.com/openabstractions/abstractions/blob/main/scripts/spec-conformance.sh) requires
+at, and the internal `spec-conformance.sh` maintainer check requires
 the printouts to be identical. Everything below is the contract. Write a reader
 against this page and it passes; nothing here is recoverable from our source.
 
@@ -827,6 +872,7 @@ against this page and it passes; nothing here is recoverable from our source.
 | `sources[].headers` | string→string, sent **to the server** verbatim | empty |
 | `sink.final` | where the bytes end up | — |
 | `sink.partial` | where they accumulate first | the layer invents one |
+| `constraints.network` | `unmetered`: open sources only while the path is unmetered [DL-N3] | `any` |
 
 `attrs` is an annotation bag in the sense OCI and Kubernetes use the word:
 non-behavioural metadata, keyed by whoever wrote it, that this layer carries and
@@ -963,11 +1009,11 @@ Measured from the store root, with `.` and `..` resolved first:
 |---|---|
 | `jobs`, and anything under it | the record, its claim tokens, its temporaries |
 | `work`, and anything under it except `work/<this job's id>` | another job's scratch |
-| `supervisor.json`, `supervisor.json.tmp`, `supervisor.sock` at the root | this layer's heartbeat, and one name it reserves that nothing binds |
+| `supervisor.json`, `supervisor.json.tmp`, `supervisor.sock` at the root | the names the removed supervisor's heartbeat and bus used |
 
-`supervisor.sock` is that name. The bus is not a file in the store, so nothing
-opens it any more; it stays reserved because a name two implementations of three
-refuse is a divergence, and a store written under an older one may hold it.
+Nothing writes any of the three since jobd and its heartbeat were removed in
+0.1.8. They stay reserved because a store written by an older release may hold
+them.
 
 `work/<id>` and everything below it is **not** reserved against job
 `<id>` [DL-S10] — that is where its own partial goes, and a blanket ban on
@@ -1184,7 +1230,7 @@ and sysexits' own manual page has disclaimed universal use for thirty years. The
 mapping above is the whole of what an adopter who knows sysexits has to read.
 
 **The status is about this invocation, not about the work it observed**
-[DL-E11]. `jobd once` is a sweep. When a record in the store has failed
+[DL-E11]. A sweep is one invocation over many records. When a record in the store has failed
 permanently, the sweep succeeded and the job did not: it prints the problem and
 exits `0`. A scheduled task reporting failure because one of a hundred records is
 a `404` teaches an operator to ignore it, which costs more than the `404` did.
@@ -1199,20 +1245,17 @@ languages. This page is about the fate of *one run of one program*.
 does not. A resumable transfer that moved 39 of 40 GB and stopped is `1`, the
 same as one that moved nothing; `rsync` needed two codes for that shade and
 scripts still get it wrong, and what actually holds progress is the record, so
-the answer is `jobd status` and not a number. And *started, still running* has no
+the answer is the record (`openabstractions jobs show`) and not a number. And *started, still running* has no
 code: `over_curl` has a fifth answer, `working`, and `modelget get --background`
 exits `0` having delivered nothing, where `0` means *the job is in the store*.
 **A command that may exit before the work is done says so in its own help, and
 its `0` is not this vocabulary's `0`** — an argument for that flag being rare,
 not for a sixth number.
 
-**UNPROVEN.** `jobd`, `modelget` and `jobctl` speak this as of 2026-09-08.
-`dl` still exits `1` for every failure and `dlc` for every non-delivered answer,
-so neither yet distinguishes `1` from `3`; `dlc`'s `3` for `list` and `watch` is
-already right. `jobctl` cannot reach `3` or `4` at all: the job layer publishes
-its § 6.1 mapping as a table on a page rather than attaching the class to each
-sentinel the way this layer does [DL-E3], so its own driver cannot classify
-`ErrNotFound` without keeping the copy that rule forbids.
+**UNPROVEN.** `modelget` speaks this as of 2026-09-08; `jobd` and `jobctl` did
+until they were removed in 0.1.8, and `dl` never distinguished `1` from `3`.
+`dlc` still exits `1` for every non-delivered answer; its `3` for `list` and
+`watch` is already right.
 
 ### Whether a document is readable at all is also the contract
 
@@ -1224,6 +1267,17 @@ is a cross-language decision or it is a bug** [DL-S19], and that holds even when
 strict reader is the safer one — refusing a repeated key in one implementation of
 three does not close a parser differential, it converts it into an availability
 split, and by then the record is already written.
+
+**A reader that builds a tree of a spec document refuses nesting deeper than 1000
+levels** [DL-S25]. Depth counts each object and array opened, the document's own
+value being level 1, and an empty container counts like any other. A reader that
+builds a document tree, whether a DOM parser or a recursion whose stack grows
+with depth, refuses at the first container that would open level 1001, with a
+typed refusal and never a crash. It counts explicitly and gives the same verdict
+on every host, interpreter version and toolchain, whatever its language's parser
+or recursion limit would allow. A streaming reader with constant per-level stack
+and memory is not bound by that number. A spec needs four levels. Inside a job
+record the record's own lower limit applies ([JOB-E8], 64 levels).
 
 `specread --echo <spec.json>` prints exactly one line and exits `0`:
 
@@ -1238,13 +1292,13 @@ implementation and not another, and every reader downstream sees the changed
 bytes rather than the submitter's. Whitespace is the record writer's choice and
 is compacted away here; escapes and number spellings are not, and are compared.
 
-`scripts/verdict-conformance.sh` feeds every file in
+`scripts/verdict-conformance.sh` fed every file in
 `abstraction-download/testdata/verdicts/` to every registered implementation in both modes
-and compares the verdict — accepted, refused, or neither — rather than the
-output. It takes `SPECREAD_CPP` and `SPECREAD_EXTRA` exactly as
-`spec-conformance.sh` does. **That corpus only grows**: any input that has ever
-produced a disagreement stays in it, so a divergence closed today cannot quietly
-reopen without the harness saying so.
+and compared the verdict — accepted, refused, or neither — rather than the
+output. It was removed with the Python and C++ implementations in 0.1.8, when
+one implementation had nothing to disagree with. **That corpus only grows**: any
+input that has ever produced a disagreement stays in it, so a fourth
+implementation meets every divergence closed before.
 
 **`specread` plus a growing verdict corpus is protobuf's
 `conformance_test_runner`**, which does exactly this: hand one payload to every
@@ -1321,3 +1375,67 @@ Waiting cancellation never cancels accepted work.
 This requirement uses existing job admission and adapter boundaries. It defines
 no adapter IPC server. Cross-language clients use the generated request guarantee
 roster with the existing generated job submission and receipt interfaces.
+
+## Network-cost constraints
+
+`request.thrift` `Request.constraints` states when the executing service may
+move the bytes. Its one member, `network`, is `unmetered` or `any`. An absent
+`constraints`, an absent `network` and `network: any` are one request to a
+provider, and each prepares the work it prepared before the member existed
+[DL-N1]. Decided in `research/conditions/DECISION.md`.
+
+**A request with `network: unmetered` requires
+`abstraction.download/network-cost@1`** [DL-N2], the one entry of
+`network_cost_guarantees`. A provider advertises it only while it owns a cost
+source for its platform: Network List Manager (`INetworkCostManager`) on
+Windows, NetworkManager's `Metered` property on Linux, `nw_path_monitor` on
+macOS. A provider without one leaves it out of its offer, so resolution refuses
+a caller requiring it as unmet and admission refuses a submission requiring it.
+Prepared work carries the constraint in its spec as `constraints.network` and
+the guarantee in the record's `requires`, so a runner without a cost source
+takes no fetcher for it [DL-R24].
+
+**The executor waits while the path is metered** [DL-N3]. It evaluates the
+constraint before each source open, before each range request, and on every
+cost-change notice from the platform. It waits on that notice and never
+re-reads the cost on a timer. Metered is a path the platform reports as costed:
+a metered or data-limited connection, roaming, over its data limit, or
+constrained. A path the platform reports no cost for, such as while nothing is
+connected, is `unknown`, and the transfer proceeds and meets the network as it
+is.
+
+**A metered notice during a transfer stops it at the proven boundary** [DL-N4].
+The bytes already written are synced and checkpointed as ranges, the lease is
+released, and the attempt stays accepted and `pending`. No source is opened
+while the path stays metered. On the notice that it is unmetered the service
+adopts the work again, and the transfer resumes from the checkpoint with one
+`Range` request per remaining gap under DL-R1 through DL-V5.
+
+**A waiting attempt names what it waits for** [DL-N5].
+`extensions["abstraction.download/waiting@1"]` (`waiting_extensions`) is a JSON
+string holding one word, `<constraint>:<state>`. This version writes
+`network:metered` and `network:unavailable` (DL-N8). The word is written in the same run that then releases the
+lease, so an observer can briefly read it on work still `running`. The key is removed when the transfer moves again and when
+the work ends. Progress, the checkpoint, the failure payloads and the accepted
+guarantees are unchanged by it, and a waiting attempt records no failure.
+Observation reports the word beside the operation's state.
+
+**Waiting belongs to the accepted attempt** [DL-N6]. The caller exiting leaves
+it waiting. `CancelWork` while waiting ends it `cancelled` with no source
+opened. A waiting attempt holds no lease and no awake lease; a moving one holds
+both.
+
+**Constraints are evaluated where the bytes move** [DL-N7]. A delegated or
+remote submission carries `constraints` unchanged, the remote executor
+evaluates its own network, and its `waiting@1` word is relayed verbatim. The
+submitting machine's network state is never sent.
+
+**A cost source that has not answered holds constrained work, never the store**
+[DL-N8]. A service whose cost source cannot be opened when it starts, such as a
+Linux runtime starting before NetworkManager answers, reopens its accepted work
+requiring `network-cost@1` (job CONTRACT JOB-A15) and asks for the source again
+with backoff. Until the source answers, that work waits with the word
+`network:unavailable`, opens no source and records no failure, while other work
+proceeds. The service offers `network-cost@1` to new submissions only while a
+source answers. On the notice that the source answers, waiting work is evaluated
+under DL-N3: it moves, or waits again with `network:metered`.

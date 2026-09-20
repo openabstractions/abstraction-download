@@ -1,6 +1,8 @@
 package download
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -42,6 +44,49 @@ type Credentials interface {
 // CredentialAttr is the Source attribute naming a credential. Its value is a
 // name like "hf", never a secret.
 const CredentialAttr = "credential"
+
+// CredentialScopeAttr is the Source attribute naming the authenticated caller
+// scope that submitted a service-executed source. It is the job service's
+// opaque caller namespace, grants nothing, and is never sent on the wire.
+const CredentialScopeAttr = "credential_scope"
+
+// SourceCredentials resolves a source's credential for one request to host,
+// with the source's attributes, for a service that applies a credential for the
+// caller that submitted the work (abstraction.credentials/applier@1). When a
+// Credentials value implements it, the runner calls LookupSource instead of
+// Lookup, once for every request. A refusal is a *CredentialError; the headers
+// are sent once and kept out of every record.
+type SourceCredentials interface {
+	LookupSource(src Source, host string) (map[string]string, error)
+}
+
+// CredentialError is a named credential the service could not apply to one
+// request. Outcome is the applier's word (unknown, expired, revoked, lost,
+// not_permitted, target_refused, consumer_refused, unsupported_kind, invalid,
+// forbidden or unavailable). Every outcome but unavailable ends the attempt:
+// the same request cannot succeed until the credential or its rule changes, and
+// the operation stays retryable through a new attempt. The message names the
+// credential and never carries a secret.
+type CredentialError struct {
+	Name, Outcome string
+}
+
+func (e *CredentialError) Error() string {
+	return "download: credential:" + e.Outcome + ":" + e.Name
+}
+
+// Retryable reports whether the applier could not answer, rather than refused.
+func (e *CredentialError) Retryable() bool { return e.Outcome == "unavailable" }
+
+// CredentialRefusal builds the error for an applier outcome other than applied:
+// permanent for a refusal, retryable for unavailable.
+func CredentialRefusal(name, outcome string) error {
+	e := &CredentialError{Name: name, Outcome: outcome}
+	if e.Retryable() {
+		return e
+	}
+	return permanent{e}
+}
 
 // CredentialHeaderAttr optionally names the header the secret goes into.
 // Defaults to Authorization with a Bearer prefix, which is what every registry
@@ -110,6 +155,62 @@ func credEnvName(name string) string {
 	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name))
 }
 
+// hopCredential applies a source's credential again for each host a redirect
+// leads to [DL-K2]. It rides the request context, so every fetcher sending the
+// request through HTTP.do meets it without learning that a credential exists.
+type hopCredential struct {
+	// applied names the headers the credential set on the first request.
+	applied []string
+	// apply returns the credential's headers for host, nil when the
+	// credential is not bound to host, or the refusal that ends the request.
+	apply func(host string) (map[string]string, error)
+}
+
+type hopCredentialKey struct{}
+
+// withCredentialHops returns ctx carrying the per-redirect application of the
+// credential src names, given the headers headersFor resolved for its first
+// host. A source naming no credential returns ctx unchanged.
+func withCredentialHops(ctx context.Context, src Source, creds Credentials, headers map[string]string) context.Context {
+	name := src.Attrs[CredentialAttr]
+	if name == "" || creds == nil {
+		return ctx
+	}
+	hop := &hopCredential{}
+	for k, v := range headers {
+		if supplied, ok := src.Headers[k]; !ok || supplied != v {
+			hop.applied = append(hop.applied, k)
+		}
+	}
+	hop.apply = func(host string) (map[string]string, error) {
+		host = strings.ToLower(host)
+		if bound, ok := creds.(SourceCredentials); ok {
+			got, err := bound.LookupSource(src, host)
+			var refusal *CredentialError
+			if errors.As(err, &refusal) && refusal.Outcome == "target_refused" {
+				return nil, nil
+			}
+			return got, err
+		}
+		got, ok := creds.Lookup(name, host)
+		if !ok {
+			return nil, nil
+		}
+		if h := src.Attrs[CredentialHeaderAttr]; h != "" {
+			for _, v := range got {
+				return map[string]string{h: v}, nil
+			}
+		}
+		return got, nil
+	}
+	return context.WithValue(ctx, hopCredentialKey{}, hop)
+}
+
+func credentialHops(ctx context.Context) *hopCredential {
+	hop, _ := ctx.Value(hopCredentialKey{}).(*hopCredential)
+	return hop
+}
+
 // headersFor is everything that goes on the wire for one source: what the
 // record asked for, plus the secret resolved here and now.
 //
@@ -137,6 +238,16 @@ func headersFor(src Source, creds Credentials) (map[string]string, error) {
 	host, err := hostOf(src.Locator)
 	if err != nil {
 		return nil, err
+	}
+	if bound, ok := creds.(SourceCredentials); ok {
+		got, err := bound.LookupSource(src, host)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range got {
+			out[k] = v
+		}
+		return out, nil
 	}
 	got, ok := creds.Lookup(name, host)
 	if !ok {

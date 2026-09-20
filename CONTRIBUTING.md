@@ -190,6 +190,9 @@ listed in `idl/contract_rules.recorded`, and a new break fails the check.
 10. The first definition of a contract records a "none" entry in the base
     protocol change log, and its review answers rules 1 to 6 in writing before
     generation.
+11. Field, method and parameter names must not be reserved words in generated
+    languages; a reserved name defines a per-language override such as
+    `rust.name`.
 
 ### What we owe you
 

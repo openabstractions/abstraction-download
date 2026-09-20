@@ -11,7 +11,6 @@ import (
 
 	config "github.com/openabstractions/abstraction-config/go"
 	identity "github.com/openabstractions/abstraction-identity"
-	job "github.com/openabstractions/abstraction-job/go"
 )
 
 // Tier registration: how a binding makes itself available without this package
@@ -455,18 +454,4 @@ func Program() string {
 		return strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	}
 	return "unknown"
-}
-
-// storeFor opens the store, for Discover.
-//
-// The one place in this package that turns a configured location into a store.
-// Where jobs live is config's answer, not download's — this layer used to
-// export it, which invited every other program to ask the download package a
-// question about jobs.
-func storeFor() (job.Store, error) {
-	root, err := config.LegacyJobStore()
-	if err != nil {
-		return nil, err
-	}
-	return job.NewFileStore(root)
 }

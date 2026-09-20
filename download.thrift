@@ -93,4 +93,4 @@ struct Failure {
   1: required string error
   2: optional bool permanent (omit = "zero")
   3: optional string cause (omit = "zero")
-} (document = "true", unknown_fields = "refuse", doc="Cause appears only under failure@2. When a writer knows it, it is one word: digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused, server_error, transport or other. Empty means unreported. The class is permanent alone.")
+} (document = "true", unknown_fields = "refuse", doc="Cause appears only under failure@2. When a writer knows it, it is one word: digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused, server_error, transport, credential or other. credential is a named credential the service could not apply; the error names the applier outcome as credential:<outcome>:<name>. Empty means unreported. The class is permanent alone.")

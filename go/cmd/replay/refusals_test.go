@@ -12,11 +12,11 @@ import (
 // for an error a caller has to branch on, and every transcript in docs/results/
 // would change without a word of it appearing in a diff of this file.
 func TestEveryVerdictHasATranscriptToken(t *testing.T) {
-	if len(wire.VerdictNames) == 0 {
+	if len(wire.VerdictValues()) == 0 {
 		t.Fatal("the generated vocabulary is empty")
 	}
-	for _, name := range wire.VerdictNames {
-		if wire.VerdictTranscript[name] == "" {
+	for _, name := range wire.VerdictValues() {
+		if wire.VerdictTranscript[string(name)] == "" {
 			t.Errorf("Verdict member %q carries no transcript annotation in job.thrift", name)
 		}
 	}
@@ -25,7 +25,7 @@ func TestEveryVerdictHasATranscriptToken(t *testing.T) {
 func TestOutcomeSpellsEachRefusalTheWayTheDefinitionDoes(t *testing.T) {
 	for _, c := range []struct {
 		err    error
-		member string
+		member wire.Verdict
 	}{
 		{job.ErrNotFound, wire.VerdictNotFound},
 		{job.ErrLeaseHeld, wire.VerdictLeaseHeld},
@@ -37,7 +37,7 @@ func TestOutcomeSpellsEachRefusalTheWayTheDefinitionDoes(t *testing.T) {
 		{job.ErrUnknownSchema, wire.VerdictUnknownSchema},
 		{job.ErrNotSupported, wire.VerdictNotSupported},
 	} {
-		if got, want := outcome(c.err), wire.VerdictTranscript[c.member]; got != want {
+		if got, want := outcome(c.err), wire.VerdictTranscript[string(c.member)]; got != want {
 			t.Errorf("%v printed %q, and job.thrift spells %s %q", c.err, got, c.member, want)
 		}
 	}
@@ -55,10 +55,10 @@ func TestRefusalsIsEveryTokenOutcomeCanPrint(t *testing.T) {
 	for _, line := range lines {
 		roster[line] = true
 	}
-	for _, name := range wire.VerdictNames {
-		if !roster[wire.VerdictTranscript[name]] {
+	for _, name := range wire.VerdictValues() {
+		if !roster[wire.VerdictTranscript[string(name)]] {
 			t.Errorf("--refusals omits %q, which Verdict member %q spells",
-				wire.VerdictTranscript[name], name)
+				wire.VerdictTranscript[string(name)], name)
 		}
 	}
 	if len(roster) != len(lines) {

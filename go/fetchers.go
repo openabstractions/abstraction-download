@@ -117,7 +117,7 @@ func (h HTTP) get(ctx context.Context, req Request) (*http.Response, error) {
 	// transparent gzip, which is what made this the one question where the
 	// answer depended on which language's transport was underneath.
 	hreq.Header.Set("Accept-Encoding", "identity")
-	return h.do(hreq, req.Reach)
+	return h.do(hreq, req.Reach, req.Headers)
 }
 
 func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
@@ -279,7 +279,7 @@ func (h HTTP) Ranged(ctx context.Context, src Source, headers map[string]string)
 	hreq.Header.Set("Range", "bytes=0-0")
 	hreq.Header.Set("Accept-Encoding", "identity")
 
-	resp, err := h.do(hreq, nil)
+	resp, err := h.do(hreq, nil, headers)
 	if err != nil {
 		return 0, false, err
 	}
@@ -390,7 +390,7 @@ func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
 		hreq.Header.Set("If-Range", v)
 	}
 
-	resp, err := h.do(hreq, req.Reach)
+	resp, err := h.do(hreq, req.Reach, req.Headers)
 	if err != nil {
 		return err
 	}
@@ -447,7 +447,7 @@ func sizeFromContentRange(header string) int64 {
 
 func copyRange(ctx context.Context, req RangeRequest, body io.Reader) error {
 	want := req.Range.End - req.Range.Start
-	w := &rangeWriter{out: req.Out, at: req.Range.Start, end: req.Range.End, beat: req.Beat}
+	w := &rangeWriter{out: req.Out, at: req.Range.Start, end: req.Range.End, beat: req.Beat, landed: req.Landed}
 	n, err := copyWithContext(ctx, w, io.LimitReader(body, want))
 	if err != nil {
 		return err
@@ -463,8 +463,8 @@ func copyRange(ctx context.Context, req RangeRequest, body io.Reader) error {
 }
 
 // rangeWriter writes at absolute artifact offsets and cannot leave its range. It
-// also says the work is moving, without saying how far: distance is the proven
-// set's business and it only moves when a whole range lands.
+// says the work is moving, and tells an owner that asked how far the range has
+// landed; the proven set moves only when the owner syncs and checkpoints that.
 //
 // Bounded by construction rather than by the server's honesty. A 206 carrying a
 // correct Content-Range and a longer body than it named would otherwise be
@@ -472,10 +472,11 @@ func copyRange(ctx context.Context, req RangeRequest, body io.Reader) error {
 // recorded as proven — and the second hashing pass would then throw the entire
 // artifact away for it.
 type rangeWriter struct {
-	out  io.WriterAt
-	at   int64
-	end  int64
-	beat func()
+	out    io.WriterAt
+	at     int64
+	end    int64
+	beat   func()
+	landed func(int64)
 }
 
 func (s *rangeWriter) Write(p []byte) (int, error) {
@@ -484,6 +485,9 @@ func (s *rangeWriter) Write(p []byte) (int, error) {
 	}
 	n, err := s.out.WriteAt(p, s.at)
 	s.at += int64(n)
+	if n > 0 && s.landed != nil {
+		s.landed(s.at)
+	}
 	if s.beat != nil {
 		s.beat()
 	}

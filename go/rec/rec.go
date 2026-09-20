@@ -191,7 +191,9 @@ var FailureNames = []string{"abstraction.download/failure@1", "abstraction.downl
 
 // Cause appears only under failure@2. When a writer knows it, it is one word:
 // digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
-// server_error, transport or other. Empty means unreported. The class is
+// server_error, transport, credential or other. credential is a named
+// credential the service could not apply; the error names the applier outcome
+// as credential:<outcome>:<name>. Empty means unreported. The class is
 // permanent alone.
 type Failure struct {
 	Error     string
@@ -807,12 +809,12 @@ func Decode(in []byte) (*Failure, error) {
 	return v, nil
 }
 
-// Refusals is in the order two of them are chosen between.
+// refusals is in the order two of them are chosen between.
 
-var Refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "trailing_bytes"}
+var refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "trailing_bytes"}
 
-func RefusalRank(word string) int {
-	for i, w := range Refusals {
+func refusalRank(word string) int {
+	for i, w := range refusals {
 		if w == word {
 			return i
 		}

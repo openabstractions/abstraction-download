@@ -204,7 +204,121 @@ func encList[T any](out []byte, v []T, depth int, enc func([]byte, *T, int) []by
 	return append(out, ']')
 }
 
+// Network is a closed vocabulary. Its numeric values are private implementation
+// tags; String and ParseNetwork preserve the exact wire words.
+type Network uint32
+
+const (
+	NetworkAny       Network = 1
+	NetworkUnmetered Network = 2
+)
+
+// String returns v's exact wire word, or the empty string for an invalid value.
+func (v Network) String() string {
+	word, _ := v.WireName()
+	return word
+}
+
+// WireName returns v's exact wire word and whether v names a member.
+func (v Network) WireName() (string, bool) {
+	switch v {
+	case NetworkAny:
+		return "any", true
+	case NetworkUnmetered:
+		return "unmetered", true
+	}
+	return "", false
+}
+
+// ParseNetwork returns the member named by an exact wire word.
+func ParseNetwork(word string) (Network, bool) {
+	switch word {
+	case "any":
+		return NetworkAny, true
+	case "unmetered":
+		return NetworkUnmetered, true
+	}
+	return Network(0), false
+}
+
+// MarshalText preserves the member's exact wire word for standard text users,
+// including JSON object keys. Invalid and zero values are refused.
+func (v Network) MarshalText() ([]byte, error) {
+	word, ok := v.WireName()
+	if !ok {
+		return nil, &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	return []byte(word), nil
+}
+
+// UnmarshalText accepts an exact wire word and refuses unknown text.
+func (v *Network) UnmarshalText(text []byte) error {
+	word, ok := ParseNetwork(string(text))
+	if !ok {
+		return &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	*v = word
+	return nil
+}
+
+// MarshalJSON keeps closed vocabularies as JSON strings rather than their
+// private numeric implementation tags.
+func (v Network) MarshalJSON() ([]byte, error) {
+	word, ok := v.WireName()
+	if !ok {
+		return nil, &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	return esc(nil, word), nil
+}
+
+// UnmarshalJSON accepts only an exact JSON string member. Numbers, null and
+// unknown strings are refused by the same codec rules as generated records.
+func (v *Network) UnmarshalJSON(data []byte) error {
+	r := reader{buf: data}
+	r.ws()
+	word, err := r.str()
+	if err != nil {
+		return err
+	}
+	r.ws()
+	if r.pos != len(r.buf) {
+		return r.refuse("trailing_bytes")
+	}
+	parsed, ok := ParseNetwork(word)
+	if !ok {
+		return r.refuse("bad_enum")
+	}
+	*v = parsed
+	return nil
+}
+
+// NetworkValues returns every member of Network in declaration order, in a new slice.
+func NetworkValues() []Network {
+	return []Network{NetworkAny, NetworkUnmetered}
+}
+
+// Known reports whether v is a member of Network.
+func (v Network) Known() bool {
+	_, ok := v.WireName()
+	return ok
+}
+
 var DownstreamRecoveryGuarantees = []string{"abstraction.download/recoverable-submission@1"}
+
+var CredentialGuarantees = []string{"abstraction.download/credentials@1"}
+
+var NetworkCostGuarantees = []string{"abstraction.download/network-cost@1"}
+
+var WaitingExtensions = []string{"abstraction.download/waiting@1"}
+
+// When the executing service may move the bytes. network unmetered opens
+// sources only while the platform reports the path unmetered and requires
+// abstraction.download/network-cost@1; the attempt waits, holding no lease,
+// while the path is metered and resumes with Range. Empty network and any are
+// the same. Constraints are evaluated where the bytes move.
+type Constraints struct {
+	Network Network
+}
 
 // Expected content identity and size. Empty digest and zero size mean unknown.
 // A supplied digest is verified before delivery.
@@ -214,21 +328,53 @@ type Artifact struct {
 }
 
 // A location interpreted by its named source scheme. Execution providers
-// declare which schemes they support. Credentials require a separately
-// authorized capability.
+// declare which schemes they support. credential, when present, names a
+// credential registered with abstraction.credentials/holder@1 in the submitting
+// caller's account; it is a name, never a secret. The executing service applies
+// it through abstraction.credentials/applier@1 with consumer
+// abstraction.download/http-execution@1 to each request it sends to this
+// source, including redirects and resumed ranges, and never records the applied
+// headers. A request naming a credential requires
+// abstraction.download/credentials@1.
 type Source struct {
-	Scheme  string
-	Locator string
+	Scheme     string
+	Locator    string
+	Credential string
 }
 
 // Service request payload for recoverable job admission with kind download. The
 // provider owns result allocation and all partial files. Request identity,
 // required guarantees and cancellation use the job service. This payload
-// contains no provider paths. The initial execution profile supports anonymous
-// HTTP(S); unsupported work is sealed as definitely not accepted.
+// contains no provider paths. The initial execution profile supports HTTP(S),
+// anonymous or with a named credential; unsupported work is sealed as
+// definitely not accepted.
 type Request struct {
-	Artifact Artifact
-	Sources  []Source
+	Artifact    Artifact
+	Sources     []Source
+	Constraints *Constraints
+}
+
+func encConstraints(out []byte, v *Constraints, depth int) []byte {
+	if v.Network != 0 {
+		if !(v.Network).Known() {
+			panic(&Refusal{Word: "bad_enum", Offset: 0})
+		}
+	}
+	out = append(out, '{')
+	first := true
+	if v.Network != 0 {
+		first = false
+		out = append(out, '\n')
+		out = pad(out, depth+1)
+		out = esc(out, "network")
+		out = append(out, ':', ' ')
+		out = esc(out, v.Network.String())
+	}
+	if !first {
+		out = append(out, '\n')
+		out = pad(out, depth)
+	}
+	return append(out, '}')
 }
 
 func encArtifact(out []byte, v *Artifact, depth int) []byte {
@@ -273,6 +419,14 @@ func encSource(out []byte, v *Source, depth int) []byte {
 	out = esc(out, "locator")
 	out = append(out, ':', ' ')
 	out = esc(out, v.Locator)
+	if v.Credential != "" {
+		out = append(out, ',')
+		out = append(out, '\n')
+		out = pad(out, depth+1)
+		out = esc(out, "credential")
+		out = append(out, ':', ' ')
+		out = esc(out, v.Credential)
+	}
 	out = append(out, '\n')
 	out = pad(out, depth)
 	return append(out, '}')
@@ -291,6 +445,14 @@ func encRequest(out []byte, v *Request, depth int) []byte {
 	out = esc(out, "sources")
 	out = append(out, ':', ' ')
 	out = encList(out, v.Sources, depth+1, encSource)
+	if v.Constraints != nil {
+		out = append(out, ',')
+		out = append(out, '\n')
+		out = pad(out, depth+1)
+		out = esc(out, "constraints")
+		out = append(out, ':', ' ')
+		out = encConstraints(out, v.Constraints, depth+1)
+	}
 	out = append(out, '\n')
 	out = pad(out, depth)
 	return append(out, '}')
@@ -813,6 +975,71 @@ func decodeList[T any](r *reader, elem func(*reader) (*T, error)) ([]T, error) {
 	return out, nil
 }
 
+func (r *reader) decodeConstraints() (*Constraints, error) {
+	if r.at() != '{' {
+		return nil, r.refuse("wrong_type")
+	}
+	if err := r.enter(); err != nil {
+		return nil, err
+	}
+	r.pos++
+	v := &Constraints{}
+	var seen uint32
+	r.ws()
+	if r.at() != '}' {
+		for {
+			r.ws()
+			if r.at() != '"' {
+				return nil, r.refuse("malformed")
+			}
+			key, err := r.str()
+			if err != nil {
+				return nil, err
+			}
+			r.ws()
+			if r.at() != ':' {
+				return nil, r.refuse("malformed")
+			}
+			r.pos++
+			r.ws()
+			switch key {
+			case "network":
+				if seen&1 != 0 {
+					return nil, r.refuse("duplicate_field")
+				}
+				seen |= 1
+				x, err := r.str()
+				if err != nil {
+					return nil, err
+				}
+				word, ok := ParseNetwork(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Network = word
+			default:
+				return nil, r.refuse("unknown_field")
+			}
+			r.ws()
+			if r.at() != ',' {
+				break
+			}
+			r.pos++
+		}
+	}
+	if r.at() != '}' {
+		return nil, r.refuse("malformed")
+	}
+	r.pos++
+	r.depth--
+	if (seen & 1) != 0 {
+		if !(v.Network).Known() {
+			return nil, r.refuse("bad_enum")
+		}
+	}
+	return v, nil
+}
+
 func (r *reader) decodeArtifact() (*Artifact, error) {
 	if r.at() != '{' {
 		return nil, r.refuse("wrong_type")
@@ -927,6 +1154,16 @@ func (r *reader) decodeSource() (*Source, error) {
 					return nil, err
 				}
 				v.Locator = x
+			case "credential":
+				if seen&4 != 0 {
+					return nil, r.refuse("duplicate_field")
+				}
+				seen |= 4
+				x, err := r.str()
+				if err != nil {
+					return nil, err
+				}
+				v.Credential = x
 			default:
 				return nil, r.refuse("unknown_field")
 			}
@@ -996,6 +1233,16 @@ func (r *reader) decodeRequest() (*Request, error) {
 					return nil, err
 				}
 				v.Sources = x
+			case "constraints":
+				if seen&4 != 0 {
+					return nil, r.refuse("duplicate_field")
+				}
+				seen |= 4
+				x, err := r.decodeConstraints()
+				if err != nil {
+					return nil, err
+				}
+				v.Constraints = x
 			default:
 				return nil, r.refuse("unknown_field")
 			}
@@ -1031,12 +1278,12 @@ func Decode(in []byte) (*Request, error) {
 	return v, nil
 }
 
-// Refusals is in the order two of them are chosen between.
+// refusals is in the order two of them are chosen between.
 
-var Refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "trailing_bytes"}
+var refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"}
 
-func RefusalRank(word string) int {
-	for i, w := range Refusals {
+func refusalRank(word string) int {
+	for i, w := range refusals {
 		if w == word {
 			return i
 		}
@@ -1045,6 +1292,11 @@ func RefusalRank(word string) int {
 }
 
 func(r *reader)depthLimit()int{if r.limit>0 && r.limit<depthLimit{return r.limit};return depthLimit}
+
+func DecodeConstraintsAt(in []byte,depth,limit int)(*Constraints,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeConstraints();return v,r.pos,e}
+func EncodeConstraintsAt(v *Constraints,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encConstraints(nil,v,depth);if _,_,e:=DecodeConstraintsAt(out,depth,depthLimit);e!=nil{panic(e)};return out}
+func EncodeConstraints(v *Constraints)[]byte{return append(EncodeConstraintsAt(v,0),"\n"...)}
+func DecodeConstraints(in []byte)(*Constraints,error){v,n,e:=DecodeConstraintsAt(in,0,depthLimit);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
 
 func DecodeArtifactAt(in []byte,depth,limit int)(*Artifact,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeArtifact();return v,r.pos,e}
 func EncodeArtifactAt(v *Artifact,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encArtifact(nil,v,depth);if _,_,e:=DecodeArtifactAt(out,depth,depthLimit);e!=nil{panic(e)};return out}

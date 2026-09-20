@@ -88,7 +88,7 @@ func TestHTTPFailureClassificationPreservesUnknown(t *testing.T) {
 			record.Extensions[download.FailureCauseExtension] = json.RawMessage(c.causeRaw)
 		}
 		failure := (HTTPExecution{}).OperationFailure(record)
-		if failure == nil || failure.Classification != c.want || failure.Cause != c.cause || strings.Contains(failure.Message, "private diagnostic") {
+		if failure == nil || failure.Classification.String() != c.want || string(failure.Cause) != c.cause || strings.Contains(failure.Message, "private diagnostic") {
 			t.Fatalf("%s in %s: %+v", c.raw, c.state, failure)
 		}
 	}

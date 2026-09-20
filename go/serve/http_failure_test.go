@@ -65,7 +65,7 @@ func TestHTTPExecutionClassifiesFailures(t *testing.T) {
 			}
 			id := api.RequestIdentity{Key: c.name, HistoryEpoch: window.HistoryEpoch}
 			spec := request.Encode(&request.Request{Artifact: request.Artifact{Digest: c.digest, Size: c.size}, Sources: []request.Source{{Scheme: "http", Locator: server.URL + "/artifact"}}})
-			if v, err := p.Bind("alice").Submit(api.Submission{Identity: id, Kind: "download", Spec: spec}); err != nil || v.Outcome != "accepted" {
+			if v, err := p.Bind("alice").Submit(api.Submission{Identity: id, Kind: "download", Spec: spec}); err != nil || v.Outcome.String() != "accepted" {
 				t.Fatalf("submit: %+v %v", v, err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -79,14 +79,14 @@ func TestHTTPExecutionClassifiesFailures(t *testing.T) {
 					t.Fatalf("observe: %+v %v", v, err)
 				}
 				if f := v.Snapshot.Failure; f != nil {
-					state := v.Snapshot.State
+					state := v.Snapshot.State.String()
 					if c.state == "nonterminal" && (state == "pending" || state == "running") {
 						state = "nonterminal"
 					}
-					if state != c.state || f.Classification != c.class || f.Cause != c.cause {
+					if state != c.state || f.Classification.String() != c.class || string(f.Cause) != c.cause {
 						t.Fatalf("got state %s class %s cause %q; want %s %s %s", v.Snapshot.State, f.Classification, f.Cause, c.state, c.class, c.cause)
 					}
-					if read, _ := p.BindOperations("alice").ReadResult(id, 0, 16); read.Outcome == "data" {
+					if read, _ := p.BindOperations("alice").ReadResult(id, 0, 16); read.Outcome.String() == "data" {
 						t.Fatal("failed work exposed a result")
 					}
 					return

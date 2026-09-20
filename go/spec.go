@@ -40,6 +40,26 @@ type Spec struct {
 	// Without it, a Start whose answer was lost is indistinguishable from a
 	// Start that was refused, and the two demand opposite recoveries.
 	Request string `json:"request,omitempty"`
+
+	// Constraints are the submitter's conditions on when the bytes may move.
+	// A runner honours them only while it holds the guarantee the record's
+	// requires names [DL-N2]; see network.go.
+	Constraints *Constraints `json:"constraints,omitempty"`
+}
+
+// Constraints restrict when a transfer may open a source.
+type Constraints struct {
+	// Network is "unmetered" to open sources only while the path is unmetered
+	// [DL-N3]. Empty and "any" place no condition.
+	Network string `json:"network,omitempty"`
+}
+
+// NetworkUnmetered is the Constraints.Network word that waits out a metered path.
+const NetworkUnmetered = "unmetered"
+
+// WantsUnmetered reports whether the spec waits while the path is metered.
+func (s Spec) WantsUnmetered() bool {
+	return s.Constraints != nil && s.Constraints.Network == NetworkUnmetered
 }
 
 // Artifact is what the job is for: an identity, and how big it is. Both may be

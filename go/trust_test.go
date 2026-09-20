@@ -30,7 +30,7 @@ func TestUntrustedCertificateIsNotBlamedOnTheMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = HTTP{}.do(hreq, nil)
+	_, err = HTTP{}.do(hreq, nil, nil)
 	if err == nil {
 		t.Fatal("a self-signed test server was accepted")
 	}

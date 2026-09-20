@@ -48,18 +48,16 @@ var ErrReservedPath = forever("download: sink path is reserved by the store")
 // somebody else rather than to end it.
 var ErrForeignPath = errors.New("download: sink path names another platform's filesystem")
 
-// besideTheStore are the names this layer keeps in the store root. The store
+// besideTheStore are the names this layer reserves in the store root. The store
 // owns jobs/ and work/; these are ours, and a sink must not name them either.
 //
-// Spelled from the constants rather than beside them, so a heartbeat that gets
-// renamed cannot leave this list pointing at a file nobody writes any more.
+// Nothing writes them since the store supervisor and its heartbeat were removed
+// in 0.1.8 (docs/REMOVED.md). They stay reserved because CONTRACT.md reserves
+// them and a store written by an older release may still hold them.
 var besideTheStore = map[string]bool{
-	heartbeatName:          true,
-	heartbeatName + ".tmp": true,
-	// Nothing binds it since the bus replaced the socket, but CONTRACT.md and
-	// the C++ reader still reserve it, and a name reserved in two languages out
-	// of three is a conformance divergence.
-	"supervisor.sock": true,
+	"supervisor.json":     true,
+	"supervisor.json.tmp": true,
+	"supervisor.sock":     true,
 }
 
 // ReservedSink refuses a sink that names the store's own layout, or this

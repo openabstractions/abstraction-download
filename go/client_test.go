@@ -2,12 +2,9 @@ package download
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,21 +17,18 @@ func clientOn(t *testing.T) (Client, job.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewRunner(store, "test-owner")
-	// Pretend a supervisor is watching. Two reasons, both real: it is the tier
-	// most machines actually run, and it means Submit hands the work over rather
-	// than starting a goroutine on context.Background() that no test can stop —
-	// which is what left partial files open and made Windows refuse to remove
-	// the temp directory. Nothing here completes, so every job stays in flight
-	// and the deduplication is what is being measured.
-	//
-	// The sinks in these tests are relative for the same reason: an absolute one
-	// names a path only this machine has, so Submit works it here whatever is
-	// watching. See TestAnAbsoluteSinkIsNotHandedToASupervisor.
-	if err := Heartbeat(store, "test-supervisor@host:1", "here", "", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	return NewClient(r), store
+	return idleClient(NewRunner(store, "test-owner")), store
+}
+
+// idleClient records submissions and starts no worker. Submit would otherwise
+// start a goroutine on context.Background() that no test can stop, which left
+// partial files open and made Windows refuse to remove the temp directory.
+// Nothing here completes, so every job stays in flight and the deduplication is
+// what is being measured.
+func idleClient(r *Runner) *client {
+	c := NewClient(r).(*client)
+	c.idle = true
+	return c
 }
 
 // Repeating the command is how a person resumes an interrupted download. It
@@ -130,13 +124,9 @@ func TestDeliverEndsWhenNobodyIsWorkingTheJob(t *testing.T) {
 	}
 	r := NewRunner(store, "test-owner")
 	r.LeaseTTL = 200 * time.Millisecond
-	// A supervisor that answers the heartbeat and then does nothing, which is
-	// exactly what a killed jobd leaves behind for as long as its last beat
-	// stays fresh.
-	if err := Heartbeat(store, "gone@host:1", "here", "", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewClient(r)
+	// A client that records the job and never works it, which is what a worker
+	// killed before its first write leaves behind.
+	svc := idleClient(r)
 	h, err := svc.Submit(Spec{
 		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/x.bin"}},
 		Sink:    Sink{Final: "out/x.bin"},
@@ -237,71 +227,5 @@ func TestAFailedJobWaitsBeforeItIsTriedAgain(t *testing.T) {
 	// last error, and a job with no error waits for nothing.
 	if got := RetryAfter(&job.Record{Lease: job.Lease{Epoch: 40}}); !got.IsZero() {
 		t.Fatalf("RetryAfter on a record with no error = %v, want zero", got)
-	}
-}
-
-// A supervisor on a NAS handed a job whose sink is `C:\ComfyUI\models\x.safetensors`
-// would write to a directory that exists here and not there — the bytes land
-// somewhere useless, or nowhere, and the application waits for a file that was
-// never coming. The ComfyUI node used to avoid this by never delegating at all,
-// which is an application deciding something the layer knows better.
-func TestAnAbsoluteSinkIsNotHandedToASupervisor(t *testing.T) {
-	svc, store := clientOn(t) // a supervisor IS watching
-	// And it is watching from somewhere else, which is what makes the sink
-	// unreachable to it. A supervisor sharing this filesystem can deliver an
-	// absolute path perfectly well and is handed the job; see onThisMachine.
-	elsewhere(t, store)
-	h, err := svc.Submit(Spec{
-		Sources: []Source{{Scheme: "https", Locator: "https://example.invalid/z.bin"}},
-		Sink:    Sink{Final: filepath.Join(t.TempDir(), "z.bin")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Nothing else is running, so an attempt that reaches the record at all can
-	// only have been made in this process.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		rec, err := store.Load(h.ID())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if rec.Error != "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("nobody worked it: state %s, error %q — it was left to a "+
-				"supervisor that cannot reach the sink", rec.State, rec.Error)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// The worker records the error before it releases its lease. Waiting for it
-	// keeps that write out of the store directory the test cleanup removes.
-	for svc.(*client).working(h.ID()) {
-		if time.Now().After(deadline) {
-			t.Fatal("worker never stopped")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// elsewhere rewrites the staged heartbeat so it names another machine.
-//
-// Heartbeat stamps the host it is called on, which is the honest thing for it
-// to do and the wrong thing for a test about a supervisor that cannot see this
-// filesystem.
-func elsewhere(t *testing.T, store job.Store) {
-	t.Helper()
-	sup, live := SupervisorOf(store)
-	if !live {
-		t.Fatal("no supervisor to move")
-	}
-	sup.Host = "a-machine-that-is-not-this-one"
-	b, err := json.Marshal(sup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(heartbeatPath(store), b, 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

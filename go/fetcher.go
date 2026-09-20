@@ -280,13 +280,18 @@ func Terminal(err error) error {
 
 // CauseOf names why an attempt ended in the failure payload's cause vocabulary:
 // digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
-// server_error, transport or other. It returns "" for nil.
+// server_error, transport, credential or other. It returns "" for nil.
 func CauseOf(err error) string {
 	var status *StatusError
+	var credential *CredentialError
 	var transport interface{ Timeout() bool }
 	switch {
 	case err == nil:
 		return ""
+	case errors.As(err, &credential):
+		// The applier's outcome stays in the error text, credential:<outcome>:<name>,
+		// and its class says whether the applier refused or could not answer.
+		return "credential"
 	case errors.Is(err, ErrDigestMismatch):
 		return "digest_mismatch"
 	case errors.Is(err, ErrOversize):
@@ -455,6 +460,12 @@ type RangeRequest struct {
 	Validators Validators
 	// Beat says bytes are still arriving. It writes nothing; see keeper.
 	Beat func()
+	// Landed, when set, is called after each write with the absolute offset
+	// this request has written up to. The owner checkpoints [Range.Start, at)
+	// after a sync, so a range cut off part way resumes from its last
+	// checkpointed byte. A fetcher that never calls it keeps whole-range
+	// granularity.
+	Landed func(at int64)
 }
 
 // RangeFetcher is a Fetcher whose sources can serve a bounded range, which is

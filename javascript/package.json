@@ -13,7 +13,8 @@
     "url": "https://github.com/openabstractions/abstraction-download/issues"
   },
   "type": "module",
-  "exports": "./js/abstraction/download/request/rec.mjs",
+  "types": "./js/abstraction/download/request/index.d.mts",
+  "exports": {".": {"types": "./js/abstraction/download/request/index.d.mts", "default": "./js/abstraction/download/request/index.mjs"}, "./internal": "./js/abstraction/download/request/internal.mjs"},
   "files": [
     "js"
   ],

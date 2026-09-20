@@ -106,6 +106,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "specread:", err)
 			os.Exit(1)
 		}
+		if err := download.RefuseDeepNesting(raw); err != nil {
+			fmt.Fprintln(os.Stderr, "specread:", err)
+			os.Exit(1)
+		}
 		out, err := json.Marshal(json.RawMessage(raw))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "specread:", err)
@@ -117,6 +121,10 @@ func main() {
 	}
 	raw, err := os.ReadFile(os.Args[1])
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "specread:", err)
+		os.Exit(1)
+	}
+	if err := download.RefuseDeepNesting(raw); err != nil {
 		fmt.Fprintln(os.Stderr, "specread:", err)
 		os.Exit(1)
 	}

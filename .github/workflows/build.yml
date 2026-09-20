@@ -74,61 +74,6 @@ jobs:
           go test -race -count=1 ./...
           printf '%s: %s under the race detector\n' "$RUNNER_OS" "${{ matrix.module }}" >> "$GITHUB_STEP_SUMMARY"
 
-  python:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      # The python and c++ of this layer import the layers below it by relative
-      # path, so the runner is laid out the way a reader lays out clones: this
-      # repository beside its siblings, each pinned to a reviewed public commit.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          path: abstraction-download
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-job
-          ref: bc5b108eb6ce780f71638727d960d5b9b29cfdae
-          path: abstraction-job
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-cas
-          ref: ffe30f27e1753a37f5857ecd2d555e264fe6be79
-          path: abstraction-cas
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-watch
-          ref: e3f37ca28f7d16dd4f7c97ef117b9718962b37ee
-          path: abstraction-watch
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-config
-          ref: fcf2e3253dae07e20cde8eaa93e8e9e78250e7c5
-          path: abstraction-config
-
-      - name: test
-        working-directory: abstraction-download/python
-        run: |
-          PY="$(command -v python3 || command -v python || true)"
-          if [ -z "$PY" ]; then
-            printf 'FAIL  python on %s — no interpreter on PATH, nothing was run\n' "$RUNNER_OS"
-            printf '%s: FAIL python, no interpreter on PATH\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          "$PY" --version
-          sep=':'
-          [ "$RUNNER_OS" = Windows ] && sep=';'
-          export PYTHONPATH="$GITHUB_WORKSPACE/abstraction-job/python${sep}$GITHUB_WORKSPACE/abstraction-cas/python${sep}$GITHUB_WORKSPACE/abstraction-watch/python${sep}$GITHUB_WORKSPACE/abstraction-config/python"
-          "$PY" -m unittest discover -p 'test_*.py' 2>&1 | tee out.txt
-          if grep -q '^Ran 0 tests' out.txt; then
-            printf 'FAIL  discovery found no test to run, and unittest calls that a pass\n'
-            exit 1
-          fi
-          printf '%s: python, %s tests, with job, cas, watch and config beside it\n' \
-            "$RUNNER_OS" "$(sed -n 's/^Ran \([0-9]*\) tests\?.*/\1/p' out.txt | tail -1)" >> "$GITHUB_STEP_SUMMARY"
-
   cpp:
     strategy:
       fail-fast: false
@@ -137,53 +82,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          path: abstraction-download
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-job
-          ref: bc5b108eb6ce780f71638727d960d5b9b29cfdae
-          path: abstraction-job
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-cas
-          ref: ffe30f27e1753a37f5857ecd2d555e264fe6be79
-          path: abstraction-cas
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-watch
-          ref: e3f37ca28f7d16dd4f7c97ef117b9718962b37ee
-          path: abstraction-watch
 
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: openabstractions/abstraction-identity
-          ref: dd4b34fe3d059174283a2c5fa9562684357e8c10
-          path: abstraction-identity
-
-      # Exercise the shipped build graph, including discovery's shared IPC
-      # runtime. CMake selects the installed native compiler; Windows requests
-      # x64 from its default Visual Studio generator, without a version guess.
-      - name: configure, build and test C++
-        working-directory: abstraction-download
+      # The C++ package is the generated request vocabulary alone: header-only,
+      # standard library only, no sibling repository. The outside consumer in
+      # cpp/test/request-package finds it from the installed prefix.
+      - name: install the request package and build its outside consumer
         run: |
           cmake --version
-          if [ "$RUNNER_OS" = Windows ]; then
-            cmake -S cpp -B build -A x64
-          else
-            cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release
-          fi
-          cmake --build build --config Release --parallel 2
-          # Optional live HTTPS remains out of this isolated regression job.
-          unset ABSTRACTION_LIVE_URL ABSTRACTION_LIVE_DIGEST
-          ctest --test-dir build -C Release --output-on-failure --no-tests=error --timeout 30 | tee ctest.txt
+          prefix="$RUNNER_TEMP/prefix"
+          generator="-DCMAKE_BUILD_TYPE=Release"
+          [ "$RUNNER_OS" = Windows ] && generator="-A x64"
+          cmake -S cpp -B build $generator
+          cmake --install build --config Release --prefix "$prefix"
+          cmake -S cpp/test/request-package -B consumer $generator -DCMAKE_PREFIX_PATH="$prefix"
+          cmake --build consumer --config Release --parallel 2
+          ctest --test-dir consumer -C Release --output-on-failure --no-tests=error --timeout 30 | tee ctest.txt
           {
-            printf '%s: CMake Release build and CTest, including DiscoveryClient and LocalStream with pinned public siblings\n' "$RUNNER_OS"
+            printf '%s: installed request package and outside consumer, CTest\n' "$RUNNER_OS"
             grep -E 'tests passed|Total Test time' ctest.txt
           } >> "$GITHUB_STEP_SUMMARY"
 
   unproven:
-    needs: [go, python, cpp]
+    needs: [go, cpp]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -191,8 +111,8 @@ jobs:
         run: |
           {
             printf '\n### UNPROVEN\n\nThis workflow builds what this repository contains, and nothing else. It ran none of:\n\n'
-            printf -- '- the cross-language conformance harnesses, which compare bytes across all three languages and live in the private tree\n'
+            printf -- '- the conformance harnesses, which live in the private tree\n'
             printf -- '- any real transfer. Nothing here reaches a network, so no https fetcher is exercised on any platform\n'
             printf -- '- delegation to a real BITS, launchd or NAS tier, and no signed or installed artefact\n'
-            printf -- '- sibling revisions other than the explicit public commit pins tested by the Python and C++ jobs.\n'
+            printf -- '- the Python request vocabulary under py/, which has no test of its own in this repository.\n'
           } >> "$GITHUB_STEP_SUMMARY"

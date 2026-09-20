@@ -1,11 +1,27 @@
 # abstraction-download
 
+Give an application a download that can keep running after the application
+closes. The request says where the bytes may come from, how to verify them and
+where the finished content belongs. The runtime chooses an allowed downloader,
+keeps progress and reports a recoverable result.
+
 ## Application service path
 
-Normal applications use resolved durable jobs and generated download requests
-through [the facade](https://github.com/openabstractions/abstraction-facade).
-The service owns execution and shared stores. Preserve caller request identity
-and binding for recovery; waiting cancellation leaves accepted work alone.
+Applications resolve durable jobs through
+[the facade](https://github.com/openabstractions/abstraction-facade), serialize
+the generated download request as the job specification, and retain the receipt
+and binding before waiting. A lost submit reply is reconciled with the same
+request identity. Waiting cancellation leaves accepted work with the service.
+
+The shipped command follows that path:
+
+```console
+openabstractions download https://example.invalid/artifact --out /destination
+openabstractions jobs list
+```
+
+Use `--sha256` when the publisher supplies a digest. Credentials are registered
+by name through `openabstractions credentials`; URLs should carry no secrets.
 
 The file-store examples below are explicitly selected native provider APIs with
 separate lifecycle guarantees. Their historical conformance describes that
@@ -44,10 +60,10 @@ and the conformance suite that judges implementations of this contract.
 `go get` with no version takes the newest; pin the exact tag you tested against.
 **Go 1.26 or later is required.**
 
-**Python** is in this repository and on no package index —
-[what to install, import and call](python/README.md). **C++** is here too, with
-no tagged release; see Requirements, and read *What may break* before depending
-on either.
+Python and C++ applications use the generated request vocabulary under `py/`
+and `cpp/` through the job service; see Requirements. The Python and C++
+download providers were removed on 2026-09-15; the parent project's
+`docs/REMOVED.md` records them.
 
 Whether to adopt this at all, what it costs and what is not proven:
 [Adopting](CONTRIBUTING.md#adopting).
@@ -146,90 +162,27 @@ carries an API stability promise.
   no network protocol of ours. Over SMB a record has been read 154 s stale by the
   Windows redirector
   ([`SMB1.txt`](https://github.com/openabstractions/abstractions/blob/main/docs/results/SMB1.txt)).
-- **On Linux the C++ build registers no https fetcher**, because the platform
-  furnishes none this layer will use. An application whose whole job is pulling
-  bytes off https gets nothing there. See Requirements.
-- **`watch`, which the C++ build compiles in, carries no conformance verdict in
-  any language.** [What is proven and what is not](https://openabstractions.org/coverage.html).
 - **Platforms.** Every published transcript was produced on Windows or Linux.
   macOS is `UNPROVEN` in all of them.
 
 ## Requirements
 
 **Go** 1.26 or later, depending on this project's other layers and
-`golang.org/x/sys`. **Python** 3.9 or later, standard library only, on no package
-index — the install line, the example and the API are on
-[`python/README.md`](python/README.md).
+`golang.org/x/sys`.
 
-**C++** 17, standard library only, no third-party dependency.
-`cpp/CMakeLists.txt` builds it, runs its tests and installs a `find_package`
-package:
+**C++** 17 and **Python** 3.9 or later for the generated request vocabulary,
+standard library only. `cpp/CMakeLists.txt` installs the header-only
+`abstraction_download_request` package:
 
     cmake -S cpp -B build -DCMAKE_INSTALL_PREFIX=<prefix>
-    cmake --build build && ctest --test-dir build
     cmake --install build
 
 and then, in yours:
 
-    find_package(abstraction_download 0.1 CONFIG REQUIRED)
-    target_link_libraries(your_target PRIVATE abstraction::download_runner)
+    find_package(abstraction_download_request 0.1 CONFIG REQUIRED)
+    target_link_libraries(your_target PRIVATE abstraction::download_request)
 
-That `0.1` is `project(abstraction_download VERSION 0.1.0)` in
-`cpp/CMakeLists.txt` and corresponds to no tag: **there is no C++ release.** What
-you can pin is a commit. `abstraction::download` alone is the header-only reader:
-the record rules without the runner. `add_subdirectory(cpp)` gives the same two
-names, so vendoring and installing are interchangeable at the call site.
-
-`runner.h` and `wanted.h` include `<abstraction/job/store.h>`, and the job
-sources that satisfies reach `cas` and `watch` in turn, so that build needs
-[`abstraction-job`](https://github.com/openabstractions/abstraction-job),
-[`abstraction-cas`](https://github.com/openabstractions/abstraction-cas) and
-[`abstraction-watch`](https://github.com/openabstractions/abstraction-watch):
-either installed already and on `CMAKE_PREFIX_PATH`, or cloned beside this
-repository, in which case they are compiled in and travel in this package.
-Discovery also requires the shared client byte runtime from
-[`abstraction-identity`](https://github.com/openabstractions/abstraction-identity):
-install its `cpp` CMake package `abstraction_ipc` on `CMAKE_PREFIX_PATH`, or
-clone it beside this repository. Discovery links its `abstraction::ipc` target;
-this dependency supplies client transport, not a C++ identity service.
-
-Nothing is fetched while CMake configures — a build that reaches the network is
-a dependency you did not choose, and handing you one would be the thing this
-layer exists to stop.
-
-**Which commits of those three go together** is
-[`layers.lock`](https://github.com/openabstractions/abstractions/blob/main/layers.lock),
-and it has a row for `abstraction-job` and none for `abstraction-cas` or
-`abstraction-watch`. Until it does, the set a C++ build needs is not published
-anywhere and you are choosing three commits yourself.
-
-Without a build system, clone those three beside this repository and name the
-files. `runner.h` refuses to compile unless the runner is linked, so the define
-below is what the `abstraction::download_runner` target would have set for you:
-
-    g++ -std=c++17 -DABSTRACTION_DOWNLOAD_RUNNER_LINKED \
-      -I cpp/include -I ../abstraction-job/cpp/include \
-      -I ../abstraction-cas/cpp/include -I ../abstraction-watch/cpp/include \
-      cpp/test/test_runner.cpp cpp/src/runner.cpp cpp/src/spec.cpp \
-      cpp/src/wanted.cpp cpp/src/sha256.cpp cpp/src/fetchers.cpp \
-      ../abstraction-job/cpp/src/json.cpp ../abstraction-job/cpp/src/record.cpp \
-      ../abstraction-job/cpp/src/ranges.cpp ../abstraction-job/cpp/src/store.cpp \
-      ../abstraction-job/cpp/src/awake.cpp ../abstraction-cas/cpp/src/cas.cpp \
-      -o test_runner
-
-That is this layer's own test, so running it is how you check that your compiler
-agrees with ours. Measured 2026-09-09 with g++ 15.2 and with MSVC 19.51, which
-takes the same file list under `/std:c++17` and `/I` and needs `winhttp.lib` at
-link. `fetchers.cpp` compiles on Linux and registers no https fetcher there,
-because the platform furnishes none this layer will use — see
-`https_available()` in `cpp/include/abstraction/download/fetcher.h`.
-
-`python/` and `cpp/` are full implementations, not readers. The timestamps a C++
-record may carry are limited by the build's `std::chrono::system_clock` — 1677 to
-2262 on libstdc++, wider on MSVC — and an instant outside that is refused as
-`bad_timestamp`, never wrapped. All three produce identical transcripts over the
-shared scenario corpus
-([`BEHAVIOUR1.txt`](https://github.com/openabstractions/abstractions/blob/main/docs/results/BEHAVIOUR1.txt)).
+`cpp/test/request-package` is an outside consumer of that installed package.
 
 ## Licence
 

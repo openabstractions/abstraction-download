@@ -124,6 +124,7 @@ func (d *Delegator) Capabilities() []download.Capability {
 		// restarted from zero on the NAS. Declining it means such a job stays
 		// here and finishes here.
 		download.CapSurvivesProcessExit,
+		download.CapRecoverableSubmission,
 		download.CapVerifies,
 		download.CapDelegates,
 	}

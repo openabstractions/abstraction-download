@@ -13,6 +13,11 @@
 # sentence: three implementations word an error three ways, always will, and
 # pinning wording would make every improved message a cross-language breakage.
 #
+# The Python and C++ implementations were removed on 2026-09-15
+# (docs/REMOVED.md). Their python-* and cpp-* records stay: stores they wrote
+# still hold records like them, and the Go reader must recover the same class.
+# `by` names the writer that produced each record.
+#
 # name        the file, without .json
 # class       what last_failure must recover: permanent, retryable, or none
 # by          what produced the record

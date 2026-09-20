@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
@@ -211,7 +212,10 @@ func (r *Runner) rangePlan(ctx context.Context, rec *job.Record, spec Spec) ([]r
 	var serving []rangeSource
 	var p plan
 	for _, src := range byPriority(spec.Sources) {
-		f, ok := r.Fetchers.For(src, rec.Requires)
+		if networkAllows(ctx) != nil {
+			return nil, plan{}, false
+		}
+		f, ok := r.Fetchers.For(src, r.fetcherRequires(rec.Requires))
 		if !ok {
 			continue
 		}
@@ -226,7 +230,7 @@ func (r *Runner) rangePlan(ctx context.Context, rec *job.Record, spec Spec) ([]r
 		if err != nil {
 			continue
 		}
-		size, ranged, err := rf.Ranged(ctx, src, headers)
+		size, ranged, err := rf.Ranged(withCredentialHops(ctx, src, r.Credentials, headers), src, headers)
 		if err != nil || !ranged {
 			continue
 		}
@@ -330,6 +334,7 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 		store: r.Store, id: rec.ID, epoch: epoch,
 		file: f, size: p.size,
 		have:       append(job.Ranges(nil), have...),
+		landed:     map[int64]int64{},
 		validators: cp.Validators,
 		onIntent:   func(want job.Want) { onIntent(want); stop() },
 	}
@@ -343,6 +348,11 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 	})
 	defer keep.stop()
 	w.keep = keep
+	// A range is minutes on a thin link, and a qualification run restarted a
+	// 16 MiB range from its first byte after receiving 4 MiB of it. What each
+	// range has landed is checkpointed on the persistence interval, and once
+	// more when the transfer stops.
+	quiet := r.landedOnTimer(w)
 
 	var todo job.Ranges
 	for _, g := range gaps(p.size, have) {
@@ -359,6 +369,7 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 			for rng := range work {
 				err := r.fetchRange(ctx, serving, RangeRequest{
 					Range: rng, Out: f, Validators: w.validators, Beat: keep.beat,
+					Landed: w.arrival(rng.Start),
 				})
 				if err == nil {
 					err = w.proved(rng)
@@ -384,6 +395,7 @@ feed:
 	}
 	close(work)
 	wg.Wait()
+	quiet()
 
 	// Read the context BEFORE stopping the keeper: stopping cancels the context
 	// this work ran under, and asking afterwards would report every finished
@@ -394,6 +406,13 @@ feed:
 	select {
 	case failed = <-fail:
 	default:
+	}
+	// The ranges a stop cut off keep what they landed, unless the store has
+	// already refused this epoch.
+	if !fencing(fence) {
+		if err := w.keepLanded(); err != nil && failed == nil && fence == nil && cancelled == nil {
+			failed = err
+		}
 	}
 	done := covered(w.snapshot())
 	switch {
@@ -415,7 +434,26 @@ feed:
 // that says no does not speak for a mirror that merely dropped the connection.
 func (r *Runner) fetchRange(ctx context.Context, serving []rangeSource, req RangeRequest) error {
 	var last error
+	// A source that fails part way has still landed its bytes, and the next
+	// source is asked only for the rest of the range.
+	var reached atomic.Int64
+	reached.Store(req.Range.Start)
+	report := req.Landed
+	req.Landed = func(at int64) {
+		if at > reached.Load() {
+			reached.Store(at)
+		}
+		if report != nil {
+			report(at)
+		}
+	}
 	for _, s := range serving {
+		if err := networkAllows(ctx); err != nil {
+			return err
+		}
+		if at := reached.Load(); at > req.Range.Start && at < req.Range.End {
+			req.Range.Start = at
+		}
 		req.Source = s.src
 		// Credentials are resolved per range, not once for the run. A read token
 		// from a content-addressed store is good for minutes and a 40 GB
@@ -426,7 +464,7 @@ func (r *Runner) fetchRange(ctx context.Context, serving []rangeSource, req Rang
 		if err == nil {
 			req.Headers = headers
 			req.Reach = r.Reach
-			err = s.rf.FetchRange(ctx, req)
+			err = s.rf.FetchRange(withCredentialHops(ctx, s.src, r.Credentials, headers), req)
 		}
 		if err == nil {
 			return nil
@@ -459,6 +497,85 @@ type progress struct {
 
 	mu   sync.Mutex
 	have job.Ranges
+
+	// landed is how far each range still arriving has written, by the range's
+	// start. It has its own lock because writers report into it on the data
+	// path, and mu is held across a record write.
+	lmu    sync.Mutex
+	landed map[int64]int64
+}
+
+// arrival is the Landed callback for the range starting at start.
+func (p *progress) arrival(start int64) func(int64) {
+	return func(at int64) {
+		p.lmu.Lock()
+		if at > p.landed[start] {
+			p.landed[start] = at
+		}
+		p.lmu.Unlock()
+	}
+}
+
+// keepLanded checkpoints the landed part of every range still arriving. The
+// offsets are read before the sync, so every byte the checkpoint names was
+// written before the file was flushed.
+func (p *progress) keepLanded() error {
+	p.lmu.Lock()
+	parts := make(job.Ranges, 0, len(p.landed))
+	for start, at := range p.landed {
+		if at > start {
+			parts = append(parts, job.Range{Start: start, End: at})
+		}
+	}
+	p.lmu.Unlock()
+	if len(parts) == 0 {
+		return nil
+	}
+	if err := p.file.Sync(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next := p.have
+	for _, part := range parts {
+		var err error
+		if next, err = next.Add(part.Start, part.End); err != nil {
+			return err
+		}
+	}
+	if covered(next) == covered(p.have) {
+		return nil
+	}
+	p.have = next
+	return p.record()
+}
+
+// landedOnTimer runs keepLanded every PersistInterval until the returned stop.
+// A range that lands whole is proved at once, so the range is the byte bound.
+func (r *Runner) landedOnTimer(p *progress) (stop func()) {
+	if r.PersistInterval <= 0 {
+		return func() {}
+	}
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(r.PersistInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				// A refusal that fences this owner cancels the transfer inside
+				// record; any other failure leaves the next tick to try again.
+				_ = p.keepLanded()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // proved records one landed range. Durability comes before the claim: the file
@@ -478,6 +595,14 @@ func (p *progress) proved(rng job.Range) error {
 		return err
 	}
 	p.have = next
+	p.lmu.Lock()
+	delete(p.landed, rng.Start)
+	p.lmu.Unlock()
+	return p.record()
+}
+
+// record writes the proven set down, with mu held.
+func (p *progress) record() error {
 	done := covered(p.have)
 	updated, err := p.store.Update(p.id, p.epoch, func(rr *job.Record) error {
 		rr.Progress.Done = done

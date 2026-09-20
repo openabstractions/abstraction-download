@@ -64,6 +64,9 @@ func ParseWanted(text string) ([]Spec, error) {
 			b.WriteString(l.text)
 			b.WriteByte('\n')
 		}
+		if err := RefuseDeepNesting([]byte(b.String())); err != nil {
+			return nil, fmt.Errorf("%w: not a spec: %v", ErrRequestRefused, err)
+		}
 		var s Spec
 		if err := json.Unmarshal([]byte(b.String()), &s); err != nil {
 			return nil, fmt.Errorf("%w: not a spec: %v", ErrRequestRefused, err)

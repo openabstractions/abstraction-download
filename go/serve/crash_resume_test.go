@@ -89,7 +89,7 @@ func testBody(n int) []byte {
 func observe(t *testing.T, p *acceptanceprovider.Provider, id api.RequestIdentity) *api.OperationSnapshot {
 	t.Helper()
 	v, err := p.BindOperations("alice").ObserveWork(id)
-	if err != nil || v.Outcome != "observed" || v.Snapshot == nil {
+	if err != nil || v.Outcome.String() != "observed" || v.Snapshot == nil {
 		t.Fatalf("observe: %+v %v", v, err)
 	}
 	return v.Snapshot
@@ -111,11 +111,11 @@ func readAll(t *testing.T, p *acceptanceprovider.Provider, id api.RequestIdentit
 	var out []byte
 	for {
 		v, err := p.BindOperations("alice").ReadResult(id, int64(len(out)), 65536)
-		if err != nil || v.Outcome != "data" {
+		if err != nil || v.Outcome.String() != "data" {
 			t.Fatalf("read result at %d: %+v %v", len(out), v, err)
 		}
 		out = append(out, v.Chunk.Data...)
-		if v.Chunk.Eof {
+		if v.Chunk.EOF {
 			return out
 		}
 	}
@@ -134,10 +134,10 @@ func submitDownload(t *testing.T, p *acceptanceprovider.Provider, key string, at
 	}
 	spec := request.Encode(&request.Request{Artifact: artifact, Sources: []request.Source{{Scheme: "http", Locator: url}}})
 	v, err := p.Bind("alice").Submit(api.Submission{Identity: id, Kind: "download", Spec: spec})
-	if err != nil || v.Outcome != "accepted" {
+	if err != nil || v.Outcome.String() != "accepted" {
 		t.Fatalf("submit: %+v %v", v, err)
 	}
-	return id, v.Receipt.OperationId
+	return id, v.Receipt.OperationID
 }
 
 func execute(t *testing.T, p *acceptanceprovider.Provider) {
@@ -250,10 +250,10 @@ func TestHTTPExecutionResumesAfterCrash(t *testing.T) {
 			execute(t, p)
 			waitFor(t, "completion after restart", 60*time.Second, func() bool {
 				s := observe(t, p, id)
-				if s.State == "failed" || s.State == "cancelled" {
+				if s.State.String() == "failed" || s.State.String() == "cancelled" {
 					t.Fatalf("operation ended %s: %+v", s.State, s.Failure)
 				}
-				return s.State == "complete"
+				return s.State.String() == "complete"
 			})
 			got := readAll(t, p, id)
 			if !bytes.Equal(got, body) || sha256.Sum256(got) != sha256.Sum256(body) {
@@ -285,11 +285,11 @@ func TestHTTPExecutionReportsProgressTotal(t *testing.T) {
 				s := observe(t, p, id)
 				return s.Progress.Done > 0 && s.Progress.Total > 0
 			})
-			if s := observe(t, p, id); s.Progress.Total != int64(len(body)) || s.State != "running" {
+			if s := observe(t, p, id); s.Progress.Total != int64(len(body)) || s.State.String() != "running" {
 				t.Fatalf("running snapshot: %+v", s)
 			}
 			close(source.release)
-			waitFor(t, "completion", 30*time.Second, func() bool { return observe(t, p, id).State == "complete" })
+			waitFor(t, "completion", 30*time.Second, func() bool { return observe(t, p, id).State.String() == "complete" })
 			if s := observe(t, p, id); s.Progress.Total != int64(len(body)) || s.Progress.Done != int64(len(body)) {
 				t.Fatalf("complete snapshot: %+v", s)
 			}
@@ -311,7 +311,7 @@ func TestHTTPExecutionLostResultPermitsNextAttempt(t *testing.T) {
 	}
 	id, operation := submitDownload(t, p, "lost", 0, body, true, server.URL+"/artifact")
 	execute(t, p)
-	waitFor(t, "completion", 30*time.Second, func() bool { return observe(t, p, id).State == "complete" })
+	waitFor(t, "completion", 30*time.Second, func() bool { return observe(t, p, id).State.String() == "complete" })
 	if !bytes.Equal(readAll(t, p, id), body) {
 		t.Fatal("first result differs")
 	}
@@ -320,21 +320,21 @@ func TestHTTPExecutionLostResultPermitsNextAttempt(t *testing.T) {
 	if err := os.Remove(result); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := p.BindOperations("alice").ReadResult(id, 0, 16); err != nil || v.Outcome != "unavailable" {
+	if v, err := p.BindOperations("alice").ReadResult(id, 0, 16); err != nil || v.Outcome.String() != "unavailable" {
 		t.Fatalf("read of lost result: %+v %v", v, err)
 	}
 	s := observe(t, p, id)
-	if s.State != "failed" || s.Failure == nil || s.Failure.Classification != "permanent" || s.Failure.Cause != "result_lost" || s.Receipt.OperationId != operation {
+	if s.State.String() != "failed" || s.Failure == nil || s.Failure.Classification.String() != "permanent" || s.Failure.Cause != "result_lost" || s.Receipt.OperationID != operation {
 		t.Fatalf("lost result observation: %+v", s)
 	}
 	if err := os.WriteFile(result, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := p.BindOperations("alice").ReadResult(id, 0, 16); err != nil || v.Outcome != "unavailable" {
+	if v, err := p.BindOperations("alice").ReadResult(id, 0, 16); err != nil || v.Outcome.String() != "unavailable" {
 		t.Fatalf("reappearing bytes served under a lost identity: %+v %v", v, err)
 	}
 	page, err := p.BindInventory("alice").ListWork("", 8)
-	if err != nil || page.Outcome != "page" || len(page.Snapshots) != 1 || page.Snapshots[0].Failure == nil || page.Snapshots[0].Failure.Cause != "result_lost" {
+	if err != nil || page.Outcome.String() != "page" || len(page.Snapshots) != 1 || page.Snapshots[0].Failure == nil || page.Snapshots[0].Failure.Cause != "result_lost" {
 		t.Fatalf("inventory of lost result: %+v %v", page, err)
 	}
 
@@ -342,7 +342,7 @@ func TestHTTPExecutionLostResultPermitsNextAttempt(t *testing.T) {
 	if second == operation {
 		t.Fatal("retry reused the lost operation")
 	}
-	waitFor(t, "retry completion", 30*time.Second, func() bool { return observe(t, p, retry).State == "complete" })
+	waitFor(t, "retry completion", 30*time.Second, func() bool { return observe(t, p, retry).State.String() == "complete" })
 	if !bytes.Equal(readAll(t, p, retry), body) {
 		t.Fatal("retry result differs")
 	}

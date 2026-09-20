@@ -3,64 +3,11 @@ package download
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
 )
-
-// Installing a supervisor must not take away a destination that worked without
-// one.
-//
-// `Get(url, "/home/me/model.gguf")` is the first thing anybody does, and it is
-// what every download tool has always meant. With no supervisor the client runs
-// the job in-process and delivers it. Announce a supervisor on this machine and
-// the same call stops working forever: Get absolutises the destination, the
-// supervisor refuses every absolute sink, and neither ever gives way.
-func TestASupervisorKeepsAnAbsoluteDestination(t *testing.T) {
-	payload := []byte("the weights")
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(payload)
-	}))
-	defer origin.Close()
-
-	root := t.TempDir()
-	store, err := job.NewFileStore(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A supervisor on this machine, which is what `jobd install` produces. The
-	// client hands it the work and this process does none of it.
-	if err := Heartbeat(store, "jobd@host:1", "here", "", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	dest := filepath.Join(t.TempDir(), "model.gguf")
-
-	svc := NewClient(NewRunner(store, "app"))
-	h, err := svc.Get(origin.URL+"/model.gguf", dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sup := NewRunner(store, "jobd")
-	sup.SharedStore = SharedStoreRoot(root)
-	if _, err := sup.Adopt(context.Background()); err != nil {
-		t.Fatalf("the supervisor refused work it was installed to do: %v", err)
-	}
-
-	got, err := os.ReadFile(dest)
-	if err != nil {
-		rec, _ := store.Load(h.ID())
-		t.Fatalf("installing a supervisor took away %s: %v (record says %q)", dest, err, rec.Error)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("got %q, want %q", got, payload)
-	}
-}
 
 // A store several machines write is the case the refusal exists for, and it
 // still holds: an absolute sink names the submitter's filesystem, and a
@@ -116,10 +63,7 @@ func TestARelativeDestinationMeansTheCallersDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Heartbeat(store, "jobd@host:1", "here", "", time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewClient(NewRunner(store, "app"))
+	svc := idleClient(NewRunner(store, "app"))
 
 	viaGet, err := svc.Get("https://example.invalid/x.bin", "out/x.bin")
 	if err != nil {

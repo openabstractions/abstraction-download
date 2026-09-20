@@ -9,10 +9,12 @@
 <nav class="site"><a class="name" href="index.html">Open Abstractions</a>
 <a href="index.html">Overview</a> <a href="cases.html">Cases</a> <a href="reference.html">Reference</a> <a href="evidence.html">Evidence</a> <a href="coverage.html">Coverage</a> <a href="adopt.html">Adopt</a>
 <a class="right" href="https://github.com/openabstractions">github.com/openabstractions</a></nav>
-<p class="meta" style="margin-top:10px"><a href="#encoding">Encoding</a> · <a href="#types">Types</a> · <a href="#structs">Structs</a> · <a href="#enums">Enumerations</a> · <a href="#constants">Constants</a> · <a href="#vocabulary">Vocabulary</a> · <a href="#refusals">Refusals</a> · <a href="#protocol">Protocol</a></p>
+
 
 <h1>Schema</h1>
-<p class="lead">One definition; this page and every encoder are emitted from it. Nothing below is written by hand, and each rule tag links the construct to the profile that admits it.</p>
+<p class="lead">Use this reference to inspect fields, methods, accepted values and failure outcomes. For setup and working examples, start with the <a href="reference.html">API guide</a>.</p>
+<p>Definition: <code>abstraction.download.request</code></p>
+<nav aria-label="Schema sections" class="meta"><a href="#types">Types</a> · <a href="#structs">Fields</a> · <a href="#enums">Enumerations</a> · <a href="#constants">Constants</a> · <a href="#encoding">Encoding</a> · <a href="#refusals">Refusals</a></nav>
 <h2 id="encoding">Encoding <span class="tag">[DEF-E1]</span></h2>
 <div class="wrap"><table>
 <thead><tr><th>setting</th><th>value</th><th>rule</th></tr></thead>
@@ -30,12 +32,19 @@
 <div class="wrap"><table>
 <thead><tr><th>kind</th><th>types</th></tr></thead>
 <tbody>
-<tr><td>built in</td><td><code>i64</code> <code>string</code></td></tr>
-<tr><td>declared below</td><td><code>Artifact</code></td></tr>
+<tr><td>built in</td><td><code>Network</code> <code>i64</code> <code>string</code></td></tr>
+<tr><td>declared below</td><td><code>Artifact</code> <code>Constraints</code></td></tr>
 <tr><td>repeated record <span class="tag">[DEF-A9]</span></td><td><code>list&lt;Source&gt;</code></td></tr>
 </tbody></table></div>
 <h2 id="structs">Structs <span class="tag">[DEF-T1]</span></h2>
 <p class="meta">A field is required, or says when it is omitted <span class="tag">[DEF-A4]</span>. Each struct says on its own what it does with a field name it has never heard of <span class="tag">[DEF-A7]</span>. A wire name never moves; where a language must spell it differently the field says so <span class="tag">[DEF-A2]</span>.</p>
+<h3 id="struct-Constraints"><code>Constraints</code></h3>
+<p class="meta">unknown fields <code>refuse</code></p>
+<div class="wrap"><table>
+<thead><tr><th>id</th><th>field</th><th>type</th><th>presence</th><th>named elsewhere</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>network</code></td><td><code>Network</code></td><td>optional · omitted when zero</td><td>—</td></tr>
+</tbody></table></div>
 <h3 id="struct-Artifact"><code>Artifact</code></h3>
 <p class="meta">unknown fields <code>refuse</code></p>
 <div class="wrap"><table>
@@ -51,6 +60,7 @@
 <tbody>
 <tr><td>1</td><td><code>scheme</code></td><td><code>string</code></td><td>required</td><td>—</td></tr>
 <tr><td>2</td><td><code>locator</code></td><td><code>string</code></td><td>required</td><td>—</td></tr>
+<tr><td>3</td><td><code>credential</code></td><td><code>string</code></td><td>optional · omitted when zero</td><td>—</td></tr>
 </tbody></table></div>
 <h3 id="struct-Request"><code>Request</code></h3>
 <p class="meta">the document <span class="tag">[DEF-A1]</span> · unknown fields <code>refuse</code></p>
@@ -59,12 +69,27 @@
 <tbody>
 <tr><td>1</td><td><code>artifact</code></td><td><code>Artifact</code></td><td>required</td><td>—</td></tr>
 <tr><td>2</td><td><code>sources</code></td><td><code>list&lt;Source&gt;</code></td><td>required</td><td>—</td></tr>
+<tr><td>3</td><td><code>constraints</code></td><td><code>Constraints</code></td><td>optional · omitted when absent</td><td>—</td></tr>
+</tbody></table></div>
+<h2 id="enums">Enumerations <span class="tag">[DEF-T5]</span></h2>
+<p>Enum fields carry JSON strings containing exact member wire spellings, never numeric IDs. Unknown names are preserved with grant and refused as bad_enum with refuse on read and write. Optional absent fields preserve presence separately from an empty string.</p>
+<p class="meta">An enumeration is a closed vocabulary of wire names, and each one says on its own what a reader does with a member it has never heard of <span class="tag">[DEF-A5]</span>.</p>
+<h3 id="enum-Network"><code>Network</code></h3>
+<p class="meta">a member this reader does not know is <code>refuse</code></p>
+<div class="wrap"><table>
+<thead><tr><th>id</th><th>member</th><th>wire</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>any</code></td><td><code>any</code></td></tr>
+<tr><td>2</td><td><code>unmetered</code></td><td><code>unmetered</code></td></tr>
 </tbody></table></div>
 <h2 id="constants">Constants <span class="tag">[DEF-A6]</span></h2>
 <div class="wrap"><table>
 <thead><tr><th>name</th><th>type</th><th>value</th></tr></thead>
 <tbody>
 <tr><td><code>downstream_recovery_guarantees</code></td><td><code>list&lt;string&gt;</code></td><td><code>abstraction.download/recoverable-submission@1</code></td></tr>
+<tr><td><code>credential_guarantees</code></td><td><code>list&lt;string&gt;</code></td><td><code>abstraction.download/credentials@1</code></td></tr>
+<tr><td><code>network_cost_guarantees</code></td><td><code>list&lt;string&gt;</code></td><td><code>abstraction.download/network-cost@1</code></td></tr>
+<tr><td><code>waiting_extensions</code></td><td><code>list&lt;string&gt;</code></td><td><code>abstraction.download/waiting@1</code></td></tr>
 </tbody></table></div>
 <h2 id="refusals">Refusal words <span class="tag">[DEF-R1]</span></h2>
 <div class="wrap"><table>
@@ -79,7 +104,8 @@
 <tr><td>7</td><td><code>duplicate_field</code></td><td><code>structure</code></td></tr>
 <tr><td>8</td><td><code>unknown_field</code></td><td><code>structure</code></td></tr>
 <tr><td>9</td><td><code>missing_field</code></td><td><code>structure</code></td></tr>
-<tr><td>10</td><td><code>trailing_bytes</code></td><td><code>document</code></td></tr>
+<tr><td>10</td><td><code>bad_enum</code></td><td><code>structure</code></td></tr>
+<tr><td>11</td><td><code>trailing_bytes</code></td><td><code>document</code></td></tr>
 </tbody></table></div>
 
 <footer>

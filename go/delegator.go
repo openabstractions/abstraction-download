@@ -1282,18 +1282,35 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			return err
 		}
 		if want := spec.Artifact.Digest; want != "" && !sameDigest(digest, want) {
+			// The same question Run asks of its own failures, asked here too.
+			// Bytes a delegate delivered are as wrong as bytes this process
+			// fetched, and an owner that ends a mismatch has not said anything
+			// about who moved the bytes. Without this the record went back to
+			// pending and the same delegate delivered the same wrong file on
+			// every sweep, while the service half of the same runner ended an
+			// identical mismatch at failed.
+			mismatch := fmt.Errorf("%w: delegate delivered %s, want %s", ErrDigestMismatch, digest, want)
+			if r.Terminal != nil && r.Terminal(mismatch) {
+				mismatch = Terminal(mismatch)
+			}
 			_, uerr := r.Store.Update(id, epoch, func(rr *job.Record) error {
 				rr.Delegation = nil
 				rr.State = job.StatePending
-				if err := setFailure(rr, fmt.Errorf("%w: delegate delivered %s, want %s", ErrDigestMismatch, digest, want)); err != nil {
+				if Permanent(mismatch) {
+					rr.State = job.StateFailed
+				}
+				if err := setFailure(rr, mismatch); err != nil {
 					return err
+				}
+				if r.RecordCause {
+					setFailureCause(rr, mismatch)
 				}
 				return setCheckpoint(rr, Checkpoint{})
 			})
 			if uerr != nil {
 				return uerr
 			}
-			return fmt.Errorf("%w: delegate delivered %s, want %s", ErrDigestMismatch, digest, want)
+			return mismatch
 		}
 		_, err = r.Store.Update(id, epoch, func(rr *job.Record) error {
 			rr.Progress.Done = total
@@ -1514,6 +1531,30 @@ func (r *Runner) DelegateAll(ctx context.Context) (int, error) {
 		n++
 	}
 	return n, unread
+}
+
+// SubmissionRefuser is an OPTIONAL capability of a Delegator: one whose
+// receiving system definitely refused a request at its own admission reports
+// that refusal, with the class the receiving system gave it. Work that requires
+// recoverable submission and that nothing took then ends with the receiving
+// system's reason instead of waiting for a delegate forever.
+type SubmissionRefuser interface {
+	Refusal(request string) error
+}
+
+// refusal is the first definite refusal a delegate recorded for request.
+func (d *Delegators) refusal(request string) error {
+	if d == nil {
+		return nil
+	}
+	for _, x := range d.all {
+		if r, ok := x.(SubmissionRefuser); ok {
+			if err := r.Refusal(request); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Suspendable is an OPTIONAL capability of a Delegator: work it can stop and

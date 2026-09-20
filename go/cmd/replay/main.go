@@ -59,7 +59,18 @@ type replay struct {
 func fixture() string { return os.Getenv("ABSTRACTION_FIXTURE") }
 
 func capabilities() string {
-	if fixture() == "" {
+	return capabilitiesWith(fixture(), dl.NewRunner(nil, "").Fetchers)
+}
+
+// capabilitiesWith derives the claim from the fetchers the runner this driver
+// builds carries. wire and wanted fetch http sources, so they are claimed only
+// when a fixture is listening and a registered fetcher serves http; a hand
+// declaration let the C++ driver claim wanted on a build with no such fetcher.
+func capabilitiesWith(fixture string, fetchers *dl.Fetchers) string {
+	if fixture == "" || fetchers == nil {
+		return "store transfer"
+	}
+	if _, ok := fetchers.For(dl.Source{Scheme: "http", Locator: fixture}, nil); !ok {
 		return "store transfer"
 	}
 	return "store transfer wire wanted"
@@ -328,8 +339,8 @@ func outcome(err error) string {
 func refusals() string {
 	seen := map[string]bool{}
 	var out []string
-	for _, name := range wire.VerdictNames {
-		if t := wire.VerdictTranscript[name]; !seen[t] {
+	for _, name := range wire.VerdictValues() {
+		if t := wire.VerdictTranscript[string(name)]; !seen[t] {
 			seen[t] = true
 			out = append(out, t)
 		}

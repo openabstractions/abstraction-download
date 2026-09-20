@@ -313,6 +313,74 @@ func TestDelegateDeliveringWrongBytesIsRefused(t *testing.T) {
 	}
 }
 
+// An owner that ends a digest mismatch ends it wherever the bytes came from.
+// The record went back to pending here while the same runner's own fetch of an
+// identical mismatch ended at failed, so the same delegate delivered the same
+// wrong file on every sweep and nothing waiting on the record could stop.
+func TestADelegatedMismatchEndsFailedUnderATerminalPolicy(t *testing.T) {
+	body, digest := payload(t, 16<<10)
+	wrong, _ := payload(t, 16<<10)
+	r, store, fd, root := newDelegatingRunner(t, wrong)
+	r.Terminal = func(err error) bool { return errors.Is(err, ErrDigestMismatch) }
+	r.RecordCause = true
+	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: "https://example.invalid/x"})
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	fd.advance(fd.handleOf(t, store, id), int64(len(wrong)), DelegateTransferred)
+
+	err := r.Reconcile(context.Background(), id)
+	if !errors.Is(err, ErrDigestMismatch) || !Permanent(err) {
+		t.Fatalf("Reconcile = %v (permanent %v), want a permanent digest mismatch", err, Permanent(err))
+	}
+	rec, _ := store.Load(id)
+	if rec.State != job.StateFailed {
+		t.Fatalf("state = %s, want failed", rec.State)
+	}
+	if !Permanent(LastFailure(rec)) {
+		t.Fatal("the record says the same wrong file is worth fetching again")
+	}
+	if got := LastFailureCause(rec); got != "digest_mismatch" {
+		t.Fatalf("LastFailureCause = %q, want digest_mismatch", got)
+	}
+
+	// And nothing takes it back: a sweep leaves terminal work alone.
+	n, err := r.Adopt(context.Background())
+	if n != 0 || err != nil {
+		t.Fatalf("Adopt took %d failed jobs back (%v)", n, err)
+	}
+	again, _ := store.Load(id)
+	if again.State != job.StateFailed || again.Delegated() {
+		t.Fatalf("state = %s, delegated = %v after a sweep", again.State, again.Delegated())
+	}
+}
+
+// The same owner keeps everything else retryable. A delegate that gave up
+// without delivering wrong bytes is a delegate that may succeed next time, and
+// the terminal policy names one error rather than a state.
+func TestADelegatedFailureThatIsNotAMismatchStaysRetryable(t *testing.T) {
+	body, digest := payload(t, 16)
+	r, store, delegate, root := newDelegatingRunner(t, body)
+	r.Terminal = func(err error) bool { return errors.Is(err, ErrDigestMismatch) }
+	r.RecordCause = true
+	r.Delegators = NewDelegators(&failedStatusDelegate{fakeDelegate: delegate,
+		status: Status{State: DelegateFailed, Err: "the delegate lost its connection"}})
+	id := submit(t, store, root, digest, int64(len(body)), Source{Scheme: "https", Locator: "https://example.invalid/model"})
+	if err := r.Delegate(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reconcile(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := store.Load(id)
+	if rec.State.Terminal() {
+		t.Fatalf("state = %s; a delegate having a bad moment ended the job", rec.State)
+	}
+	if failure := LastFailure(rec); failure == nil || Permanent(failure) {
+		t.Fatalf("the failure is %v; it must stay not now", failure)
+	}
+}
+
 // TestDelegateVanishingFallsBackToUs: BITS reaps jobs after 90 days, its queue
 // database can be discarded wholesale when corrupt, and machines get rebuilt. A
 // handle that no longer resolves is a normal outcome, and the work must survive

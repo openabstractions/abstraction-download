@@ -15,6 +15,99 @@ namespace abstraction::download::request {
 
 using Raw = std::string;
 
+class Refusal : public std::runtime_error {
+public:
+    Refusal(const char* word, std::size_t offset)
+        : std::runtime_error(std::string("refused: ") + word + " at byte " + std::to_string(offset)),
+          word(word),
+          offset(offset) {}
+    const char* word;
+    std::size_t offset;
+};
+
+enum class Network : std::int32_t {
+    Any = 1,
+    Unmetered = 2,
+};
+
+// The member's name on the wire; empty for a value that names no member.
+inline constexpr std::string_view wire_name(Network value) {
+    switch (value) {
+        case Network::Any: return "any";
+        case Network::Unmetered: return "unmetered";
+    }
+    return {};
+}
+
+// The member a wire name spells; empty for a name this vocabulary refuses.
+inline std::optional<Network> parse_network(std::string_view name) {
+    if (name == "any") return Network::Any;
+    if (name == "unmetered") return Network::Unmetered;
+    return std::nullopt;
+}
+
+// A member equals its wire name, so code holding the contract's word compares directly.
+inline constexpr bool operator==(Network value, std::string_view name) { return wire_name(value) == name; }
+inline constexpr bool operator!=(Network value, std::string_view name) { return wire_name(value) != name; }
+inline constexpr bool operator==(std::string_view name, Network value) { return wire_name(value) == name; }
+inline constexpr bool operator!=(std::string_view name, Network value) { return wire_name(value) != name; }
+
+inline const std::vector<std::string> kNetworkNames = {"any", "unmetered"};
+
+inline const std::vector<std::string> kDownstreamRecoveryGuarantees = {"abstraction.download/recoverable-submission@1"};
+
+inline const std::vector<std::string> kCredentialGuarantees = {"abstraction.download/credentials@1"};
+
+inline const std::vector<std::string> kNetworkCostGuarantees = {"abstraction.download/network-cost@1"};
+
+inline const std::vector<std::string> kWaitingExtensions = {"abstraction.download/waiting@1"};
+
+// When the executing service may move the bytes. network unmetered opens
+// sources only while the platform reports the path unmetered and requires
+// abstraction.download/network-cost@1; the attempt waits, holding no lease,
+// while the path is metered and resumes with Range. Empty network and any are
+// the same. Constraints are evaluated where the bytes move.
+struct Constraints {
+    Network network{};
+};
+
+// Expected content identity and size. Empty digest and zero size mean unknown.
+// A supplied digest is verified before delivery.
+struct Artifact {
+    std::string digest;
+    std::int64_t size = 0;
+};
+
+// A location interpreted by its named source scheme. Execution providers
+// declare which schemes they support. credential, when present, names a
+// credential registered with abstraction.credentials/holder@1 in the submitting
+// caller's account; it is a name, never a secret. The executing service applies
+// it through abstraction.credentials/applier@1 with consumer
+// abstraction.download/http-execution@1 to each request it sends to this
+// source, including redirects and resumed ranges, and never records the applied
+// headers. A request naming a credential requires
+// abstraction.download/credentials@1.
+struct Source {
+    std::string scheme;
+    std::string locator;
+    std::string credential;
+};
+
+// Service request payload for recoverable job admission with kind download. The
+// provider owns result allocation and all partial files. Request identity,
+// required guarantees and cancellation use the job service. This payload
+// contains no provider paths. The initial execution profile supports HTTP(S),
+// anonymous or with a named credential; unsupported work is sealed as
+// definitely not accepted.
+struct Request {
+    Artifact artifact;
+    std::vector<Source> sources;
+    std::optional<Constraints> constraints;
+};
+
+// Codec machinery. Nothing here is API; it may change in any release.
+namespace detail {
+
 inline void esc(std::string& out, const std::string& s);
 
 inline void esc_byte(std::string& out, unsigned char c) {
@@ -56,6 +149,8 @@ inline void strs(std::string& out, const std::vector<std::string>& v, int depth)
     pad(out, depth);
     out += ']';
 }
+
+
 
 inline bool ws(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -146,33 +241,26 @@ inline void enc_list(std::string& out, const std::vector<T>& v, int depth,
     pad(out, depth);
     out += ']';
 }
+inline void enc_constraints(std::string&, const Constraints&, int);
+inline void enc_artifact(std::string&, const Artifact&, int);
+inline void enc_source(std::string&, const Source&, int);
+inline void enc_request(std::string&, const Request&, int);
 
-inline const std::vector<std::string> kDownstreamRecoveryGuarantees = {"abstraction.download/recoverable-submission@1"};
-
-// Expected content identity and size. Empty digest and zero size mean unknown.
-// A supplied digest is verified before delivery.
-struct Artifact {
-    std::string digest;
-    std::int64_t size = 0;
-};
-
-// A location interpreted by its named source scheme. Execution providers
-// declare which schemes they support. Credentials require a separately
-// authorized capability.
-struct Source {
-    std::string scheme;
-    std::string locator;
-};
-
-// Service request payload for recoverable job admission with kind download. The
-// provider owns result allocation and all partial files. Request identity,
-// required guarantees and cancellation use the job service. This payload
-// contains no provider paths. The initial execution profile supports anonymous
-// HTTP(S); unsupported work is sealed as definitely not accepted.
-struct Request {
-    Artifact artifact;
-    std::vector<Source> sources;
-};
+inline void enc_constraints(std::string& out, const Constraints& v, int depth) {
+    if (v.network != Network{} && wire_name(v.network).empty()) throw Refusal("bad_enum", 0);
+    out += '{';
+    bool first = true;
+    if (v.network != Network{}) {
+        first = false;
+        out += '\n';
+        pad(out, depth + 1);
+        esc(out, "network");
+        out += ": ";
+        esc(out, std::string(wire_name(v.network)));
+    }
+    if (!first) { out += '\n'; pad(out, depth); }
+    out += '}';
+}
 
 inline void enc_artifact(std::string& out, const Artifact& v, int depth) {
     out += '{';
@@ -211,6 +299,14 @@ inline void enc_source(std::string& out, const Source& v, int depth) {
     esc(out, "locator");
     out += ": ";
     esc(out, v.locator);
+    if (!v.credential.empty()) {
+        out += ',';
+        out += '\n';
+        pad(out, depth + 1);
+        esc(out, "credential");
+        out += ": ";
+        esc(out, v.credential);
+    }
     out += '\n';
     pad(out, depth);
     out += '}';
@@ -229,30 +325,21 @@ inline void enc_request(std::string& out, const Request& v, int depth) {
     esc(out, "sources");
     out += ": ";
     enc_list<Source>(out, v.sources, depth + 1, enc_source);
+    if (v.constraints.has_value()) {
+        out += ',';
+        out += '\n';
+        pad(out, depth + 1);
+        esc(out, "constraints");
+        out += ": ";
+        enc_constraints(out, *v.constraints, depth + 1);
+    }
     out += '\n';
     pad(out, depth);
     out += '}';
 }
 
-inline std::string encode(const Request& v) {
-    std::string out;
-    enc_request(out, v, 0);
-    out += '\n';
-    return out;
-}
-
 inline constexpr int kDepthLimit = 64;
 inline constexpr std::size_t kI64Digits = 19;
-
-class Refusal : public std::runtime_error {
-public:
-    Refusal(const char* word, std::size_t offset)
-        : std::runtime_error(std::string("refused: ") + word + " at byte " + std::to_string(offset)),
-          word(word),
-          offset(offset) {}
-    const char* word;
-    std::size_t offset;
-};
 
 inline void append_rune(std::string& out, std::uint32_t cp) {
     if (cp < 0x80) {
@@ -569,9 +656,50 @@ inline std::vector<T> decode_list(Reader& r, T (*elem)(Reader&)) {
     return out;
 }
 
+inline Constraints decode_constraints(Reader& r);
 inline Artifact decode_artifact(Reader& r);
 inline Source decode_source(Reader& r);
 inline Request decode_request(Reader& r);
+
+inline Constraints decode_constraints(Reader& r) {
+    if (r.at() != '{') r.refuse("wrong_type");
+    r.enter();
+    ++r.pos;
+    Constraints v;
+    std::optional<std::string> wire_network;
+    std::uint32_t seen = 0;
+    r.skip_ws();
+    if (r.at() != '}') {
+        for (;;) {
+            r.skip_ws();
+            if (r.at() != '"') r.refuse("malformed");
+            const std::string key = r.str();
+            r.skip_ws();
+            if (r.at() != ':') r.refuse("malformed");
+            ++r.pos;
+            r.skip_ws();
+            if (key == "network") {
+                if (seen & 1u) r.refuse("duplicate_field");
+                seen |= 1u;
+                wire_network = r.str();
+            } else {
+                r.refuse("unknown_field");
+            }
+            r.skip_ws();
+            if (r.at() != ',') break;
+            ++r.pos;
+        }
+    }
+    if (r.at() != '}') r.refuse("malformed");
+    ++r.pos;
+    --r.depth;
+    if (wire_network) {
+        const auto parsed = parse_network(*wire_network);
+        if (!parsed) r.refuse("bad_enum");
+        v.network = *parsed;
+    }
+    return v;
+}
 
 inline Artifact decode_artifact(Reader& r) {
     if (r.at() != '{') r.refuse("wrong_type");
@@ -635,6 +763,10 @@ inline Source decode_source(Reader& r) {
                 if (seen & 2u) r.refuse("duplicate_field");
                 seen |= 2u;
                 v.locator = r.str();
+            } else if (key == "credential") {
+                if (seen & 4u) r.refuse("duplicate_field");
+                seen |= 4u;
+                v.credential = r.str();
             } else {
                 r.refuse("unknown_field");
             }
@@ -674,6 +806,10 @@ inline Request decode_request(Reader& r) {
                 if (seen & 2u) r.refuse("duplicate_field");
                 seen |= 2u;
                 v.sources = decode_list<Source>(r, decode_source);
+            } else if (key == "constraints") {
+                if (seen & 4u) r.refuse("duplicate_field");
+                seen |= 4u;
+                v.constraints = decode_constraints(r);
             } else {
                 r.refuse("unknown_field");
             }
@@ -689,37 +825,61 @@ inline Request decode_request(Reader& r) {
     return v;
 }
 
+}  // namespace detail
+
+inline std::string encode(const Request& v) {
+    std::string out;
+    detail::enc_request(out, v, 0);
+    out += '\n';
+    return out;
+}
+
 inline Request decode(std::string_view data) {
-    Reader r{data};
+    detail::Reader r{data};
     r.skip_ws();
-    Request v = decode_request(r);
+    Request v = detail::decode_request(r);
     r.skip_ws();
     if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
     return v;
 }
 
+namespace detail {
 // kRefusals is in the order two of them are chosen between.
-inline const std::vector<std::string> kRefusals = {"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "trailing_bytes"};
+inline const std::vector<std::string> kRefusals = {"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"};
 
 inline int refusal_rank(std::string_view word) {
     for (std::size_t i = 0; i < kRefusals.size(); ++i)
         if (kRefusals[i] == word) return static_cast<int>(i);
     return -1;
 }
+}  // namespace detail
 
-inline Artifact decode_artifact_at(std::string_view in,int depth,int limit,std::size_t& consumed){Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<kDepthLimit?limit:kDepthLimit;r.skip_ws();auto v=decode_artifact(r);consumed=r.pos;return v;}
-inline std::string encode_artifact_at(const Artifact& v,int depth){Reader r{""};if(depth<0||depth>=kDepthLimit)r.refuse("depth_exceeded");std::string out;enc_artifact(out,v,depth);std::size_t n=0;decode_artifact_at(out,depth,kDepthLimit,n);return out;}
-inline std::string encode_artifact(const Artifact& v){return encode_artifact_at(v,0)+"\n";}
-inline Artifact decode_artifact(std::string_view in){std::size_t n=0;auto v=decode_artifact_at(in,0,kDepthLimit,n);Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+namespace detail {
+inline Constraints decode_constraints_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_constraints(r);consumed=r.pos;return v;}
+inline std::string encode_constraints_at(const Constraints& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_constraints(out,v,depth);std::size_t n=0;decode_constraints_at(out,depth,detail::kDepthLimit,n);return out;}
+}  // namespace detail
+inline std::string encode_constraints(const Constraints& v){return detail::encode_constraints_at(v,0)+"\n";}
+inline Constraints decode_constraints(std::string_view in){std::size_t n=0;auto v=detail::decode_constraints_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
-inline Source decode_source_at(std::string_view in,int depth,int limit,std::size_t& consumed){Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<kDepthLimit?limit:kDepthLimit;r.skip_ws();auto v=decode_source(r);consumed=r.pos;return v;}
-inline std::string encode_source_at(const Source& v,int depth){Reader r{""};if(depth<0||depth>=kDepthLimit)r.refuse("depth_exceeded");std::string out;enc_source(out,v,depth);std::size_t n=0;decode_source_at(out,depth,kDepthLimit,n);return out;}
-inline std::string encode_source(const Source& v){return encode_source_at(v,0)+"\n";}
-inline Source decode_source(std::string_view in){std::size_t n=0;auto v=decode_source_at(in,0,kDepthLimit,n);Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+namespace detail {
+inline Artifact decode_artifact_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_artifact(r);consumed=r.pos;return v;}
+inline std::string encode_artifact_at(const Artifact& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_artifact(out,v,depth);std::size_t n=0;decode_artifact_at(out,depth,detail::kDepthLimit,n);return out;}
+}  // namespace detail
+inline std::string encode_artifact(const Artifact& v){return detail::encode_artifact_at(v,0)+"\n";}
+inline Artifact decode_artifact(std::string_view in){std::size_t n=0;auto v=detail::decode_artifact_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
-inline Request decode_request_at(std::string_view in,int depth,int limit,std::size_t& consumed){Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<kDepthLimit?limit:kDepthLimit;r.skip_ws();auto v=decode_request(r);consumed=r.pos;return v;}
-inline std::string encode_request_at(const Request& v,int depth){Reader r{""};if(depth<0||depth>=kDepthLimit)r.refuse("depth_exceeded");std::string out;enc_request(out,v,depth);std::size_t n=0;decode_request_at(out,depth,kDepthLimit,n);return out;}
-inline std::string encode_request(const Request& v){return encode_request_at(v,0)+"\n";}
-inline Request decode_request(std::string_view in){std::size_t n=0;auto v=decode_request_at(in,0,kDepthLimit,n);Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+namespace detail {
+inline Source decode_source_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_source(r);consumed=r.pos;return v;}
+inline std::string encode_source_at(const Source& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_source(out,v,depth);std::size_t n=0;decode_source_at(out,depth,detail::kDepthLimit,n);return out;}
+}  // namespace detail
+inline std::string encode_source(const Source& v){return detail::encode_source_at(v,0)+"\n";}
+inline Source decode_source(std::string_view in){std::size_t n=0;auto v=detail::decode_source_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+
+namespace detail {
+inline Request decode_request_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_request(r);consumed=r.pos;return v;}
+inline std::string encode_request_at(const Request& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_request(out,v,depth);std::size_t n=0;decode_request_at(out,depth,detail::kDepthLimit,n);return out;}
+}  // namespace detail
+inline std::string encode_request(const Request& v){return detail::encode_request_at(v,0)+"\n";}
+inline Request decode_request(std::string_view in){std::size_t n=0;auto v=detail::decode_request_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
 }  // namespace abstraction::download::request
