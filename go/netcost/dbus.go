@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -170,10 +171,15 @@ func encodeMessage(m *dbusMessage) ([]byte, error) {
 	e.align(8)
 	start := len(e.b)
 	field := func(code byte, v any) {
+		// field only encodes this package's own fixed set of header field
+		// values (below), never caller-supplied data, so signatureOf and
+		// value cannot fail on them the way body's do above.
+		//unchecked: see comment above
 		s, _ := signatureOf(v)
 		e.align(8)
 		e.b = append(e.b, code)
 		e.sig(s)
+		//unchecked: see comment above
 		e.value(v)
 	}
 	if m.Path != "" {
@@ -667,10 +673,96 @@ const (
 )
 
 // networkManager is the Linux source: NetworkManager's global Metered
-// property, updated by its PropertiesChanged signals.
+// property, updated by its PropertiesChanged and name-owner signals.
 type networkManager struct {
 	*hub
-	conn *dbusConn
+	conn       *dbusConn
+	mu         sync.Mutex
+	owner      string
+	generation uint64
+	ctx        context.Context
+	cancel     context.CancelFunc
+	refreshes  sync.WaitGroup
+}
+
+func ownerChange(m *dbusMessage) (string, bool) {
+	if m.Type != dbusSignal || m.Path != dbusPath || m.Interface != dbusName ||
+		m.Member != "NameOwnerChanged" || m.Sender != dbusName || len(m.Body) != 3 {
+		return "", false
+	}
+	name, named := m.Body[0].(string)
+	if !named || name != nmName {
+		return "", false
+	}
+	next, ok := m.Body[2].(string)
+	return next, ok && (next == "" || strings.HasPrefix(next, ":"))
+}
+
+func (n *networkManager) changeOwner(owner string, refresh bool) {
+	n.mu.Lock()
+	if n.owner == owner && n.generation != 0 {
+		n.mu.Unlock()
+		return
+	}
+	n.owner = owner
+	n.generation++
+	generation := n.generation
+	connected := n.conn != nil
+	n.hub.set(CostUnavailable)
+	n.mu.Unlock()
+	if refresh && owner != "" && connected {
+		n.refreshes.Add(1)
+		go func() {
+			defer n.refreshes.Done()
+			ctx, cancel := context.WithTimeout(n.ctx, nmOpenLimit*time.Second)
+			defer cancel()
+			//unchecked: this background refresh starts from CostUnavailable; only a valid current-owner reply changes it, and a failure must preserve any newer signal
+			n.readMetered(ctx, owner, generation)
+		}()
+	}
+}
+
+func (n *networkManager) applyMetered(reply *dbusMessage, owner string, generation uint64) bool {
+	if reply.Sender != owner || len(reply.Body) != 1 {
+		return false
+	}
+	v, ok := reply.Body[0].(dbusVariant)
+	if !ok {
+		return false
+	}
+	metered, ok := v.Value.(uint32)
+	if !ok {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.generation != generation || n.owner != owner {
+		return false
+	}
+	n.hub.set(classifyNM(metered))
+	return true
+}
+
+func (n *networkManager) readMetered(ctx context.Context, owner string, generation uint64) (bool, error) {
+	read := false
+	_, err := n.conn.callApplying(ctx, func(reply *dbusMessage) {
+		read = n.applyMetered(reply, owner, generation)
+	}, nmName, nmPath, dbusProps, "Get", nmName, "Metered")
+	return read, err
+}
+
+func (n *networkManager) handleSignal(m *dbusMessage) {
+	if owner, ok := ownerChange(m); ok {
+		n.changeOwner(owner, true)
+		return
+	}
+	if v, ok := meteredChange(m); ok {
+		n.mu.Lock()
+		if m.Sender == n.owner && n.owner != "" {
+			n.hub.set(classifyNM(v))
+		}
+		n.mu.Unlock()
+	}
 }
 
 // meteredChange returns the Metered value a PropertiesChanged signal carries.
@@ -700,52 +792,81 @@ func meteredChange(m *dbusMessage) (uint32, bool) {
 // property changes and reads Metered. A bus with no NetworkManager is
 // ErrUnavailable.
 func openNetworkManager(ctx context.Context, conn net.Conn, uid int) (Source, error) {
-	h := newHub(Unknown)
-	c, err := newDBusConn(conn, uid, func(m *dbusMessage) {
-		if v, ok := meteredChange(m); ok {
-			h.set(classifyNM(v))
-		}
-	})
+	lifetime, cancel := context.WithCancel(context.Background())
+	n := &networkManager{hub: newHub(Unknown), ctx: lifetime, cancel: cancel}
+	c, err := newDBusConn(conn, uid, n.handleSignal)
 	if err != nil {
+		cancel()
+		//unchecked: best-effort cleanup on a path that already returns a definite error
 		conn.Close()
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
+	n.mu.Lock()
+	n.conn = c
+	n.mu.Unlock()
+	go func() {
+		<-c.done
+		n.hub.set(CostUnavailable)
+	}()
 	fail := func(err error) (Source, error) {
-		c.Close()
+		//unchecked: best-effort cleanup on a path that already returns a definite error
+		n.Close()
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	if _, err := c.call(ctx, dbusName, dbusPath, dbusName, "Hello"); err != nil {
 		return fail(err)
 	}
 	for _, rule := range []string{
-		"type='signal',sender='" + nmName + "',path='" + nmPath + "',interface='" + dbusProps + "',member='PropertiesChanged'",
-		"type='signal',sender='" + nmName + "',path='" + nmPath + "',interface='" + nmName + "',member='PropertiesChanged'",
+		"type='signal',path='" + nmPath + "',interface='" + dbusProps + "',member='PropertiesChanged'",
+		"type='signal',path='" + nmPath + "',interface='" + nmName + "',member='PropertiesChanged'",
+		"type='signal',sender='" + dbusName + "',path='" + dbusPath + "',interface='" + dbusName + "',member='NameOwnerChanged',arg0='" + nmName + "'",
 	} {
 		if _, err := c.call(ctx, dbusName, dbusPath, dbusName, "AddMatch", rule); err != nil {
 			return fail(err)
 		}
 	}
-	read := false
+	ownerRead := false
 	_, err = c.callApplying(ctx, func(reply *dbusMessage) {
-		if len(reply.Body) == 1 {
-			if v, ok := reply.Body[0].(dbusVariant); ok {
-				if metered, ok := v.Value.(uint32); ok {
-					h.set(classifyNM(metered))
-					read = true
-				}
-			}
+		if reply.Sender != dbusName || len(reply.Body) != 1 {
+			return
 		}
-	}, nmName, nmPath, dbusProps, "Get", nmName, "Metered")
+		owner, ok := reply.Body[0].(string)
+		if !ok || !strings.HasPrefix(owner, ":") {
+			return
+		}
+		n.mu.Lock()
+		observedOwner, observedGeneration := n.owner, n.generation
+		n.mu.Unlock()
+		if observedGeneration != 0 {
+			ownerRead = observedOwner == owner
+			return
+		}
+		n.changeOwner(owner, false)
+		ownerRead = true
+	}, dbusName, dbusPath, dbusName, "GetNameOwner", nmName)
+	if err != nil {
+		return fail(err)
+	}
+	if !ownerRead {
+		return fail(errors.New("NetworkManager has no verified bus owner"))
+	}
+	n.mu.Lock()
+	owner, generation := n.owner, n.generation
+	n.mu.Unlock()
+	read, err := n.readMetered(ctx, owner, generation)
 	if err != nil {
 		return fail(err)
 	}
 	if !read {
-		return fail(errors.New("NetworkManager Metered is not a uint32"))
+		return fail(errors.New("NetworkManager Metered reply is invalid or from a previous owner"))
 	}
-	return &networkManager{hub: h, conn: c}, nil
+	return n, nil
 }
 
 func (n *networkManager) Close() error {
+	n.cancel()
 	n.hub.close()
-	return n.conn.Close()
+	err := n.conn.Close()
+	n.refreshes.Wait()
+	return err
 }

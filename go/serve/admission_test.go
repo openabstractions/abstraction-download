@@ -18,10 +18,12 @@ import (
 
 // switchApplier answers Check and Apply with the outcomes a test sets.
 type switchApplier struct {
-	mu            sync.Mutex
-	check, apply  string
-	checked       []string
-	appliedScopes []string
+	mu             sync.Mutex
+	check, apply   string
+	checked        []string
+	appliedScopes  []string
+	subjectChecked []string
+	subjectApplied []string
 }
 
 func (a *switchApplier) set(check, apply string) {
@@ -48,6 +50,26 @@ func (a *switchApplier) ApplyCredential(_ context.Context, scope, name, host str
 		return nil, download.CredentialRefusal(name, a.apply)
 	}
 	return map[string]string{"Authorization": "Bearer admission-test-secret"}, nil
+}
+
+func (a *switchApplier) CheckSubjectCredential(_ context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.subjectChecked = append(a.subjectChecked, subject.Account+"|"+subject.Program+"|"+name+"|"+host)
+	if a.check != "applied" {
+		return download.CredentialRefusal(name, a.check)
+	}
+	return nil
+}
+
+func (a *switchApplier) ApplySubjectCredential(_ context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) (map[string]string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.subjectApplied = append(a.subjectApplied, subject.Account+"|"+subject.Program+"|"+name+"|"+host)
+	if a.apply != "applied" {
+		return nil, download.CredentialRefusal(name, a.apply)
+	}
+	return map[string]string{"Authorization": "Bearer subject-test-secret"}, nil
 }
 
 func credentialSubmission(window api.HistoryWindow, key, locator string) api.Submission {
@@ -116,5 +138,61 @@ func TestCredentialRefusedAtAdmissionAndTypedAtExecution(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 0 {
 		t.Fatalf("a refused credential reached the origin: %q", seen)
+	}
+}
+
+func TestReceiverSubjectSurvivesRestartAndRevocation(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("revoked credential reached origin")
+	}))
+	defer origin.Close()
+	fastService(t)
+	applier := &switchApplier{check: "applied", apply: "revoked"}
+	root := t.TempDir()
+	execution := HTTPExecution{Credentials: applier}
+	p, err := acceptanceprovider.OpenWithExecutor(root, "subject-owner", execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "packaged-caller.exe")
+	bound := acceptanceprovider.AuthenticatedSubject{AccountKind: "posix", Account: "1000", Executable: path, Program: "msix:example.family"}
+	scope, err := acceptanceprovider.LocalSubjectScope(bound.AccountKind, bound.Account, bound.Executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := acceptanceprovider.Binding{Scope: scope, Origin: "local", Subject: &bound}
+	window, err := p.BindBinding(binding).GetHistoryWindow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := credentialSubmission(window, "subject-restart", origin.URL+"/gated")
+	admitted, err := p.BindBinding(binding).Submit(submission)
+	if err != nil || admitted.Outcome != api.AcceptanceOutcomeAccepted || admitted.Receipt == nil {
+		t.Fatalf("admission %+v %v", admitted, err)
+	}
+	if len(applier.subjectChecked) != 1 || len(applier.checked) != 0 {
+		t.Fatalf("admission inverted scope: subject=%v legacy=%v", applier.subjectChecked, applier.checked)
+	}
+	p, err = acceptanceprovider.OpenWithExecutor(root, "subject-owner", execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute(t, p)
+	observed := func() *api.OperationSnapshot {
+		t.Helper()
+		result, err := p.BindOperations(scope).ObserveWork(submission.Identity)
+		if err != nil || result.Outcome != api.ObservationOutcomeObserved || result.Snapshot == nil {
+			t.Fatalf("observe %+v %v", result, err)
+		}
+		return result.Snapshot
+	}
+	waitFor(t, "revoked subject credential", 20*time.Second, func() bool {
+		return observed().State.String() == "failed"
+	})
+	if len(applier.subjectApplied) == 0 || len(applier.appliedScopes) != 0 {
+		t.Fatalf("execution inverted scope: subject=%v legacy=%v", applier.subjectApplied, applier.appliedScopes)
+	}
+	if got := observed().Failure; got == nil || got.Cause != api.FailureCauseCredential || got.Message != "download attempt failed: credential:revoked:hf" {
+		t.Fatalf("revocation %+v", got)
 	}
 }

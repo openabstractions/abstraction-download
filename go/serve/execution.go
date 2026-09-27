@@ -16,6 +16,7 @@ import (
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
 	"github.com/openabstractions/abstraction-download/go/netcost"
 	job "github.com/openabstractions/abstraction-job/go"
+	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
 )
 
 // CredentialConsumer is the consumer contract the service names when it applies
@@ -41,10 +42,16 @@ var PlatformNetworkCost = sharedPlatformNetworkCost
 // submitted the work, to one outgoing request to host. It returns the headers
 // for exactly that request, or a *download.CredentialError built with
 // download.CredentialRefusal. The service calls it again for every request,
-// redirect and resumed range, and never records what it returns.
+// redirect and resumed range, and never records what it returns [DL-K4].
 // Implementations honor ctx and are safe for concurrent calls.
 type CredentialApplier interface {
 	ApplyCredential(ctx context.Context, scope, name, host string) (map[string]string, error)
+}
+
+// SubjectCredentialApplier uses a subject retained by the receiving job
+// provider. It must recheck current permission on every application.
+type SubjectCredentialApplier interface {
+	ApplySubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) (map[string]string, error)
 }
 
 // CredentialChecker is an optional part of a CredentialApplier: it reports,
@@ -54,6 +61,10 @@ type CredentialApplier interface {
 // credential [JOB-A16, DL-K1].
 type CredentialChecker interface {
 	CheckCredential(ctx context.Context, scope, name, host string) error
+}
+
+type SubjectCredentialChecker interface {
+	CheckSubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) error
 }
 
 // HTTPExecution is an explicitly configured service provider. Its input is the
@@ -80,7 +91,7 @@ func (e HTTPExecution) network() netcost.Source {
 		open = PlatformNetworkCost
 	}
 	source, err := open()
-	if err != nil {
+	if err != nil || source == nil || source.Cost() == netcost.CostUnavailable {
 		return nil
 	}
 	return source
@@ -216,13 +227,21 @@ func prepareRequest(scope, id, kind string, raw []byte, credentials, network boo
 // asked again until it answers; meanwhile work requiring an unmetered path
 // waits with network:unavailable and other work proceeds [DL-N8].
 func (e HTTPExecution) Serve(ctx context.Context, store job.Store) error {
+	return e.serveWithLookup(ctx, store, nil)
+}
+
+func (e HTTPExecution) serveWithLookup(ctx context.Context, store job.Store, lookup acceptanceprovider.SubjectLookup) error {
 	open := e.NetworkCost
 	if open == nil {
 		open = PlatformNetworkCost
 	}
 	network, stop := servedNetwork(ctx, open)
 	defer stop()
-	return serveExecutionWith(ctx, store, e.OnError, nil, httpTerminal, e.Credentials, network)
+	return serveExecutionWithLookup(ctx, store, e.OnError, nil, httpTerminal, e.Credentials, network, lookup)
+}
+
+func (e HTTPExecution) ServeWithSubjectLookup(ctx context.Context, store job.Store, lookup acceptanceprovider.SubjectLookup) error {
+	return e.serveWithLookup(ctx, store, lookup)
 }
 
 // httpTerminal ends the failures the download-http-request-v1 profile treats as
@@ -245,6 +264,10 @@ func serveExecution(ctx context.Context, store job.Store, onError func(error), d
 }
 
 func serveExecutionWith(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator, terminal func(error) bool, applier CredentialApplier, network netcost.Source) error {
+	return serveExecutionWithLookup(ctx, store, onError, delegates, terminal, applier, network, nil)
+}
+
+func serveExecutionWithLookup(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator, terminal func(error) bool, applier CredentialApplier, network netcost.Source, lookup acceptanceprovider.SubjectLookup) error {
 	runner := download.NewRunner(store, "service-"+job.NewID())
 	runner.Terminal = terminal
 	// A service profile with its own terminal policy, and delegated execution
@@ -257,7 +280,7 @@ func serveExecutionWith(ctx context.Context, store job.Store, onError func(error
 	runner.SharedStore = true
 	runner.Credentials = noExecutionCredentials{}
 	if applier != nil {
-		runner.Credentials = appliedCredentials{ctx: ctx, applier: applier}
+		runner.Credentials = appliedCredentials{ctx: ctx, applier: applier, lookup: lookup}
 	}
 	runner.Network = network
 	configureRunner(runner)
@@ -315,8 +338,15 @@ func (noExecutionCredentials) LookupSource(src download.Source, _ string) (map[s
 // appliedCredentials asks the applier for every request the runner sends to a
 // source naming a credential, with the scope preparation recorded.
 type appliedCredentials struct {
-	ctx     context.Context
-	applier CredentialApplier
+	ctx         context.Context
+	applier     CredentialApplier
+	lookup      acceptanceprovider.SubjectLookup
+	operationID string
+}
+
+func (c appliedCredentials) ForOperation(operationID string) download.Credentials {
+	c.operationID = operationID
+	return c
 }
 
 func (appliedCredentials) Lookup(string, string) (map[string]string, bool) { return nil, false }
@@ -328,7 +358,28 @@ func (c appliedCredentials) LookupSource(src download.Source, host string) (map[
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
-	headers, err := c.applier.ApplyCredential(ctx, scope, name, host)
+	var headers map[string]string
+	var err error
+	if c.lookup != nil {
+		if c.operationID == "" {
+			return nil, download.CredentialRefusal(name, "unavailable")
+		}
+		subject, found, lookupErr := c.lookup(c.operationID, scope)
+		if lookupErr != nil || !found {
+			return nil, download.CredentialRefusal(name, "unavailable")
+		}
+		if subject != nil {
+			bound, ok := c.applier.(SubjectCredentialApplier)
+			if !ok {
+				return nil, download.CredentialRefusal(name, "unavailable")
+			}
+			headers, err = bound.ApplySubjectCredential(ctx, *subject, name, host)
+		} else {
+			headers, err = c.applier.ApplyCredential(ctx, scope, name, host)
+		}
+	} else {
+		headers, err = c.applier.ApplyCredential(ctx, scope, name, host)
+	}
 	if err != nil {
 		var typed *download.CredentialError
 		if !errors.As(err, &typed) {

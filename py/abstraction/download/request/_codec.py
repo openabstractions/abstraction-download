@@ -374,6 +374,17 @@ class _Reader:
     def string(self):
         if self.at() != _QUOTE:
             raise self.refuse("wrong_type")
+        # Most wire keys and values contain no escapes. Search and validate
+        # those bytes in C; retain the bytewise path for escapes and refusals.
+        end = self.buf.find(b'"', self.pos + 1)
+        if end >= 0:
+            chunk = self.buf[self.pos + 1:end]
+            if b"\\" not in chunk and (not chunk or min(chunk) >= 0x20):
+                self.pos = end + 1
+                try:
+                    return chunk.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise self.refuse("bad_string") from None
         self.pos += 1
         out = bytearray()
         while True:

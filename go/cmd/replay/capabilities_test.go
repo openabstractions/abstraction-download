@@ -1,10 +1,34 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	dl "github.com/openabstractions/abstraction-download/go"
+	job "github.com/openabstractions/abstraction-job/go"
 )
+
+type probeHolder struct{ releaseErr error }
+
+func (h probeHolder) Hold(string, string) (job.Held, error) { return probeHeld{h.releaseErr}, nil }
+
+type probeHeld struct{ releaseErr error }
+
+func (h probeHeld) Done() <-chan struct{} { return nil }
+func (h probeHeld) Release() error        { return h.releaseErr }
+
+func TestInhibitorRequiresSuccessfulRelease(t *testing.T) {
+	old := job.Platform
+	t.Cleanup(func() { job.Platform = old })
+	job.Platform = probeHolder{releaseErr: errors.New("release failed")}
+	if inhibitor() {
+		t.Fatal("claimed inhibitor after release failure")
+	}
+	job.Platform = probeHolder{}
+	if !inhibitor() {
+		t.Fatal("did not claim released inhibitor")
+	}
+}
 
 // The capability line follows the registered fetchers, never a declaration: a
 // driver whose runner cannot fetch http must not claim the scenarios that do.

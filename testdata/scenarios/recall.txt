@@ -47,7 +47,7 @@ claim A gamma 5000
 finish A gamma complete
 recall A gamma 500 yield
 
-# expect 3: stale-epoch ... [JOB-R1]
+# expect 3: stale_epoch ... [JOB-R1]
 # expect 3: recall=none ...
 # expect 4: invalid ... [JOB-R2]
 # expect 5: ok ... [JOB-R3]
@@ -57,10 +57,10 @@ recall A gamma 500 yield
 # expect 5: content=abstraction.job/base@1,abstraction.job/recall@1 ... [JOB-D9]
 # expect 5: crit=abstraction.job/base@1,abstraction.job/recall@1 ... [JOB-D9]
 # expect 6: ok ...
-# expect 7: lease-held ... [JOB-R5]
+# expect 7: lease_held ... [JOB-R5]
 # expect 8: ok ...
 # expect 8: done=8 ...
-# expect 10: lease-expired ... [JOB-R4]
+# expect 10: lease_expired ... [JOB-R4]
 # expect 10: done=8 ... [JOB-R3]
 # expect 10: held=no ...
 # expect 11: ok A [JOB-R6]
@@ -76,5 +76,5 @@ recall A gamma 500 yield
 # expect 15: state=pending ...
 # expect 15: held=no ...
 # expect 15: recall=make room ...
-# expect 16: lease-expired ... [JOB-R2]
+# expect 16: lease_expired ... [JOB-R2]
 # expect 19: terminal ... [JOB-R2]

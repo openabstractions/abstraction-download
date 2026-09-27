@@ -14,6 +14,7 @@ import (
 
 	download "github.com/openabstractions/abstraction-download/go"
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
+	"github.com/openabstractions/abstraction-download/go/netcost"
 	job "github.com/openabstractions/abstraction-job/go"
 	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
@@ -98,18 +99,61 @@ func (*ledgerDelegate) Abandon(context.Context, string) error {
 
 type delegatedExecution struct {
 	DelegatedExecution
-	delegates []download.Delegator
 }
 
 func (*delegatedExecution) Profile() string { return "test-durable-delegation-v1" }
 func (e *delegatedExecution) Serve(ctx context.Context, s job.Store) error {
 	r := download.NewRunner(s, "worker-"+job.NewID())
 	defer r.Close()
-	r.Delegators = download.NewDelegators(e.delegates...)
+	r.Delegators = download.NewDelegators(e.Delegators...)
 	r.Fetchers = download.NewFetchers() // Any unintended local adoption fails visibly.
 	r.SharedStore = true
 	_, _, _, _, problems := Pass(ctx, r)
 	return errors.Join(problems...)
+}
+
+func (e *delegatedExecution) ServeWithSubjectLookup(ctx context.Context, s job.Store, _ acceptanceprovider.SubjectLookup) error {
+	return e.Serve(ctx, s)
+}
+
+func TestSubjectServingKeepsExecutionProfileOptions(t *testing.T) {
+	store, err := job.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := configureRunner
+	t.Cleanup(func() { configureRunner = previous })
+	lookup := func(string, string) (*acceptanceprovider.AuthenticatedSubject, bool, error) { return nil, false, nil }
+	t.Run("delegated", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		delegate := &ledgerDelegate{system: "configured-adapter"}
+		selected := false
+		configureRunner = func(r *download.Runner) {
+			got, ok := r.Delegators.ForSpec(download.Spec{}, download.Source{Scheme: "https", Locator: "https://example.invalid/model"}, nil)
+			selected = ok && got == delegate
+			cancel()
+		}
+		if err := (DelegatedExecution{Delegators: []download.Delegator{delegate}}).ServeWithSubjectLookup(ctx, store, lookup); err != nil || !selected {
+			t.Fatalf("delegated options lost: selected=%v err=%v", selected, err)
+		}
+	})
+	t.Run("legacy-sink", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fake := netcost.NewFake(netcost.Unmetered)
+		applier := &switchApplier{}
+		retained := false
+		configureRunner = func(r *download.Runner) {
+			bound, ok := r.Credentials.(appliedCredentials)
+			retained = ok && bound.applier == applier && bound.lookup != nil && r.Network == fake
+			cancel()
+		}
+		execution := LegacySinkExecution{HTTPExecution: HTTPExecution{Credentials: applier, NetworkCost: func() (netcost.Source, error) { return fake, nil }}}
+		if err := execution.ServeWithSubjectLookup(ctx, store, lookup); err != nil || !retained {
+			t.Fatalf("legacy options lost: retained=%v err=%v", retained, err)
+		}
+	})
 }
 
 func TestDelegationExecutionRecoversLostReplyAfterProviderRestart(t *testing.T) {
@@ -118,7 +162,7 @@ func TestDelegationExecutionRecoversLostReplyAfterProviderRestart(t *testing.T) 
 	original := &ledgerDelegate{path: external, system: "retained-external", body: body, unknown: true}
 	fallback := &ledgerDelegate{path: filepath.Join(t.TempDir(), "other.json"), system: "other-external", body: body}
 	root := t.TempDir()
-	p, err := acceptanceprovider.OpenWithExecutor(root, "logical-service", &delegatedExecution{delegates: []download.Delegator{original, fallback}})
+	p, err := acceptanceprovider.OpenWithExecutor(root, "logical-service", &delegatedExecution{DelegatedExecution: DelegatedExecution{Delegators: []download.Delegator{original, fallback}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +194,7 @@ func TestDelegationExecutionRecoversLostReplyAfterProviderRestart(t *testing.T) 
 	}
 	// New provider, runner and adapter instances know only their persisted roots.
 	recovered := &ledgerDelegate{path: external, system: original.system, body: body, unknown: true}
-	p, err = acceptanceprovider.OpenWithExecutor(root, "logical-service", &delegatedExecution{delegates: []download.Delegator{fallback, recovered}})
+	p, err = acceptanceprovider.OpenWithExecutor(root, "logical-service", &delegatedExecution{DelegatedExecution: DelegatedExecution{Delegators: []download.Delegator{fallback, recovered}}})
 	if err != nil {
 		t.Fatal(err)
 	}

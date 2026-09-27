@@ -2,6 +2,7 @@ package serve
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	download "github.com/openabstractions/abstraction-download/go"
 	job "github.com/openabstractions/abstraction-job/go"
+	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
 )
 
@@ -30,6 +32,16 @@ type LegacySinkExecution struct {
 var _ acceptanceprovider.LegacyPreparer = LegacySinkExecution{}
 
 func (LegacySinkExecution) Profile() string { return LegacySinkProfile }
+
+// The legacy profile uses HTTP execution for new work while retaining its
+// distinct preparation origin and result reader for migrated sinks.
+func (e LegacySinkExecution) ServeWithSubjectLookup(ctx context.Context, store job.Store, lookup acceptanceprovider.SubjectLookup) error {
+	return e.HTTPExecution.ServeWithSubjectLookup(ctx, store, lookup)
+}
+
+func (e LegacySinkExecution) CheckSubjectAdmission(binding acceptanceprovider.Binding, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
+	return e.HTTPExecution.CheckSubjectAdmission(binding, kind, raw, required)
+}
 
 // PrepareLegacy accepts the exact legacy download.Spec bytes a record carries.
 // Submit never calls it; acceptanceprovider uses it only for migrated journals.

@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	download "github.com/openabstractions/abstraction-download/go"
 	"github.com/openabstractions/abstraction-download/go/netcost"
 )
 
@@ -51,7 +50,7 @@ func sharedPlatformNetworkCost() (netcost.Source, error) {
 }
 
 // lateNetwork stands for a cost source that could not be opened when the
-// service started. It reports download.CostUnavailable until open succeeds,
+// service started. It reports netcost.CostUnavailable until open succeeds,
 // then the opened source's cost, and tells its watchers when either changes,
 // so work waiting with network:unavailable moves on that notice [DL-N8]. It
 // never closes the source it opened, which the opener owns.
@@ -71,8 +70,9 @@ func servedNetwork(ctx context.Context, open func() (netcost.Source, error)) (ne
 		return source, func() {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	late := &lateNetwork{hub: netcost.NewFake(download.CostUnavailable), cancel: cancel, done: make(chan struct{})}
+	late := &lateNetwork{hub: netcost.NewFake(netcost.CostUnavailable), cancel: cancel, done: make(chan struct{})}
 	go late.run(ctx, open)
+	//unchecked: the returned stop closure has no return value to report a close failure through
 	return late, func() { late.Close() }
 }
 
@@ -96,6 +96,7 @@ func (l *lateNetwork) run(ctx context.Context, open func() (netcost.Source, erro
 	l.mu.Lock()
 	l.opened = source
 	l.mu.Unlock()
+	//unchecked: async cancellation callback with no caller to report a close failure to
 	stop := context.AfterFunc(ctx, func() { watcher.Close() })
 	defer stop()
 	for {
@@ -115,7 +116,7 @@ func (l *lateNetwork) Cost() netcost.Cost {
 	if opened != nil {
 		return opened.Cost()
 	}
-	return download.CostUnavailable
+	return netcost.CostUnavailable
 }
 
 func (l *lateNetwork) Watch() *netcost.Watcher { return l.hub.Watch() }

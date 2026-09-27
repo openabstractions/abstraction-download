@@ -466,7 +466,8 @@ func (s *client) startHere(id string) {
 	go s.runHere(id)
 }
 
-// unknownCapability refuses a word nothing here has ever heard of.
+// unknownCapability refuses a word nothing here has ever heard of, at
+// submission [DL-R38].
 //
 // A capability only ever GRANTS, so an unknown one matches nothing, and a job
 // carrying one is refused later for whatever reason the matcher reports

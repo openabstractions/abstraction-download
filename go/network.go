@@ -31,10 +31,10 @@ const WaitingNetworkMetered = "network:metered"
 // not started when the service restarts [DL-N8].
 const WaitingNetworkUnavailable = "network:unavailable"
 
-// CostUnavailable is the cost a runner's source reports while the platform
-// source it stands for cannot be opened yet. A job requiring an unmetered path
-// waits on it as on Metered, and moves on the notice that the source answers.
-const CostUnavailable netcost.Cost = "unavailable"
+// CostUnavailable is retained for Go callers of download. New sources and
+// consumers use netcost.CostUnavailable, where this cost word is defined.
+// Deprecated: use netcost.CostUnavailable.
+const CostUnavailable = netcost.CostUnavailable
 
 var (
 	// ErrWaiting ends a run that stopped for a constraint rather than a
@@ -69,6 +69,7 @@ func setWaiting(rr *job.Record, word string) {
 	if rr.Extensions == nil {
 		rr.Extensions = map[string]json.RawMessage{}
 	}
+	//unchecked: word is a plain string, which json.Marshal cannot fail on
 	raw, _ := json.Marshal(word)
 	rr.Extensions[WaitingExtension] = raw
 }
@@ -99,7 +100,7 @@ func (r *Runner) networkHolds(rec *job.Record) bool {
 	switch r.Network.Cost() {
 	case netcost.Metered:
 		return Waiting(rec) == WaitingNetworkMetered
-	case CostUnavailable:
+	case netcost.CostUnavailable:
 		return Waiting(rec) == WaitingNetworkUnavailable
 	}
 	return false
@@ -117,12 +118,13 @@ func waitingWord(err error) string {
 // context so every source open and range request asks it first [DL-N3], and
 // its watcher cancels that context on the notice that the path turned metered.
 type networkGate struct {
-	source  netcost.Source
-	watcher *netcost.Watcher
-	cancel  context.CancelFunc
-	tripped atomic.Bool
-	done    chan struct{}
-	once    sync.Once
+	source      netcost.Source
+	watcher     *netcost.Watcher
+	cancel      context.CancelFunc
+	tripped     atomic.Bool
+	unavailable atomic.Bool
+	done        chan struct{}
+	once        sync.Once
 }
 
 type networkGateKey struct{}
@@ -143,6 +145,7 @@ func (r *Runner) gateNetwork(ctx context.Context, rec *job.Record, spec Spec) (c
 	w := r.Network.Watch()
 	first, err := w.Next(ctx)
 	if err != nil {
+		//unchecked: best-effort cleanup on a path that already returns a definite error
 		w.Close()
 		if ctx.Err() != nil {
 			return ctx, nil, ctx.Err()
@@ -151,9 +154,11 @@ func (r *Runner) gateNetwork(ctx context.Context, rec *job.Record, spec Spec) (c
 	}
 	switch first {
 	case netcost.Metered:
+		//unchecked: best-effort cleanup on a path that already returns a definite error
 		w.Close()
 		return ctx, nil, ErrWaiting
-	case CostUnavailable:
+	case netcost.CostUnavailable:
+		//unchecked: best-effort cleanup on a path that already returns a definite error
 		w.Close()
 		return ctx, nil, ErrNetworkUnavailable
 	}
@@ -166,8 +171,8 @@ func (r *Runner) gateNetwork(ctx context.Context, rec *job.Record, spec Spec) (c
 			if err != nil {
 				return
 			}
-			if c == netcost.Metered {
-				g.trip()
+			if c == netcost.Metered || c == netcost.CostUnavailable {
+				g.trip(c)
 				return
 			}
 		}
@@ -175,7 +180,10 @@ func (r *Runner) gateNetwork(ctx context.Context, rec *job.Record, spec Spec) (c
 	return context.WithValue(gctx, networkGateKey{}, g), g, nil
 }
 
-func (g *networkGate) trip() {
+func (g *networkGate) trip(cost netcost.Cost) {
+	if cost == netcost.CostUnavailable {
+		g.unavailable.Store(true)
+	}
 	g.tripped.Store(true)
 	g.cancel()
 }
@@ -189,6 +197,7 @@ func (g *networkGate) stop() {
 	}
 	g.once.Do(func() {
 		g.cancel()
+		//unchecked: shutdown path with no return value to report a close failure through
 		g.watcher.Close()
 		<-g.done
 	})
@@ -202,8 +211,17 @@ func networkAllows(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	if g.tripped.Load() || g.source.Cost() == netcost.Metered {
-		g.trip()
+	if g.unavailable.Load() {
+		return ErrNetworkUnavailable
+	}
+	if g.tripped.Load() {
+		return ErrWaiting
+	}
+	if cost := g.source.Cost(); cost == netcost.Metered || cost == netcost.CostUnavailable {
+		g.trip(cost)
+		if cost == netcost.CostUnavailable {
+			return ErrNetworkUnavailable
+		}
 		return ErrWaiting
 	}
 	return nil

@@ -8,8 +8,8 @@
 //
 //   - Windows: Network List Manager, INetworkCostManager::GetCost for the
 //     machine-wide cost and INetworkCostManagerEvents::CostChanged;
-//   - Linux: NetworkManager's `Metered` property on the system bus and its
-//     PropertiesChanged signal;
+//   - Linux: NetworkManager's `Metered` property on the system bus, its
+//     PropertiesChanged signal, and the bus's NameOwnerChanged signal;
 //   - macOS: Network.framework's nw_path_monitor, `isExpensive` and
 //     `isConstrained`, which needs cgo.
 //
@@ -39,6 +39,10 @@ const (
 	// Metered is a path the platform reports as costed: a metered or
 	// data-limited connection, roaming, over its data limit, or constrained.
 	Metered Cost = "metered"
+	// CostUnavailable means a previously usable source is temporarily unable
+	// to answer, or the host is still waiting for its platform source to open.
+	// It is distinct from Unknown, a report from a working source.
+	CostUnavailable Cost = "unavailable"
 )
 
 // ErrUnavailable means this host has no network cost source.
@@ -120,6 +124,7 @@ func (h *hub) Watch() *Watcher {
 	defer h.mu.Unlock()
 	s := watch.Push(h.cost, strconv.FormatUint(h.stamp, 10), 0)
 	if h.closed {
+		//unchecked: discarding a subscription created against an already-closed hub; Watch has no return value to report a close failure through
 		s.Close()
 	} else {
 		h.subs[s] = struct{}{}
@@ -141,6 +146,7 @@ func (h *hub) close() {
 	}
 	h.closed = true
 	for s := range h.subs {
+		//unchecked: shutdown path with no return value to report a close failure through
 		s.Close()
 	}
 	h.subs = nil

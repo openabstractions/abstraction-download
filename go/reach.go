@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	cas "github.com/openabstractions/abstraction-cas/go"
 )
 
 // ErrUnreachable means this machine will not open a connection to the host,
@@ -222,21 +224,25 @@ func (f Refusals) Allow(host string) error {
 // edit writes back what List read, so the first change to a list carrying
 // noncanonical keys respells the whole file the way a request is asked about.
 func (f Refusals) edit(change func(map[string]string)) error {
-	hosts, err := f.List()
-	if err != nil {
-		return err
-	}
-	change(hosts)
-	raw, err := json.MarshalIndent(hosts, "", "  ")
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
 		return err
 	}
-	tmp := f.Path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, f.Path)
+	return cas.Change(f.Path, func(cur []byte) ([]byte, error) {
+		stored := map[string]string{}
+		if len(cur) > 0 {
+			if err := json.Unmarshal(cur, &stored); err != nil {
+				return nil, err
+			}
+		}
+		hosts, err := canonical(stored)
+		if err != nil {
+			return nil, err
+		}
+		change(hosts)
+		raw, err := json.MarshalIndent(hosts, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(raw, '\n'), nil
+	})
 }

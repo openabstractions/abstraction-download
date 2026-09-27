@@ -60,6 +60,12 @@ type SourceCredentials interface {
 	LookupSource(src Source, host string) (map[string]string, error)
 }
 
+// OperationCredentials binds resolution to the runner's claimed record ID.
+// A source's attributes cannot select the operation whose authority is used.
+type OperationCredentials interface {
+	ForOperation(operationID string) Credentials
+}
+
 // CredentialError is a named credential the service could not apply to one
 // request. Outcome is the applier's word (unknown, expired, revoked, lost,
 // not_permitted, target_refused, consumer_refused, unsupported_kind, invalid,

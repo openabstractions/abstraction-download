@@ -568,6 +568,7 @@ func (r *Runner) landedOnTimer(p *progress) (stop func()) {
 			case <-t.C:
 				// A refusal that fences this owner cancels the transfer inside
 				// record; any other failure leaves the next tick to try again.
+				//unchecked: see comment above
 				_ = p.keepLanded()
 			}
 		}

@@ -23,6 +23,23 @@ func withFakeCost(fake *netcost.Fake) HTTPExecution {
 	return HTTPExecution{NetworkCost: func() (netcost.Source, error) { return fake, nil }}
 }
 
+func TestUnavailableCostSourceWithdrawsNewAdmissionGuarantee(t *testing.T) {
+	fake := netcost.NewFake(netcost.Unmetered)
+	defer fake.Close()
+	execution := withFakeCost(fake)
+	if !slices.Contains(execution.ExecutionGuarantees(), NetworkCostGuarantee) {
+		t.Fatal("working cost source did not offer network-cost")
+	}
+	fake.Set(netcost.CostUnavailable)
+	if slices.Contains(execution.ExecutionGuarantees(), NetworkCostGuarantee) {
+		t.Fatal("unanswering cost source still offered network-cost")
+	}
+	fake.Set(netcost.Metered)
+	if !slices.Contains(execution.ExecutionGuarantees(), NetworkCostGuarantee) {
+		t.Fatal("recovered cost source did not reoffer network-cost")
+	}
+}
+
 func unmeteredRequest(body []byte, url string) []byte {
 	return request.Encode(&request.Request{
 		Artifact:    request.Artifact{Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(body)), Size: int64(len(body))},
@@ -92,11 +109,18 @@ func TestNetworkConstraintPreparation(t *testing.T) {
 	}
 }
 
-// A metered notice mid-transfer stops the transfer at the proven boundary,
-// records waiting and releases the lease. Nothing is opened while metered; the
-// notice back resumes with one Range request and delivers exact bytes
-// [DL-N3, DL-N4, DL-N5].
+// A cost notice mid-transfer stops at the proven boundary, records the right
+// waiting word and releases the lease. Recovery resumes with one Range request
+// and delivers exact bytes [DL-N3, DL-N4, DL-N5, DL-N8].
 func TestMeteredMidTransferWaitsAndResumesWithOneRange(t *testing.T) {
+	testCostNoticeMidTransfer(t, netcost.Metered, download.WaitingNetworkMetered)
+}
+
+func TestUnavailableMidTransferWaitsAndResumesWithOneRange(t *testing.T) {
+	testCostNoticeMidTransfer(t, netcost.CostUnavailable, download.WaitingNetworkUnavailable)
+}
+
+func testCostNoticeMidTransfer(t *testing.T, cost netcost.Cost, waiting string) {
 	const size, hold = 256 << 10, 64 << 10
 	body := testBody(size)
 	source := &rangeSource{body: body, hold: hold, release: make(chan struct{})}
@@ -114,17 +138,20 @@ func TestMeteredMidTransferWaitsAndResumesWithOneRange(t *testing.T) {
 	execute(t, p)
 	waitFor(t, "the held prefix checkpointed", 20*time.Second, func() bool { return observe(t, p, id).Progress.Done >= hold })
 
-	fake.Set(netcost.Metered)
+	fake.Set(cost)
 	waitFor(t, "waiting recorded with the lease released", 20*time.Second, func() bool {
 		r := record(t, root, operation)
-		return download.Waiting(r) == download.WaitingNetworkMetered && r.State == job.StatePending && r.Lease.Owner == ""
+		return download.Waiting(r) == waiting && r.State == job.StatePending && r.Lease.Owner == ""
 	})
 	r := record(t, root, operation)
 	if r.Progress.Done != hold || download.LastFailure(r) != nil || r.Error != "" {
 		t.Fatalf("waiting record: done %d error %q", r.Progress.Done, r.Error)
 	}
-	if s := observe(t, p, id); s.State.String() != "pending" || s.Failure != nil || s.Waiting != download.WaitingNetworkMetered {
+	if s := observe(t, p, id); s.State.String() != "pending" || s.Failure != nil || s.Waiting != waiting {
 		t.Fatalf("waiting snapshot: %+v", s)
+	}
+	if cost == netcost.CostUnavailable && slices.Contains(p.SupportedGuarantees(), NetworkCostGuarantee) {
+		t.Fatal("unanswering cost source still offers network-cost")
 	}
 	time.Sleep(500 * time.Millisecond)
 	if log := source.log(); len(log) != 1 {

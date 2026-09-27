@@ -76,6 +76,10 @@ func parseHandle(external string) (api.RequestIdentity, error) {
 func remoteRequest(spec download.Spec) ([]byte, []string, error) {
 	out := request.Request{Artifact: request.Artifact{Digest: spec.Artifact.Digest, Size: spec.Artifact.Size}}
 	required := []string{acceptanceprovider.GuaranteeReconciliation}
+	if spec.WantsUnmetered() {
+		out.Constraints = &request.Constraints{Network: request.NetworkUnmetered}
+		required = append(required, NetworkCostGuarantee)
+	}
 	named := false
 	for _, src := range spec.Sources {
 		if len(src.Headers) != 0 {

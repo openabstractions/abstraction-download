@@ -57,6 +57,7 @@ func classify(flags uint32) Cost {
 type comObject struct{ vtbl *[8]uintptr }
 
 func (o *comObject) call(slot int, args ...uintptr) uintptr {
+	//unchecked: SyscallN's raw GetLastError is not meaningful for a COM vtable call; every caller inspects the returned HRESULT instead
 	r, _, _ := syscall.SyscallN(o.vtbl[slot], append([]uintptr{uintptr(unsafe.Pointer(o))}, args...)...)
 	return r
 }
@@ -126,6 +127,7 @@ func (n *nlm) run(started chan<- error) {
 	defer windows.CoUninitialize()
 
 	var manager *comObject
+	//unchecked: the HRESULT primary return is checked below; Call's raw GetLastError third field carries no separate information for a COM-style HRESULT call
 	hr, _, _ := procCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidNetworkListManager)), 0, clsctxAll,
 		uintptr(unsafe.Pointer(&iidINetworkCostManager)), uintptr(unsafe.Pointer(&manager)))
 	if failed(hr) || manager == nil {

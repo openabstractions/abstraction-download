@@ -107,6 +107,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := download.RefuseDeepNesting(raw); err != nil {
+			//unchecked: last diagnostic before os.Exit; a failed write to stderr has no fallback destination
 			fmt.Fprintln(os.Stderr, "specread:", err)
 			os.Exit(1)
 		}
@@ -125,6 +126,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := download.RefuseDeepNesting(raw); err != nil {
+		//unchecked: last diagnostic before os.Exit; a failed write to stderr has no fallback destination
 		fmt.Fprintln(os.Stderr, "specread:", err)
 		os.Exit(1)
 	}

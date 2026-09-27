@@ -832,6 +832,28 @@ func (r *Runner) Delegate(ctx context.Context, id string) error {
 				r.Store.Release(id, epoch)
 				return fmt.Errorf("%w: %s: %v", ErrOutcomeUnknown, d.System(), why)
 			case found == "":
+				// The receiving service definitely refused admission, and its
+				// refusal is currently known only to this adapter instance. Finish
+				// a permanent refusal under the held lease before a restart can
+				// forget it and submit the same work again. Retryable refusals
+				// remain pending so a later attempt can succeed.
+				if refuser, ok := d.(SubmissionRefuser); ok {
+					if refusal := refuser.Refusal(id); refusal != nil && Permanent(refusal) {
+						_, wrote := r.Store.Update(id, epoch, func(rr *job.Record) error {
+							rr.Delegation = nil
+							rr.State = job.StateFailed
+							clearWaiting(rr)
+							if err := setFailure(rr, refusal); err != nil {
+								return err
+							}
+							if r.RecordCause {
+								setFailureCause(rr, refusal)
+							}
+							return nil
+						})
+						return errors.Join(refusal, wrote, r.release(id, epoch))
+					}
+				}
 				if canFind {
 					if uerr := r.unhand(id, epoch); uerr != nil {
 						r.Store.Release(id, epoch)
@@ -1203,7 +1225,7 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 		// and stops renewing once it has been silent for the budget. The bound
 		// is not optional — an owner that renewed on a bare timer would hold a
 		// lease forever while a delegate held a connection and sent nothing.
-		// keeper.go and docs/stall-detection.md have the argument.
+		// keeper.go and docs/stall-detection.md@8d413b3b have the argument.
 		ctx, keep := r.keep(ctx, id, epoch)
 		defer keep.stop()
 

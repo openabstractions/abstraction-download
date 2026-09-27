@@ -47,8 +47,10 @@ platform limits. Avoid marking a historical coverage record as a current run.
 
 [The coverage grid](https://openabstractions.org/coverage.html) says which
 implementation of which layer carries a verdict, in which language, on which
-platform. Read the revision and scope attached to the verdict. `UNPROVEN`,
-an unsupported capability and a passing result have different meanings.
+platform. Read the revision and scope attached to the verdict. `UNPROVEN`
+marks a scenario the runner could not reach on this machine, never a pass or
+a fail; it, an unsupported capability and a passing result have different
+meanings.
 
 A layer's own tests are a weaker claim than a conformance verdict. Both are
 weaker than the same behaviour proven across two languages.
@@ -56,7 +58,8 @@ weaker than the same behaviour proven across two languages.
 ### What is it promising?
 
 Each layer's `CONTRACT.md` — tagged rules, `[DL-R28]`, `[JOB-L5]` — is the
-normative page, and it is tagged so a scenario can cite the exact rule it tests.
+normative page; each tag names one numbered rule on that layer's contract
+page, so a scenario can cite the exact rule it tests.
 The README's Status section is where the refusals are: what is not supported,
 what is refused rather than silently downgraded, and what is not measured.
 
@@ -155,12 +158,21 @@ Report the exact commands, selected revisions, platform, outcomes and skipped
 checks. A missing test entrypoint or unavailable toolchain is an explicit gap.
 Include an outside-consumer check when changing packaging or public imports.
 
-### Writing a contract
+### What we owe you
 
-A new or changed `.thrift` definition answers these ten rules. They come from
-the maintainers' protocol lessons audit of 2026-09-15. Rules marked (checked)
-are enforced by `idl/inventory.py`; existing definitions that break them are
-listed in `idl/contract_rules.recorded`, and a new break fails the check.
+If your change is right and we do not want it, you get a reason. If we take it,
+you get the commit. If neither has happened in a fortnight, say so on the
+issue — a generated repository has no maintainer watching it by habit, and that
+is our problem to fix, not yours to work around.
+
+---
+
+## For maintainers writing a contract
+
+A new or changed `.thrift` definition answers these eleven rules. Rules marked
+(checked) are enforced by `idl/inventory.py`; existing definitions that break
+them are listed in `idl/contract_rules.recorded`, and a new break fails the
+check.
 
 1. One outcome enum per call; refusals never travel as transport error codes.
    A call a policy may gate reserves `forbidden`, `unavailable` and `invalid`;
@@ -193,10 +205,3 @@ listed in `idl/contract_rules.recorded`, and a new break fails the check.
 11. Field, method and parameter names must not be reserved words in generated
     languages; a reserved name defines a per-language override such as
     `rust.name`.
-
-### What we owe you
-
-If your change is right and we do not want it, you get a reason. If we take it,
-you get the commit. If neither has happened in a fortnight, say so on the
-issue — a generated repository has no maintainer watching it by habit, and that
-is our problem to fix, not yours to work around.

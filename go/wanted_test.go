@@ -98,6 +98,9 @@ func folder(t *testing.T, r *Runner, root string) (Wanted, string) {
 	return w, dir
 }
 
+// names lists dir's visible answer files, filtering out the ".lock" files
+// cas.Change leaves beside a path it has written: internal write-coordination
+// bookkeeping, not part of what a person watching the drop folder sees.
 func names(t *testing.T, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -106,6 +109,9 @@ func names(t *testing.T, dir string) string {
 	}
 	var out []string
 	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
 		out = append(out, e.Name())
 	}
 	return strings.Join(out, " ")
@@ -169,9 +175,33 @@ func TestWantedAnswersInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A second sweep must leave cas.Change's own .lock files alone rather than
+	// reading them as new dropped requests: unfiltered, TakeIn would refuse
+	// each one for carrying no request and leave a fresh .lock beside that
+	// refusal, growing without bound on every further sweep.
+	before := rawNames(t, dir)
 	if ids, _ := w.TakeIn(); len(ids) != 0 {
 		t.Fatalf("a second sweep took %v", ids)
 	}
+	if got := rawNames(t, dir); got != before {
+		t.Fatalf("a second sweep touched its own bookkeeping:\nbefore: %s\nafter:  %s", before, got)
+	}
+}
+
+// rawNames is names without filtering out ".lock" files, for asserting that a
+// sweep leaves cas.Change's bookkeeping untouched rather than mistaking it for
+// a request.
+func rawNames(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return strings.Join(out, " ")
 }
 
 func TestWantedFailed(t *testing.T) {

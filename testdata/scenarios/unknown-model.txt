@@ -20,7 +20,7 @@
 #
 # B is the critical half, and the answer must be the opposite. The distinction
 # is not cosmetic: `invalid` says the record is broken and a caller may discard
-# it, `unknown-model` says the record is fine and this reader is too old to
+# it, `unknown_schema` says the record is fine and this reader is too old to
 # touch it. Go answered `refused` and the other two answered `invalid` for as
 # long as the mechanism existed.
 #
@@ -40,10 +40,10 @@ orphans
 
 # expect 4: ok ... [JOB-D1]
 # expect 4: state=pending ...
-# expect 5: unknown-model ... [JOB-D1]
-# expect 6: unknown-model ... [JOB-D7]
-# expect 7: unknown-model ...
-# expect 8: unknown-model ...
+# expect 5: unknown_schema ... [JOB-D1]
+# expect 6: unknown_schema ... [JOB-D7]
+# expect 7: unknown_schema ...
+# expect 8: unknown_schema ...
 # expect 9: ok A
 
 # Step 9 asserts and cites nothing, which is the scenario author's opinion in the

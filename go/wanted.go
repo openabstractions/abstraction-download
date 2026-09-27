@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	cas "github.com/openabstractions/abstraction-cas/go"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
@@ -215,11 +216,15 @@ func isAnswered(name string) bool {
 	return false
 }
 
-// ignored is what editors, Finder and Explorer write into any folder they are
-// shown, none of it a request.
+// ignored is what editors, Finder, Explorer and this layer's own writer leave
+// in any folder they touch, none of it a request. A `.lock` file is cas.Change's
+// write-coordination bookkeeping, left beside every answer this layer writes
+// and never removed; unfiltered, TakeIn would read it as a new dropped file,
+// refuse it for carrying no request, and leave a `.lock` beside that refusal
+// for the next sweep to refuse again.
 func ignored(name string) bool {
 	l := strings.ToLower(name)
-	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~") || l == "desktop.ini" || l == "thumbs.db"
+	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~") || strings.HasSuffix(l, ".lock") || l == "desktop.ini" || l == "thumbs.db"
 }
 
 func (w Wanted) take(p string) []string {
@@ -285,11 +290,9 @@ func (w Wanted) answer(from, to string, lines []string) {
 }
 
 func write(p string, lines []string) error {
-	tmp := filepath.Join(filepath.Dir(p), "."+filepath.Base(p)+".tmp")
-	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return cas.Change(p, func([]byte) ([]byte, error) {
+		return []byte(strings.Join(lines, "\n") + "\n"), nil
+	})
 }
 
 func stamp() string { return time.Now().Format(time.RFC3339) }

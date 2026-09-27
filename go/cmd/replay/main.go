@@ -59,7 +59,23 @@ type replay struct {
 func fixture() string { return os.Getenv("ABSTRACTION_FIXTURE") }
 
 func capabilities() string {
-	return capabilitiesWith(fixture(), dl.NewRunner(nil, "").Fetchers)
+	caps := capabilitiesWith(fixture(), dl.NewRunner(nil, "").Fetchers)
+	if inhibitor() {
+		caps += " inhibitor"
+	}
+	return caps
+}
+
+// inhibitor says whether this machine lets a process hold it awake. A hold
+// where it does not reads awake=no whatever the lease says, so the scenarios
+// that observe a hold are this driver's only when the platform grants one: a
+// container with no session bus has no seat to inhibit.
+func inhibitor() bool {
+	held, err := job.Platform.Hold("conformance", "capability probe")
+	if err != nil {
+		return false
+	}
+	return held.Release() == nil
 }
 
 // capabilitiesWith derives the claim from the fetchers the runner this driver
@@ -82,7 +98,7 @@ func capabilitiesWith(fixture string, fetchers *dl.Fetchers) string {
 // negotiates over and it belongs where a harness can diff it against the other
 // two.
 func models() string {
-	names := append(job.KnownFeatures(), dl.FailureExtension, dl.FailureCauseExtension)
+	names := append(job.KnownFeatures(), dl.FailureExtension, dl.FailureCauseExtension, dl.WaitingExtension)
 	sort.Strings(names)
 	var lines []string
 	for _, name := range names {
@@ -90,8 +106,12 @@ func models() string {
 		// class and an absent class are one answer [DL-E16], so refusing the
 		// record over it would contradict the payload's own fallback. The typed
 		// cause rides beside it and never decides the class, so it is not either.
+		// The waiting word is the same shape of fact: advisory, cleared the
+		// moment the transfer moves again, and "a waiting attempt records no
+		// failure" [DL-N5] — a reader that does not know it sees the state and
+		// checkpoint underneath unchanged.
 		mark := "critical-ok"
-		if job.NeverCritical(name) || name == dl.FailureExtension || name == dl.FailureCauseExtension {
+		if job.NeverCritical(name) || name == dl.FailureExtension || name == dl.FailureCauseExtension || name == dl.WaitingExtension {
 			mark = "never-critical"
 		}
 		lines = append(lines, name+" "+mark)
@@ -271,6 +291,12 @@ func (p *replay) sweep() string {
 	}
 	var seen []string
 	for _, e := range entries {
+		// A `.lock` file is cas.Change's own write-coordination bookkeeping,
+		// left beside every answer this layer writes and never removed. It is
+		// not part of what a person watching the drop folder sees.
+		if strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
 		name, state, _ := strings.Cut(e.Name(), ".")
 		seen = append(seen, name+"="+state)
 		if state != "accepted" {
@@ -324,14 +350,20 @@ func atoi(s string) int64 {
 // wording of an error is not a contract and must never become one; which class
 // of refusal happened is exactly what a caller branches on.
 //
-// Both halves are somebody else's to spell. job.Verdict decides which member of
-// the vocabulary the error is, and job.thrift's transcript annotation decides
-// how that member is spelled here.
+// job.Verdict decides which member of the vocabulary the error is. A member's
+// own spelling is its transcript word unless job.thrift declares an override.
 func outcome(err error) string {
 	if err == nil {
 		return "ok"
 	}
-	return wire.VerdictTranscript[job.Verdict(err)]
+	return transcriptVerdict(wire.Verdict(job.Verdict(err)))
+}
+
+func transcriptVerdict(name wire.Verdict) string {
+	if word := wire.VerdictTranscript[string(name)]; word != "" {
+		return word
+	}
+	return string(name)
 }
 
 // refusals is every token outcome can print. The harness diffs it against the
@@ -340,7 +372,7 @@ func refusals() string {
 	seen := map[string]bool{}
 	var out []string
 	for _, name := range wire.VerdictValues() {
-		if t := wire.VerdictTranscript[string(name)]; !seen[t] {
+		if t := transcriptVerdict(name); !seen[t] {
 			seen[t] = true
 			out = append(out, t)
 		}
@@ -446,7 +478,7 @@ func (p *replay) stage(alias string, n int64, kind string) string {
 // writer can produce this record — Encode validates its own declaration and
 // refuses a name it could not read back — so the refusal path exists and
 // nothing in the language could reach it. The edit is textual on purpose: the
-// encoding is fixed at two-space indent by [JOB-E1], so inserting one element
+// encoding is fixed at two-space indent by [JOB-J1], so inserting one element
 // at the head of an array is the same three lines in three languages.
 func (p *replay) plant(alias, where, name string) string {
 	path := filepath.Join(p.work, "store", "jobs", p.ids[alias]+".json")
@@ -655,7 +687,7 @@ func (p *replay) watch(name string, budgetMillis int64) string {
 func (p *replay) next(name string) string {
 	sub, ok := p.subs[name]
 	if !ok {
-		return "not-found"
+		return "not_found"
 	}
 	n, err := sub.Next(context.Background())
 	if errors.Is(err, watch.ErrClosed) {
@@ -692,7 +724,7 @@ func (p *replay) present(rs []*job.Record) string {
 func (p *replay) closeWatch(name string) string {
 	sub, ok := p.subs[name]
 	if !ok {
-		return "not-found"
+		return "not_found"
 	}
 	sub.Close()
 	return "ok"

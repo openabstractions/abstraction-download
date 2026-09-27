@@ -15,7 +15,7 @@ import (
 //
 // It is deliberately the owner's own error and not a state on the record. A
 // state is what a job IS; stalled is what somebody THINKS, and it changes on the
-// next byte — see docs/stall-detection.md, which refuses to add one.
+// next byte — see docs/stall-detection.md@8d413b3b, which refuses to add one.
 var ErrStalled = errors.New("download: no progress within the silence budget")
 
 // DefaultSilenceBudget is how long an operation may report nothing before the

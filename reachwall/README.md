@@ -1,5 +1,9 @@
 # reachwall — enforce a download refusal in the platform firewall
 
+For an operator hardening a machine against the hosts a download refusal
+already names. An application uses [the shared runtime](https://github.com/openabstractions/abstraction-download#through-the-shared-runtime)
+instead.
+
 Give one host-refusal list to the download provider and the operating system.
 The provider returns the recorded reason to OA callers. `reachwall` compiles the
 same hosts into Windows Firewall or nftables rules, covering programs outside

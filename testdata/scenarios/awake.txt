@@ -1,4 +1,4 @@
-# requires: store
+# requires: inhibitor
 #
 # The machine stays awake for exactly as long as a lease is held on running
 # work, and no longer. `hold` takes the platform's idle-sleep inhibitor for the

@@ -12,6 +12,7 @@ import (
 	download "github.com/openabstractions/abstraction-download/go"
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
 	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
+	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
 )
 
 // admissionCheckBudget bounds one admission check of all of a request's
@@ -31,7 +32,29 @@ var outcomeWord = regexp.MustCompile(`^[a-z_]{1,32}$`)
 // without a checker are admitted here.
 func (e HTTPExecution) CheckAdmission(scope, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
 	checker, ok := e.Credentials.(CredentialChecker)
-	if !ok || kind != download.Kind || !slices.Contains(required, CredentialGuarantee) {
+	if !ok {
+		return 0, ""
+	}
+	return checkCredentialsAdmission(kind, raw, required, func(ctx context.Context, name, host string) error {
+		return checker.CheckCredential(ctx, scope, name, host)
+	})
+}
+
+func (e HTTPExecution) CheckSubjectAdmission(binding acceptanceprovider.Binding, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
+	checker, ok := e.Credentials.(SubjectCredentialChecker)
+	if !ok || binding.Subject == nil {
+		if kind == download.Kind && slices.Contains(required, CredentialGuarantee) {
+			return api.AcceptanceOutcomeUnavailable, "credential:unavailable:subject"
+		}
+		return 0, ""
+	}
+	return checkCredentialsAdmission(kind, raw, required, func(ctx context.Context, name, host string) error {
+		return checker.CheckSubjectCredential(ctx, *binding.Subject, name, host)
+	})
+}
+
+func checkCredentialsAdmission(kind string, raw []byte, required []string, check func(context.Context, string, string) error) (api.AcceptanceOutcome, string) {
+	if kind != download.Kind || !slices.Contains(required, CredentialGuarantee) {
 		return 0, ""
 	}
 	input, err := request.Decode(raw)
@@ -54,7 +77,7 @@ func (e HTTPExecution) CheckAdmission(scope, kind string, raw []byte, required [
 			continue
 		}
 		checked[use] = true
-		err = checker.CheckCredential(ctx, scope, use[0], use[1])
+		err = check(ctx, use[0], use[1])
 		if err == nil {
 			continue
 		}

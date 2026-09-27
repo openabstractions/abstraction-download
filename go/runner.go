@@ -122,7 +122,7 @@ type Runner struct {
 	// wrong answer by an order of magnitude to "how long is a silence
 	// acceptable" — a 40 GB verify is minutes of local CPU with nothing to
 	// report to a network, and it is not a stall. See keeper.go and
-	// docs/stall-detection.md.
+	// docs/stall-detection.md@8d413b3b.
 	SilenceBudget time.Duration
 }
 
@@ -331,6 +331,9 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 		r.keepProven(rec.ID, epoch, total, seen)
 		removeEmptyPartial(partial)
 		if gate.held() || errors.Is(err, ErrWaiting) {
+			if (gate != nil && gate.unavailable.Load()) || errors.Is(err, ErrNetworkUnavailable) {
+				return ErrNetworkUnavailable
+			}
 			return ErrWaiting
 		}
 		return err
@@ -726,6 +729,10 @@ func PortableSink(s Sink) bool {
 }
 
 func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, rolling bool, gap fetchRange, proven *Ranges, seen *Validators, onIntent func(job.Want)) (int64, bool, error) {
+	credentials := r.Credentials
+	if bound, ok := credentials.(OperationCredentials); ok {
+		credentials = bound.ForOperation(rec.ID)
+	}
 	sources := append([]Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Priority < sources[j].Priority })
 
@@ -824,7 +831,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 
 		// Resolve the credential now, so the secret exists only for the length
 		// of this request and never reaches the record or the Fetcher's source.
-		headers, err := headersFor(src, r.Credentials)
+		headers, err := headersFor(src, credentials)
 		if err != nil {
 			lastErr = err
 			continue
@@ -945,7 +952,7 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 				report(n, latestTotal, true)
 			}
 		})
-		res, err := fetcher.Fetch(withCredentialHops(fetchCtx, src, r.Credentials, headers), Request{
+		res, err := fetcher.Fetch(withCredentialHops(fetchCtx, src, credentials, headers), Request{
 			Source:     src,
 			From:       from,
 			To:         to,
