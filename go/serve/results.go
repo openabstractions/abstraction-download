@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	download "github.com/openabstractions/abstraction-download/go"
+	identity "github.com/openabstractions/abstraction-identity"
 	job "github.com/openabstractions/abstraction-job/go"
 	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
@@ -84,6 +85,19 @@ func (HTTPExecution) OperationFailure(record *job.Record) *api.WorkFailure {
 // itself; a loss inside this window is damage to the service's storage.
 func (HTTPExecution) ResultRetentionMs() int64 { return acceptanceprovider.MinimumRetentionMs }
 
+// OperationTmpNames names only the exact allocation made by Prepare. The
+// acceptance owner separately excludes migrated caller-named work by origin.
+func (HTTPExecution) OperationTmpNames(record *job.Record) (result, partial string, err error) {
+	if record == nil || record.Kind != download.Kind || record.ID == "" || strings.ContainsAny(record.ID, "/\\.:") {
+		return "", "", acceptanceprovider.ErrResultNotNamed
+	}
+	spec, err := download.SpecOf(record)
+	if err != nil || spec.Sink.Final != "results/"+record.ID || spec.Sink.Partial != "work/"+record.ID {
+		return "", "", acceptanceprovider.ErrResultNotNamed
+	}
+	return spec.Sink.Final, spec.Sink.Partial, nil
+}
+
 func (HTTPExecution) ReadOperationResult(root string, record *job.Record, offset, maxBytes int64) ([]byte, int64, error) {
 	if offset < 0 || maxBytes < 1 || maxBytes > acceptanceprovider.MaxResultBytes {
 		return nil, 0, acceptanceprovider.ErrResultRange
@@ -126,7 +140,13 @@ func readUnderRoot(root, name string, offset, maxBytes int64) ([]byte, int64, er
 		return nil, 0, err
 	}
 	defer f.Close()
-	info, err = f.Stat()
+	return readResultFile(f, offset, maxBytes, f.ReadAt)
+}
+
+// readResultFile samples the handle whose bytes readAt reads. The injected
+// read boundary lets tests synchronize a real writer without racing a timer.
+func readResultFile(f *os.File, offset, maxBytes int64, readAt func([]byte, int64) (int, error)) ([]byte, int64, error) {
+	stamp, info, err := identity.FileStamp(f)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, 0, errors.New("result unavailable")
 	}
@@ -136,15 +156,15 @@ func readUnderRoot(root, name string, offset, maxBytes int64) ([]byte, int64, er
 	}
 	count := min(maxBytes, total-offset)
 	data := make([]byte, int(count))
-	n, err := f.ReadAt(data, offset)
+	n, err := readAt(data, offset)
 	if err != nil && !(err == io.EOF && n == len(data)) {
 		return nil, 0, err
 	}
 	if n != len(data) {
 		return nil, 0, io.ErrUnexpectedEOF
 	}
-	after, err := f.Stat()
-	if err != nil || after.Size() != total || !after.ModTime().Equal(info.ModTime()) {
+	after, _, err := identity.FileStamp(f)
+	if err != nil || after != stamp {
 		return nil, 0, errors.New("result changed while reading")
 	}
 	return data, total, nil

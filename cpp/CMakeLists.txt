@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(abstraction_download LANGUAGES CXX VERSION 0.1.0)
+    project(abstraction_download LANGUAGES CXX VERSION 0.8.0)
     set(ABSTRACTION_DOWNLOAD_STANDALONE ON)
 else()
     set(ABSTRACTION_DOWNLOAD_STANDALONE OFF)
@@ -25,6 +25,6 @@ configure_package_config_file(cmake/abstraction_download_requestConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/abstraction_download_requestConfig.cmake
     INSTALL_DESTINATION ${request_config_dir})
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/abstraction_download_requestConfigVersion.cmake
-    VERSION 0.1.0 COMPATIBILITY SameMinorVersion)
+    VERSION 0.8.0 COMPATIBILITY SameMinorVersion)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/abstraction_download_requestConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/abstraction_download_requestConfigVersion.cmake DESTINATION ${request_config_dir})

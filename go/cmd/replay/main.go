@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	digestfmt "github.com/openabstractions/abstraction-storage/go/digest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,6 +37,7 @@ import (
 	dl "github.com/openabstractions/abstraction-download/go"
 	job "github.com/openabstractions/abstraction-job/go"
 	wire "github.com/openabstractions/abstraction-job/go/rec"
+	"github.com/openabstractions/abstraction-resource/go/wake"
 	watch "github.com/openabstractions/abstraction-watch/go"
 )
 
@@ -50,6 +52,12 @@ type replay struct {
 	// window's file holds, held in memory so a driver never reads the machine.
 	refused map[string]string
 	out     *bufio.Writer
+}
+
+type resourceWakeHolder struct{}
+
+func (resourceWakeHolder) Hold(who, why string) (job.Held, error) {
+	return (wake.Holder{}).Hold(who, why)
 }
 
 // fixture is where abstraction-download/testdata/fixture.py is listening, or "" when the
@@ -71,7 +79,11 @@ func capabilities() string {
 // that observe a hold are this driver's only when the platform grants one: a
 // container with no session bus has no seat to inhibit.
 func inhibitor() bool {
-	held, err := job.Platform.Hold("conformance", "capability probe")
+	return inhibitorWith(resourceWakeHolder{})
+}
+
+func inhibitorWith(holder job.Holder) bool {
+	held, err := holder.Hold("conformance", "capability probe")
 	if err != nil {
 		return false
 	}
@@ -421,7 +433,7 @@ func (p *replay) hold(alias string) string {
 	if err != nil {
 		return outcome(err)
 	}
-	p.holds[rec.ID] = job.KeepAwake(p.store, rec)
+	p.holds[rec.ID] = job.KeepAwakeVia(resourceWakeHolder{}, p.store, rec)
 	return p.show(alias, nil)
 }
 
@@ -559,7 +571,7 @@ func (p *replay) submit(alias string, a map[string]string) string {
 	switch a["digest"] {
 	case "good":
 		sum := sha256.Sum256(body)
-		spec.Artifact.Digest = "sha256:" + hex.EncodeToString(sum[:])
+		spec.Artifact.Digest = digestfmt.Hex(sum[:])
 	case "bad":
 		spec.Artifact.Digest = "sha256:" + strings.Repeat("0", 64)
 	}

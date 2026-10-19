@@ -2,6 +2,26 @@
 
 Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
 
+## Download archive in the service
+
+DL-R44 (2026-11-11) moves the download archive from the Panel's Setup into
+the service runner (`go/archive`). Every job whose digest is a SHA-256 now
+checks the archive before its sources, and every verified network download
+is kept there. Setup's own lookup, spool and write-back were removed. The
+architect's ruling of the same day, quoted under DL-R44, added the 50 MB
+copy floor, the free-space reserve, the `.bad` rename of a mismatched entry
+and the per-app bytes-written count.
+
+## Same-source validator upgrades
+
+Weak Last-Modified metadata retains its timestamp in the existing validator
+record. It stays out of If-Range and still restarts a resumed transfer. Within
+one run, the same source strengthening that same timestamp upgrades the held
+record. Changed timestamps and older weak records with no timestamp retain
+the version-change refusal. Single-stream requests now apply the same
+`validators.source` scope as parallel requests. File and SMB sources supply no
+validators; checkpoints without a source retain their legacy scope.
+
 ## Superseded ids
 
 No id is retired this release. Three ids were each declared for two
@@ -324,3 +344,45 @@ and the `wire-ignored-range` scenario hold the rule.
   sentence before its bracketed id, and the head-of-paragraph form puts the
   title after it; its listing of unexercised rules prints an empty title
   for every converted page.
+
+## 2026-10-21: contract truth pass (0.8.0 W0-03)
+
+The pass checked `CONTRACT.md` and the README against current source
+(`research/release-0.8.0/audit/download.md` §3.5). Each change, with its
+class:
+
+- Python `Permanent` (DL-E3), `urllib.parse` and `WinHttpCrackUrl` (host
+  parsing), Python and C++ date parsing (DL-V), and C++ `https_available()`
+  and `offline_authority`. Outdated rule: those implementations were
+  removed on 2026-09-17 (`docs/REMOVED.md` entry 10). The rules stand for Go
+  and for any second implementation.
+- DL-E9's "Not built" item named `modelget`, `dlc`, `jobd`, `jobctl` and
+  `dl` and left out `openabstractions download`. Code defect: that command
+  exits with the runtime's job codes (`serve/jobs.go`: `1` not resolved, `3`
+  refused, `4` unavailable, `5` ended, `6` unknown, `7` waiting), where
+  DL-E9 has `1` for *not now* and `4` for *unknown* and DL-E10 requires
+  DL-E9's numbers. The runtime's `RUN-E2` already records the binary's
+  divergent codes; CQ-6 writes the one table and a TODO repair row carries
+  the download command. `dlc` (`abstraction-download-over-curl/example/dlc.cpp`)
+  is tracked and keeps its `1` for every non-delivered answer and `3` for
+  `list` and `watch`; `jobd`, `jobctl` and `dl` stay named as removed.
+- The implementations table listed `HTTP`, `File`, `bits` and `nas` as
+  working. Accepted divergence: all four are in the Go package, and the
+  runtime runs `HTTP` and `nas` only; the table says which. The `nas` row
+  also says the runtime opens only a store on its own host's volume: a
+  share root is refused (CAS-L2, `docs/REMOVED.md` entry 14), and the
+  Synology verification predates that. The README's "Delegating to another
+  machine" bullet presented the share channel as current. Outdated rule:
+  the bullet now cites the same removal.
+- The README's status ("No service is needed", `service-jobd`, "macOS is
+  UNPROVEN", Go the only tagged language) described the in-process era.
+  Outdated rule: the status now leads with the runtime, names the in-process
+  client deprecated, and states one version from 0.8.0
+  (`VISION.md:1230-1247`).
+- `go/serve/execution.go` refuses with "anonymous HTTP(S) source required"
+  while named credentials are accepted. Code defect: a TODO repair row.
+- `DREAM.md:83-86` (three implementations) and
+  `abstraction-download-over-curl/README.md:91-92` are outside this pass's
+  writes and stay audit items.
+- The remote form is stated as "Not built" with the receiver rule of
+  `research/release-0.8.0/critique/security.md` item 15.

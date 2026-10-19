@@ -83,7 +83,10 @@ import (
 	"time"
 
 	download "github.com/openabstractions/abstraction-download/go"
-	"github.com/openabstractions/abstraction-download/go/powershell"
+	"github.com/openabstractions/abstraction-facade/go-core/powershell"
+	"github.com/openabstractions/abstraction-facade/go-core/redact"
+
+	"github.com/openabstractions/abstraction-facade/go-core/childproc"
 )
 
 // System is the value recorded in job.Delegation.System. It is what decides,
@@ -670,9 +673,9 @@ try {
     exit 1
 }`
 
-	cmd := exec.CommandContext(ctx, d.shell(),
+	cmd := childproc.Hidden(exec.CommandContext(ctx, d.shell(),
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", powershell.EncodedCommand(full))
+		"-EncodedCommand", powershell.EncodedCommand(full)))
 	if len(env) > 0 {
 		e := os.Environ()
 		for k, v := range env {
@@ -687,9 +690,11 @@ try {
 	err := cmd.Run()
 	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		// PowerShell's stderr and output can hold a signed URL or a header
+		// value; they reach the error only through redact.Line.
+		msg := redact.Line(stderr.String(), 0)
 		if msg == "" {
-			msg = out
+			msg = redact.Line(out, 0)
 		}
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("powershell timed out after %s: %v: %s", d.timeout(), err, msg)

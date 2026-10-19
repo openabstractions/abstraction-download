@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -1253,6 +1255,15 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			Ordinal: 2,
 			Of:      phases,
 		})
+		// A file at the destination before Finalize is the caller's and stays
+		// while it is still that file. One the delegate created, or one it put
+		// in place of the caller's, is removed when its bytes are refused [DL-R16].
+		pre, preErr := os.Lstat(final)
+		if preErr == nil {
+			// Windows reads a file's identity lazily by path; read it now, before
+			// Finalize can put another file at that path.
+			os.SameFile(pre, pre)
+		}
 		if rf, ok := d.(ReportingFinalizer); ok {
 			err = rf.FinalizeReporting(ctx, rec.Delegation.ExternalID, final,
 				func(done, total int64) {
@@ -1350,6 +1361,15 @@ func (r *Runner) Reconcile(ctx context.Context, id string) error {
 			})
 			if uerr != nil {
 				return uerr
+			}
+			// The mismatch is recorded and this owner still held the work when it
+			// wrote it, so the bad file the delegate created goes. Left in place,
+			// a consumer finds known-wrong bytes at the destination [DL-R16].
+			post, postErr := os.Lstat(final)
+			if postErr == nil && (preErr != nil || !os.SameFile(pre, post)) {
+				if rerr := os.Remove(final); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					return errors.Join(mismatch, rerr)
+				}
 			}
 			return mismatch
 		}

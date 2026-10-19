@@ -5,9 +5,11 @@ import ctypes
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import re
 import stat
 import subprocess
 import sys
@@ -142,7 +144,7 @@ def _archive_files(archive):
                 raise ValueError("SDK archive contains a link")
             if item.is_dir():
                 continue
-            relative = name.relative_to("go").as_posix()
+            relative = "/".join(name.parts[1:]) or "."
             if relative in files:
                 raise ValueError("SDK archive contains duplicate members")
             files[relative] = z.read(item)
@@ -165,6 +167,97 @@ def _identity(files):
     return value
 
 
+def archived_compiler_facts(archive, source_identity):
+    """Read expected hosted compiler facts from a caller-selected pinned archive.
+
+    Hosted paths carry no local authority. This performs no prepare, ACL probe,
+    compiler invocation, or change to the cached SDK receipt schema.
+    """
+    files = _archive_files(Path(archive))
+    expected = _identity(files)
+    if source_identity != expected:
+        raise ValueError('hosted SDK source identity differs from pinned recipe')
+    names = {'go': 'bin/go.exe', **{name: 'pkg/tool/windows_amd64/' + name + '.exe'
+                                  for name in ('compile', 'link', 'asm')}}
+    if any(name not in files for name in names.values()):
+        raise ValueError('SDK archive lacks compiler tool closure')
+    return {'source_identity': expected, 'version': VERSION,
+            'host': 'windows/amd64', 'tools': {
+                key: {'sha256': _hash(files[name]), 'bytes': len(files[name])}
+                for key, name in names.items()}}
+
+
+def admit_hosted_smoke(proof_bytes, smoke_bytes, log_bytes, *, expected_facts):
+    """Validate the three authenticated hosted members without using their paths.
+
+    The caller supplies independently archive-derived facts and authenticates
+    source/run/attempt at transport. This returns content facts only.
+    """
+    def refuse(message):
+        raise ValueError('hosted SDK smoke: ' + message)
+
+    def decode(raw):
+        if not isinstance(raw, bytes): refuse('member must be bytes')
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result: refuse('duplicate JSON member')
+                result[key] = value
+            return result
+        return json.loads(raw, object_pairs_hook=pairs,
+                          parse_constant=lambda value: refuse('nonfinite JSON number'))
+
+    def shape(value, keys):
+        if not isinstance(value, dict) or set(value) != set(keys): refuse('member schema')
+
+    def path(value):
+        if (not isinstance(value, str) or not re.fullmatch(r'[A-Za-z]:[/\\].+', value) or
+                any(c in value for c in '\x00\r\n')):
+            refuse('hosted path observation')
+        normalized = value.replace('\\', '/')
+        if any(part in ('', '.', '..') for part in normalized[3:].split('/')):
+            refuse('hosted path components')
+        return normalized
+
+    proof, smoke = decode(proof_bytes), decode(smoke_bytes)
+    shape(proof, ('receipt', 'smoke'))
+    receipt = proof['receipt']
+    shape(receipt, ('schema', 'go', 'goroot', 'receipt_path', 'source_identity'))
+    shape(smoke, ('exit', 'argv', 'seconds', 'log', 'log_sha256', 'source_identity', 'regression_sha256'))
+    # Canonical JSON equality also distinguishes booleans from integer values.
+    if _canonical(proof['smoke']) != _canonical(smoke): refuse('separate smoke member differs')
+    if (type(receipt['schema']) is not int or receipt['schema'] != 1 or
+            expected_facts.get('version') != VERSION or expected_facts.get('host') != 'windows/amd64' or
+            _canonical(receipt['source_identity']) != _canonical(expected_facts['source_identity']) or
+            _canonical(smoke['source_identity']) != _canonical(expected_facts['source_identity'])):
+        refuse('SDK source or version differs')
+    goroot, go, receipt_path = path(receipt['goroot']), path(receipt['go']), path(receipt['receipt_path'])
+    if go != goroot + '/bin/go.exe' or receipt_path != goroot.rsplit('/', 1)[0] + '/receipt.json':
+        refuse('SDK path observations disagree')
+    if (type(smoke['exit']) is not int or smoke['exit'] != 0 or
+            type(smoke['seconds']) not in (int, float) or not math.isfinite(smoke['seconds']) or smoke['seconds'] < 0 or
+            smoke['regression_sha256'] != REGRESSION_SHA256):
+        refuse('unsuccessful regression')
+    argv = smoke['argv']
+    if (not isinstance(argv, list) or len(argv) != 8 or not all(isinstance(a, str) for a in argv) or
+            argv[0] != receipt['go'] or argv[1] != 'test' or not argv[2].startswith('-overlay=') or
+            argv[3:] != ['-race', '-count=1', '-timeout=60s', '-run=^TestNamedPipeConcurrentReadWrite$', 'os']):
+        refuse('regression argv')
+    overlay, log = path(argv[2][len('-overlay='):]), path(smoke['log'])
+    if not overlay.endswith('/overlay.json') or log != overlay.rsplit('/', 1)[0] + '/named-pipe-race.log':
+        refuse('smoke path observations disagree')
+    if (not isinstance(log_bytes, bytes) or not isinstance(smoke['log_sha256'], str) or
+            not re.fullmatch('[0-9a-f]{64}', smoke['log_sha256']) or _hash(log_bytes) != smoke['log_sha256']):
+        refuse('log bytes differ')
+    # Go test's non-verbose successful, uncached, single-package result. A
+    # cached result or a forged exit zero with a failure/no-test log refuses.
+    if not re.fullmatch(rb'ok[ \t]+os[ \t]+[0-9]+(?:\.[0-9]+)?s\r?\n?', log_bytes):
+        refuse('successful os regression result missing')
+    return {'source_identity': expected_facts['source_identity'], 'regression_sha256': REGRESSION_SHA256,
+            'log_sha256': smoke['log_sha256'], 'log_bytes': len(log_bytes), 'exit': 0,
+            'seconds': smoke['seconds']}
+
+
 def validate_sdk_receipt(receipt):
     """Validate actual SDK source and compiler bytes against the pinned archive and patch."""
     if not isinstance(receipt, dict) or set(receipt) != {"schema", "go", "goroot", "receipt_path", "source_identity"} or receipt["schema"] != 1:
@@ -179,13 +272,14 @@ def validate_sdk_receipt(receipt):
         raise ValueError("SDK receipt source identity differs from the pinned recipe")
     observed = set()
     for directory, folders, names in os.walk(sdk, followlinks=False):
+        relative_directory = Path(directory).relative_to(sdk)
         for entry in [*folders, *names]:
             path = Path(directory) / entry
             if path.is_symlink() or getattr(path.lstat(), "st_file_attributes", 0) & 0x400:
                 raise ValueError("SDK source/compiler path is linked")
         for entry in names:
             path = Path(directory) / entry
-            name = path.relative_to(sdk).as_posix(); observed.add(name)
+            name = (relative_directory / entry).as_posix(); observed.add(name)
             if name not in files or _hash(path.read_bytes()) != _hash(files[name]):
                 raise ValueError("SDK source/compiler bytes changed: " + name)
     if observed != set(files):

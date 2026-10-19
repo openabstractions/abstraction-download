@@ -8,25 +8,49 @@ import (
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
-type probeHolder struct{ releaseErr error }
+type probeHolder struct {
+	holdErr error
+	held    *probeHeld
+	called  int
+}
 
-func (h probeHolder) Hold(string, string) (job.Held, error) { return probeHeld{h.releaseErr}, nil }
+func (h *probeHolder) Hold(string, string) (job.Held, error) {
+	h.called++
+	return h.held, h.holdErr
+}
 
-type probeHeld struct{ releaseErr error }
+type probeHeld struct {
+	releaseErr error
+	released   int
+}
 
-func (h probeHeld) Done() <-chan struct{} { return nil }
-func (h probeHeld) Release() error        { return h.releaseErr }
+func (h *probeHeld) Done() <-chan struct{} { return nil }
+func (h *probeHeld) Release() error {
+	h.released++
+	return h.releaseErr
+}
 
 func TestInhibitorRequiresSuccessfulRelease(t *testing.T) {
-	old := job.Platform
-	t.Cleanup(func() { job.Platform = old })
-	job.Platform = probeHolder{releaseErr: errors.New("release failed")}
-	if inhibitor() {
-		t.Fatal("claimed inhibitor after release failure")
-	}
-	job.Platform = probeHolder{}
-	if !inhibitor() {
-		t.Fatal("did not claim released inhibitor")
+	for _, tc := range []struct {
+		name                string
+		holdErr, releaseErr error
+		want                bool
+		wantReleases        int
+	}{
+		{"acquisition refused", errors.New("hold refused"), nil, false, 0},
+		{"release failed", nil, errors.New("release failed"), false, 1},
+		{"released", nil, nil, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			held := &probeHeld{releaseErr: tc.releaseErr}
+			holder := &probeHolder{holdErr: tc.holdErr, held: held}
+			if got := inhibitorWith(holder); got != tc.want {
+				t.Fatalf("inhibitor = %v, want %v", got, tc.want)
+			}
+			if holder.called != 1 || held.released != tc.wantReleases {
+				t.Fatalf("hold calls = %d, releases = %d; want 1, %d", holder.called, held.released, tc.wantReleases)
+			}
+		})
 	}
 }
 

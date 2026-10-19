@@ -133,10 +133,18 @@ func cutAtAny(s, seps string) string {
 // cdn-lfs.huggingface.co, because a person naming a site means the site.
 type Refusals struct{ Path string }
 
+// errNoRefusalList is a list with no absolute location: it refuses every
+// host and takes no edit, since an empty path would read as an empty list.
+var errNoRefusalList = errors.New("the list of refused hosts has no location in this account's folders")
+
+// DefaultRefusals is the list in the account's configuration folder, or a
+// list with no location when the account has none (storage STO-L3); the
+// temporary directory, which another account can write first on Linux, is
+// never used.
 func DefaultRefusals() Refusals {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		dir = os.TempDir()
+		return Refusals{}
 	}
 	return Refusals{Path: filepath.Join(dir, "openabstractions", "download", "refused.json")}
 }
@@ -163,6 +171,9 @@ func (f Refusals) Check(host string) error {
 // refuses the host it names. A stored key no request could ever name is not
 // dropped quietly: an unreadable line stops a list whose whole job is to say no.
 func (f Refusals) List() (map[string]string, error) {
+	if !filepath.IsAbs(f.Path) {
+		return nil, errNoRefusalList
+	}
 	raw, err := os.ReadFile(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]string{}, nil
@@ -224,6 +235,9 @@ func (f Refusals) Allow(host string) error {
 // edit writes back what List read, so the first change to a list carrying
 // noncanonical keys respells the whole file the way a request is asked about.
 func (f Refusals) edit(change func(map[string]string)) error {
+	if !filepath.IsAbs(f.Path) {
+		return errNoRefusalList
+	}
 	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
 		return err
 	}

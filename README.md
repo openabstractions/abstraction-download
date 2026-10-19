@@ -360,25 +360,30 @@ conformance scenario cites the id it tests. This page states none.
 
 ## Status
 
-Experimental. Go is the only language with a tagged release, and no release
-carries an API stability promise.
+Experimental. Every OA package carries the release's one version from
+0.8.0, and no release carries an API stability promise.
 
-- **No service is needed.** With an empty job-module file store and no
-  runner process anywhere, `NewClient` succeeds and the transfer runs in
-  the calling process. If that process dies mid-transfer, the record and the
-  partial file are on disk, the lease lapses, and the next run or the next
-  runner adopts them.
-- **In-process fetching cannot survive process exit**, and does not claim to.
-  Requiring `survives_process_exit` without
-  [service-jobd](https://github.com/openabstractions/service-jobd) or a configured
-  NAS delegate is refused, not silently downgraded.
-- **Delegating to another machine needs a filesystem both machines can open.**
-  The channel is a shared job record — a UNC path, a mapped drive, a mount — and
-  no network protocol of ours. Over SMB a record has been read 154 s stale by the
-  Windows redirector
+- **The runtime runs downloads.** `openabstractions download` and the job
+  service run the `HTTP` fetcher and, over a store on the runtime host's
+  own volume, the `nas` delegate; an application reaches them through the
+  facade.
+- **The deprecated in-process client** (`NewClient` over a job file store)
+  runs a transfer in the calling process. It cannot survive process exit,
+  and requiring `survives_process_exit` without a configured NAS delegate is
+  refused, not silently downgraded.
+- **Delegating to another machine waits for the remote-runtime path.** The
+  shared-record channel over a UNC path, a mapped drive or a mount was
+  removed in 0.8.0: the job file store refuses a root on a share (CAS-L2),
+  `nas.New` refuses such a store, and a runtime configured with one stops at
+  start (`docs/REMOVED.md` entry 14). Writers on two hosts lost 147 to 149 of
+  2150 updates across the share, and over SMB a record was read 154 s stale
+  by the Windows redirector
   ([`SMB1.txt`](https://github.com/openabstractions/abstractions/blob/main/docs/results/SMB1.txt)).
-- **Platforms.** Every published transcript was produced on Windows or Linux.
-  macOS is `UNPROVEN` in all of them.
+- **Platforms.** Every published transcript was produced on Windows or Linux;
+  no macOS transcript is recorded.
+- **Remote.** An application reaching the download service on another
+  machine's runtime is not built; [CONTRACT.md](CONTRACT.md#not-built) states
+  the receiver rule it will follow.
 
 ## Requirements
 
@@ -394,7 +399,7 @@ standard library only. `cpp/CMakeLists.txt` installs the header-only
 
 and then, in yours:
 
-    find_package(abstraction_download_request 0.1 CONFIG REQUIRED)
+    find_package(abstraction_download_request 0.8 CONFIG REQUIRED)
     target_link_libraries(your_target PRIVATE abstraction::download_request)
 
 `cpp/test/request-package` is an outside consumer of that installed package.

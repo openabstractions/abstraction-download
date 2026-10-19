@@ -24,6 +24,8 @@ from ._codec import (
     encode_constraints,
     encode_request,
     encode_source,
+    from_json,
+    to_json,
 )
 
 __all__ = [
@@ -48,6 +50,8 @@ __all__ = [
     "encode_constraints",
     "encode_request",
     "encode_source",
+    "from_json",
+    "to_json",
 ]
 
 # Report every class and function as a member of this package, so help(),

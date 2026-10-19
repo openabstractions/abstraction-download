@@ -1,7 +1,9 @@
 package download
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,95 @@ import (
 
 	job "github.com/openabstractions/abstraction-job/go"
 )
+
+func TestFileAndSMBSourcesNameNoValidators(t *testing.T) {
+	for _, scheme := range []string{"file", "smb"} {
+		t.Run(scheme, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.bin")
+			if err := os.WriteFile(path, []byte("bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			src := Source{Scheme: scheme, Locator: path}
+			var out bytes.Buffer
+			observed := false
+			if _, err := (File{}).Fetch(context.Background(), Request{Source: src, Out: &out, Observed: func(Validators) { observed = true }}); err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != "bytes" || observed {
+				t.Fatal("file source named HTTP validators or changed bytes")
+			}
+			part, err := os.CreateTemp(t.TempDir(), "range-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer part.Close()
+			if err := (File{}).FetchRange(context.Background(), RangeRequest{Source: src, Range: job.Range{Start: 0, End: 5}, Out: part, Observed: func(Validators) error { observed = true; return nil }}); err != nil {
+				t.Fatal(err)
+			}
+			if observed {
+				t.Fatal("file range named HTTP validators")
+			}
+		})
+	}
+}
+
+func TestSingleStreamScopesValidatorsToTheirSource(t *testing.T) {
+	for _, mode := range []string{"same", "other", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			body := []byte(strings.Repeat("S", 4096))
+			var mu sync.Mutex
+			var firstRange, firstIfRange string
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				if calls == 0 {
+					firstRange = r.Header.Get("Range")
+					firstIfRange = r.Header.Get("If-Range")
+				}
+				calls++
+				mu.Unlock()
+				etag := `"a"`
+				if mode == "other" {
+					etag = `"b"`
+				}
+				w.Header().Set("ETag", etag)
+				from := 0
+				if rg := r.Header.Get("Range"); rg != "" && (r.Header.Get("If-Range") == "" || r.Header.Get("If-Range") == etag) {
+					_, _ = fmt.Sscanf(rg, "bytes=%d-", &from)
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, len(body)-1, len(body)))
+					w.WriteHeader(http.StatusPartialContent)
+				}
+				_, _ = w.Write(body[from:])
+			}))
+			t.Cleanup(srv.Close)
+			r, store, root := newRunner(t)
+			r.Connections = 1
+			id := submit(t, store, root, "", int64(len(body)), Source{Scheme: "https", Locator: srv.URL})
+			v := Validators{ETag: `"a"`, Source: srv.URL}
+			want := v.ETag
+			if mode == "other" {
+				v.Source = "https://previous.invalid/artifact"
+				want = ""
+			}
+			if mode == "legacy" {
+				v.Source = ""
+			}
+			stageResume(t, store, id, body[:1024], v)
+			if err := r.Run(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if firstRange != "bytes=1024-" || firstIfRange != want {
+				t.Fatalf("first request Range=%q If-Range=%q; want bytes=1024- and %q", firstRange, firstIfRange, want)
+			}
+			got, err := os.ReadFile(finalOf(t, store, id))
+			if err != nil || string(got) != string(body) {
+				t.Fatalf("delivered bytes: %v", err)
+			}
+		})
+	}
+}
 
 // stageResume leaves what a killed owner leaves: bytes on disk, a checkpoint
 // saying how many of them were proven, and the validators that say which
@@ -103,6 +194,44 @@ func (s *versionedServer) set(body []byte, etag string) {
 // version it has, and the client starts again.
 //
 // Asserted on content. A length assertion passes on the corrupt file.
+func TestManagedDownloadReserveRefusalClearsChangedSourceCheckpoint(t *testing.T) {
+	r, store, _ := newRunner(t)
+	old, current := []byte(strings.Repeat("A", 4096)), []byte(strings.Repeat("B", 4096))
+	server := &versionedServer{body: current, etag: `"v2"`}
+	id := job.NewID()
+	source := Source{Scheme: "https", Locator: server.serve(t).URL}
+	_, err := submitAs(store, id, Spec{Artifact: Artifact{Size: int64(len(current))}, Sources: []Source{source}, Sink: Sink{Partial: "work/" + id, Final: "results/" + id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageResume(t, store, id, old[:1024], Validators{ETag: `"v1"`, Source: sourceKey(source)})
+	var checked []int64
+	r.CheckWriteSpace = func(_ string, additional int64) error {
+		checked = append(checked, additional)
+		if additional == int64(len(current)) {
+			return Terminal(ErrRefused)
+		}
+		return nil
+	}
+	if err := r.Run(t.Context(), id); !errors.Is(err, ErrRefused) {
+		t.Fatal(err)
+	}
+	if len(checked) != 2 || checked[0] != 3072 || checked[1] != 4096 {
+		t.Fatal("unexpected space checks", checked)
+	}
+	record, err := store.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := CheckpointOf(record)
+	if err != nil || record.Progress.Done != 0 || checkpoint.VerifiedPrefix != 0 || !checkpoint.Validators.Empty() {
+		t.Fatal("space refusal retained obsolete progress", record.Progress, checkpoint, err)
+	}
+	if info, err := os.Stat(partialOf(t, store, id)); !errors.Is(err, os.ErrNotExist) && (err != nil || info.Size() != 0) {
+		t.Fatal("replacement bytes reached disk", err)
+	}
+}
+
 func TestAChangedFileIsNotSplicedOntoTheOldOne(t *testing.T) {
 	v1 := []byte(strings.Repeat("A", 40<<10))
 	v2 := []byte(strings.Repeat("B", 40<<10))
@@ -243,13 +372,21 @@ func TestAWeakETagIsNeitherStoredNorUsed(t *testing.T) {
 // forms a real server writes.
 func TestStrongValidators(t *testing.T) {
 	const lm = "Wed, 21 Oct 2015 07:28:00 GMT"
+	const later = "Thu, 22 Oct 2015 07:28:00 GMT"
 	cases := []struct {
 		name   string
 		header http.Header
 		want   Validators
 	}{
-		{"strong etag wins", http.Header{"Etag": {`"abc"`}, "Last-Modified": {lm}}, Validators{ETag: `"abc"`}},
-		{"weak etag is dropped", http.Header{"Etag": {`W/"abc"`}, "Last-Modified": {lm}}, Validators{LastModified: lm}},
+		{"strong etag wins", http.Header{"Etag": {`"abc"`}, "Last-Modified": {lm}, "Date": {later}}, Validators{ETag: `"abc"`}},
+		{"weak etag is dropped", http.Header{"Etag": {`W/"abc"`}, "Last-Modified": {lm}, "Date": {later}}, Validators{LastModified: lm}},
+		// RFC 9110 8.8.2.2: two versions written within one second share a
+		// Last-Modified, so only one at least a second before Date names one file.
+		{"last-modified one second before date is strong", http.Header{"Last-Modified": {lm}, "Date": {"Wed, 21 Oct 2015 07:28:01 GMT"}}, Validators{LastModified: lm}},
+		{"last-modified in the same second as date is weak", http.Header{"Last-Modified": {lm}, "Date": {lm}}, Validators{LastModified: lm, Weak: true}},
+		{"last-modified after date is weak", http.Header{"Last-Modified": {later}, "Date": {lm}}, Validators{LastModified: later, Weak: true}},
+		{"last-modified without date is weak", http.Header{"Last-Modified": {lm}}, Validators{LastModified: lm, Weak: true}},
+		{"obsolete spellings compare too", http.Header{"Last-Modified": {"Sunday, 06-Nov-94 08:49:37 GMT"}, "Date": {"Sun Nov  6 08:49:38 1994"}}, Validators{LastModified: "Sunday, 06-Nov-94 08:49:37 GMT"}},
 		{"weak in lower case too", http.Header{"Etag": {`w/"abc"`}}, Validators{}},
 		{"unquoted is not an etag", http.Header{"Etag": {`abc`}}, Validators{}},
 		{"a date that is not a date", http.Header{"Last-Modified": {"yesterday"}}, Validators{}},

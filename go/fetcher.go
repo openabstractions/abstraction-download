@@ -24,6 +24,7 @@ import (
 
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
 	job "github.com/openabstractions/abstraction-job/go"
+	acceptance "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 
 	"github.com/openabstractions/abstraction-download/go/rec"
 )
@@ -254,6 +255,10 @@ var (
 	// stream that begins at zero, and the caller offered no way to rewind. The
 	// bytes are fine; there is just nowhere to put them.
 	ErrCannotRestart = errors.New("download: the stream restarts at zero and this request cannot rewind")
+	// ErrVersionChanged is a range served from a different version of the
+	// artifact than the ranges already proven: a 200 answering an If-Range, or a
+	// 206 whose strong validator differs. Writing it would splice two versions.
+	ErrVersionChanged = errors.New("download: the source now serves a different version of the artifact")
 	// ErrOverrun means a source sent more bytes than the range it was asked for.
 	// A range lands in the middle of a file other ranges share, so the surplus
 	// would be written over a neighbour a different stream has already proven.
@@ -278,9 +283,8 @@ func Terminal(err error) error {
 	return permanent{err}
 }
 
-// CauseOf names why an attempt ended in the failure payload's cause vocabulary:
-// digest_mismatch, oversize, short_transfer, unauthorized, not_found, refused,
-// server_error, transport, credential or other. It returns "" for nil.
+// CauseOf names why an attempt ended with a Job FailureCause other than
+// result_lost. It returns "" for nil.
 func CauseOf(err error) string {
 	var status *StatusError
 	var credential *CredentialError
@@ -291,21 +295,21 @@ func CauseOf(err error) string {
 	case errors.As(err, &credential):
 		// The applier's outcome stays in the error text, credential:<outcome>:<name>,
 		// and its class says whether the applier refused or could not answer.
-		return "credential"
+		return string(acceptance.FailureCauseCredential)
 	case errors.Is(err, ErrDigestMismatch):
-		return "digest_mismatch"
+		return string(acceptance.FailureCauseDigestMismatch)
 	case errors.Is(err, ErrOversize):
-		return "oversize"
+		return string(acceptance.FailureCauseOversize)
 	case errors.Is(err, ErrShortTransfer):
-		return "short_transfer"
+		return string(acceptance.FailureCauseShortTransfer)
 	case errors.As(err, &status):
 		return status.Cause()
 	case errors.Is(err, ErrRefused):
-		return "refused"
+		return string(acceptance.FailureCauseRefused)
 	case errors.As(err, &transport):
-		return "transport"
+		return string(acceptance.FailureCauseTransport)
 	default:
-		return "other"
+		return string(acceptance.FailureCauseOther)
 	}
 }
 
@@ -458,6 +462,11 @@ type RangeRequest struct {
 	// splice is caught only by the digest over the finished file — which costs
 	// every proven range in it.
 	Validators Validators
+	// Observed, when set, receives the validators of the response that serves
+	// this range, before any byte of it is written. An error from it ends the
+	// range unwritten. A fresh parallel run has no predecessor's validators and
+	// learns the version it is fetching here [DL-V1].
+	Observed func(Validators) error
 	// Beat says bytes are still arriving. It writes nothing; see keeper.
 	Beat func()
 	// Landed, when set, is called after each write with the absolute offset

@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/openabstractions/abstraction-download/go/powershell"
+	"github.com/openabstractions/abstraction-facade/go-core/powershell"
 )
 
 const group = "openabstractions reach"

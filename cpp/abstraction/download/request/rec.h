@@ -161,52 +161,13 @@ inline void strs(std::string& out, const std::vector<std::string>& v, int depth)
 
 inline bool ws(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
-inline void raw(std::string& out, const std::string& s, int depth) {
-    const std::size_t n = s.size();
-    for (std::size_t i = 0; i < n;) {
-        const unsigned char c = static_cast<unsigned char>(s[i]);
-        if (ws(c)) {
-            ++i;
-        } else if (c == '"') {
-            std::size_t j = i + 1;
-            while (j < n) {
-                if (s[j] == '\\') { j += 2; continue; }
-                if (s[j] == '"') { ++j; break; }
-                ++j;
-            }
-            out.append(s, i, j - i);
-            i = j;
-        } else if (c == '{' || c == '[') {
-            out += static_cast<char>(c);
-            ++i;
-            std::size_t j = i;
-            while (j < n && ws(static_cast<unsigned char>(s[j]))) ++j;
-            if (j < n && (s[j] == '}' || s[j] == ']')) {
-                out += s[j];
-                i = j + 1;
-            } else {
-                ++depth;
-                out += '\n';
-                pad(out, depth);
-            }
-        } else if (c == '}' || c == ']') {
-            --depth;
-            out += '\n';
-            pad(out, depth);
-            out += static_cast<char>(c);
-            ++i;
-        } else if (c == ',') {
-            out += ",\n";
-            pad(out, depth);
-            ++i;
-        } else if (c == ':') {
-            out += ": ";
-            ++i;
-        } else {
-            out += static_cast<char>(c);
-            ++i;
-        }
-    }
+// raw writes an opaque value's bytes as they are ([DEF-A3]).
+inline void raw(std::string& out, const std::string& s, int /*depth*/) {
+    // Whitespace around the value is not part of it.
+    std::size_t i = 0, j = s.size();
+    while (i < j && ws(static_cast<unsigned char>(s[i]))) ++i;
+    while (j > i && ws(static_cast<unsigned char>(s[j - 1]))) --j;
+    out.append(s, i, j - i);
 }
 
 // std::char_traits<char>::compare is specified to order by unsigned char, so a
@@ -393,7 +354,9 @@ struct Reader {
     std::string_view buf;
     std::size_t pos = 0;
     int depth = 0;
- int limit = kDepthLimit;
+    int limit = 0;
+    int ceiling = 0;
+    int depth_limit() const {int own=ceiling>0?ceiling:kDepthLimit;return limit>0&&limit<own?limit:own;}
 
     [[noreturn]] void refuse(const char* word) const { throw Refusal(word, pos); }
 
@@ -408,7 +371,7 @@ struct Reader {
     }
 
     void enter() {
-        if (++depth > limit) refuse("depth_exceeded");
+        if (++depth > depth_limit()) refuse("depth_exceeded");
     }
 
     std::string str() {
@@ -850,6 +813,71 @@ inline Request decode(std::string_view data) {
     return v;
 }
 
+// to_json writes one record as JSON, laid out as this definition's documents
+// are and without the document terminator; from_json<T> reads one and throws
+// Refusal for what the record's reader refuses.
+template <class T> T from_json(std::string_view data);
+
+inline std::string to_json(const Constraints& v) {
+    std::string out;
+    detail::enc_constraints(out, v, 0);
+    return out;
+}
+
+template <> inline Constraints from_json<Constraints>(std::string_view data) {
+    detail::Reader r{data};
+    r.skip_ws();
+    Constraints v = detail::decode_constraints(r);
+    r.skip_ws();
+    if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
+    return v;
+}
+
+inline std::string to_json(const Artifact& v) {
+    std::string out;
+    detail::enc_artifact(out, v, 0);
+    return out;
+}
+
+template <> inline Artifact from_json<Artifact>(std::string_view data) {
+    detail::Reader r{data};
+    r.skip_ws();
+    Artifact v = detail::decode_artifact(r);
+    r.skip_ws();
+    if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
+    return v;
+}
+
+inline std::string to_json(const Source& v) {
+    std::string out;
+    detail::enc_source(out, v, 0);
+    return out;
+}
+
+template <> inline Source from_json<Source>(std::string_view data) {
+    detail::Reader r{data};
+    r.skip_ws();
+    Source v = detail::decode_source(r);
+    r.skip_ws();
+    if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
+    return v;
+}
+
+inline std::string to_json(const Request& v) {
+    std::string out;
+    detail::enc_request(out, v, 0);
+    return out;
+}
+
+template <> inline Request from_json<Request>(std::string_view data) {
+    detail::Reader r{data};
+    r.skip_ws();
+    Request v = detail::decode_request(r);
+    r.skip_ws();
+    if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
+    return v;
+}
+
 namespace detail {
 // kRefusals is in the order two of them are chosen between.
 inline const std::vector<std::string> kRefusals = {"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"};
@@ -862,31 +890,31 @@ inline int refusal_rank(std::string_view word) {
 }  // namespace detail
 
 namespace detail {
-inline Constraints decode_constraints_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_constraints(r);consumed=r.pos;return v;}
-inline std::string encode_constraints_at(const Constraints& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_constraints(out,v,depth);std::size_t n=0;decode_constraints_at(out,depth,detail::kDepthLimit,n);return out;}
+inline Constraints decode_constraints_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<64?limit:64;r.skip_ws();auto v=detail::decode_constraints(r);consumed=r.pos;return v;}
+inline std::string encode_constraints_at(const Constraints& v,int depth){detail::Reader r{""};if(depth<0||depth>=64)r.refuse("depth_exceeded");std::string out;detail::enc_constraints(out,v,depth);std::size_t n=0;decode_constraints_at(out,depth,64,n);return out;}
 }  // namespace detail
 inline std::string encode_constraints(const Constraints& v){return detail::encode_constraints_at(v,0)+"\n";}
-inline Constraints decode_constraints(std::string_view in){std::size_t n=0;auto v=detail::decode_constraints_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+inline Constraints decode_constraints(std::string_view in){std::size_t n=0;auto v=detail::decode_constraints_at(in,0,64,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
 namespace detail {
-inline Artifact decode_artifact_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_artifact(r);consumed=r.pos;return v;}
-inline std::string encode_artifact_at(const Artifact& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_artifact(out,v,depth);std::size_t n=0;decode_artifact_at(out,depth,detail::kDepthLimit,n);return out;}
+inline Artifact decode_artifact_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<64?limit:64;r.skip_ws();auto v=detail::decode_artifact(r);consumed=r.pos;return v;}
+inline std::string encode_artifact_at(const Artifact& v,int depth){detail::Reader r{""};if(depth<0||depth>=64)r.refuse("depth_exceeded");std::string out;detail::enc_artifact(out,v,depth);std::size_t n=0;decode_artifact_at(out,depth,64,n);return out;}
 }  // namespace detail
 inline std::string encode_artifact(const Artifact& v){return detail::encode_artifact_at(v,0)+"\n";}
-inline Artifact decode_artifact(std::string_view in){std::size_t n=0;auto v=detail::decode_artifact_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+inline Artifact decode_artifact(std::string_view in){std::size_t n=0;auto v=detail::decode_artifact_at(in,0,64,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
 namespace detail {
-inline Source decode_source_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_source(r);consumed=r.pos;return v;}
-inline std::string encode_source_at(const Source& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_source(out,v,depth);std::size_t n=0;decode_source_at(out,depth,detail::kDepthLimit,n);return out;}
+inline Source decode_source_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<64?limit:64;r.skip_ws();auto v=detail::decode_source(r);consumed=r.pos;return v;}
+inline std::string encode_source_at(const Source& v,int depth){detail::Reader r{""};if(depth<0||depth>=64)r.refuse("depth_exceeded");std::string out;detail::enc_source(out,v,depth);std::size_t n=0;decode_source_at(out,depth,64,n);return out;}
 }  // namespace detail
 inline std::string encode_source(const Source& v){return detail::encode_source_at(v,0)+"\n";}
-inline Source decode_source(std::string_view in){std::size_t n=0;auto v=detail::decode_source_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+inline Source decode_source(std::string_view in){std::size_t n=0;auto v=detail::decode_source_at(in,0,64,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
 namespace detail {
-inline Request decode_request_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<detail::kDepthLimit?limit:detail::kDepthLimit;r.skip_ws();auto v=detail::decode_request(r);consumed=r.pos;return v;}
-inline std::string encode_request_at(const Request& v,int depth){detail::Reader r{""};if(depth<0||depth>=detail::kDepthLimit)r.refuse("depth_exceeded");std::string out;detail::enc_request(out,v,depth);std::size_t n=0;decode_request_at(out,depth,detail::kDepthLimit,n);return out;}
+inline Request decode_request_at(std::string_view in,int depth,int limit,std::size_t& consumed){detail::Reader r{in};if(depth<0||limit<1)r.refuse("depth_exceeded");r.depth=depth;r.limit=limit<64?limit:64;r.skip_ws();auto v=detail::decode_request(r);consumed=r.pos;return v;}
+inline std::string encode_request_at(const Request& v,int depth){detail::Reader r{""};if(depth<0||depth>=64)r.refuse("depth_exceeded");std::string out;detail::enc_request(out,v,depth);std::size_t n=0;decode_request_at(out,depth,64,n);return out;}
 }  // namespace detail
 inline std::string encode_request(const Request& v){return detail::encode_request_at(v,0)+"\n";}
-inline Request decode_request(std::string_view in){std::size_t n=0;auto v=detail::decode_request_at(in,0,detail::kDepthLimit,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
+inline Request decode_request(std::string_view in){std::size_t n=0;auto v=detail::decode_request_at(in,0,64,n);detail::Reader r{in};r.pos=n;r.skip_ws();if(r.pos!=in.size())r.refuse("trailing_bytes");return v;}
 
 }  // namespace abstraction::download::request

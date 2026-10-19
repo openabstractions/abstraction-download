@@ -2,7 +2,6 @@ package serve
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,9 +13,13 @@ import (
 
 	download "github.com/openabstractions/abstraction-download/go"
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
+	downloadarchive "github.com/openabstractions/abstraction-download/go/archive"
 	"github.com/openabstractions/abstraction-download/go/netcost"
 	job "github.com/openabstractions/abstraction-job/go"
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
+	"github.com/openabstractions/abstraction-resource/go/wake"
+	rights "github.com/openabstractions/abstraction-rights/go/abstraction/rights/api"
+	storage "github.com/openabstractions/abstraction-storage/go"
 )
 
 // CredentialConsumer is the consumer contract the service names when it applies
@@ -47,7 +50,10 @@ var PlatformNetworkCost = sharedPlatformNetworkCost
 // for exactly that request, or a *download.CredentialError built with
 // download.CredentialRefusal. The service calls it again for every request,
 // redirect and resumed range, and never records what it returns [DL-K4].
-// Implementations honor ctx and are safe for concurrent calls.
+// Implementations honor ctx and are safe for concurrent calls. Every applier
+// decides the use without asking anyone: admission asked its first-use
+// question, and a rule removed since then refuses not_permitted with no
+// question raised while the job runs (DL-K4, abstraction-rights RIGHTS-R23).
 type CredentialApplier interface {
 	ApplyCredential(ctx context.Context, scope, name, host string) (map[string]string, error)
 }
@@ -67,6 +73,11 @@ type CredentialChecker interface {
 	CheckCredential(ctx context.Context, scope, name, host string) error
 }
 
+// SubjectCredentialChecker is CredentialChecker for a bound subject. A
+// not_permitted refusal may also carry a PendingQuestions() []string method
+// listing the first-use questions its decision raised or joined that are
+// still pending; admission names each as rights:question_pending:<id>
+// (INF-W11). ScopedSubjectCredentialChecker refusals carry it alike.
 type SubjectCredentialChecker interface {
 	CheckSubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) error
 }
@@ -109,6 +120,11 @@ type HTTPExecution struct {
 	// Nil uses PlatformNetworkCost. An error, such as netcost.ErrUnavailable,
 	// leaves abstraction.download/network-cost@1 unadvertised.
 	NetworkCost func() (netcost.Source, error)
+	// Archive is checked before the sources of every job that names its
+	// SHA-256 and keeps a copy of what the sources delivered [DL-R44]. Nil
+	// checks none.
+	Archive         download.DownloadArchive
+	CheckWriteSpace func(folder string, additional int64) error
 }
 
 // network is this execution's cost source, or nil when it has none.
@@ -242,8 +258,7 @@ func prepareRequest(scope, id, kind string, raw []byte, route string, network bo
 		return nil, nil, errors.New("negative artifact size")
 	}
 	if digest := spec.Artifact.Digest; digest != "" {
-		decoded, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:"))
-		if !strings.HasPrefix(digest, "sha256:") || err != nil || len(decoded) != 32 {
+		if !storage.ValidDigest(digest) {
 			return nil, nil, errors.New("SHA-256 digest required")
 		}
 	}
@@ -252,8 +267,20 @@ func prepareRequest(scope, id, kind string, raw []byte, route string, network bo
 	}
 	for _, source := range spec.Sources {
 		u, err := url.Parse(source.Locator)
-		if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || source.Scheme != u.Scheme {
-			return nil, nil, errors.New("anonymous HTTP(S) source required")
+		if err != nil {
+			return nil, nil, errors.New("invalid HTTP(S) source locator")
+		}
+		if u.User != nil {
+			return nil, nil, errors.New("source userinfo is not supported; use a named credential")
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, nil, fmt.Errorf("unsupported source scheme %q: HTTP(S) required", u.Scheme)
+		}
+		if u.Host == "" {
+			return nil, nil, errors.New("HTTP(S) source host required")
+		}
+		if source.Scheme != u.Scheme {
+			return nil, nil, errors.New("source scheme does not match locator scheme")
 		}
 	}
 	work, err := json.Marshal(spec)
@@ -274,7 +301,7 @@ func (e HTTPExecution) serveWithLookup(ctx context.Context, store job.Store, loo
 	}
 	network, stop := servedNetwork(ctx, open)
 	defer stop()
-	return serveExecutionWithLookup(ctx, store, e.OnError, nil, httpTerminal, e.Credentials, network, lookup)
+	return serveExecutionArchived(ctx, store, e.OnError, nil, httpTerminal, e.Credentials, network, lookup, e.Archive, e.CheckWriteSpace)
 }
 
 func (e HTTPExecution) ServeWithSubjectLookup(ctx context.Context, store job.Store, lookup acceptanceprovider.SubjectLookup) error {
@@ -305,7 +332,17 @@ func serveExecutionWith(ctx context.Context, store job.Store, onError func(error
 }
 
 func serveExecutionWithLookup(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator, terminal func(error) bool, applier CredentialApplier, network netcost.Source, lookup acceptanceprovider.SubjectLookup) error {
+	return serveExecutionArchived(ctx, store, onError, delegates, terminal, applier, network, lookup, nil)
+}
+
+func serveExecutionArchived(ctx context.Context, store job.Store, onError func(error), delegates []download.Delegator, terminal func(error) bool, applier CredentialApplier, network netcost.Source, lookup acceptanceprovider.SubjectLookup, archive download.DownloadArchive, space ...func(string, int64) error) error {
 	runner := download.NewRunner(store, "service-"+job.NewID())
+	if len(space) != 0 {
+		runner.CheckWriteSpace = space[0]
+	}
+	// Served work always needs its retained owner. A missing/legacy journal
+	// holds no wake; it never substitutes this runtime's principal.
+	runner.Wake = operationWake{lookup: lookup}
 	runner.Terminal = terminal
 	// A service profile with its own terminal policy, and delegated execution
 	// relaying a receiving service's refusal, also report typed causes.
@@ -315,11 +352,15 @@ func serveExecutionWithLookup(ctx context.Context, store job.Store, onError func
 		runner.Delegators = download.NewDelegators(delegates...)
 	}
 	runner.SharedStore = true
+	// The sweep closes out finished work; each job is closed as it finishes,
+	// so a later, larger job in the same sweep does not hold it back.
+	runner.DeliverEach = true
 	runner.Credentials = noExecutionCredentials{}
 	if applier != nil {
 		runner.Credentials = appliedCredentials{ctx: ctx, applier: applier, lookup: lookup}
 	}
 	runner.Network = network
+	runner.Archive = attributed(archive, lookup)
 	configureRunner(runner)
 	defer runner.Close()
 	watch := job.Watch(store, download.Kind)
@@ -363,6 +404,24 @@ func serveExecutionWithLookup(ctx context.Context, store job.Store, onError func
 }
 
 type noExecutionCredentials struct{}
+
+type operationWake struct {
+	lookup      acceptanceprovider.SubjectLookup
+	operationID string
+}
+
+func (w operationWake) ForOperation(id string) job.Holder { w.operationID = id; return w }
+
+func (w operationWake) Hold(who, why string) (job.Held, error) {
+	if w.lookup == nil || w.operationID == "" {
+		return nil, errors.New("download wake: authenticated job owner unavailable")
+	}
+	subject, found, err := w.lookup(w.operationID, "")
+	if err != nil || !found || subject == nil {
+		return nil, errors.New("download wake: authenticated job owner unavailable")
+	}
+	return (wake.Holder{Subject: &rights.Subject{Account: subject.Account, Program: subject.Program}}).Hold(who, why)
+}
 
 func (noExecutionCredentials) Lookup(string, string) (map[string]string, bool) { return nil, false }
 
@@ -463,4 +522,22 @@ func credentialRouteFor(required []string) (string, error) {
 		return CredentialGuarantee, nil
 	}
 	return "", nil
+}
+
+// attributed names, for the archive's bytes-written count, the program that
+// submitted each operation: the job owner the provider authenticated. The
+// name stays in the runtime's own state; no app reads it back.
+func attributed(kept download.DownloadArchive, lookup acceptanceprovider.SubjectLookup) download.DownloadArchive {
+	service, ok := kept.(downloadarchive.Service)
+	if !ok || service.App != nil || lookup == nil {
+		return kept
+	}
+	service.App = func(operation string) string {
+		subject, found, err := lookup(operation, "")
+		if err != nil || !found || subject == nil {
+			return ""
+		}
+		return subject.Program
+	}
+	return service
 }

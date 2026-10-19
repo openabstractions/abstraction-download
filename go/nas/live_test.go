@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +13,19 @@ import (
 	"time"
 
 	download "github.com/openabstractions/abstraction-download/go"
+	identity "github.com/openabstractions/abstraction-identity"
 	job "github.com/openabstractions/abstraction-job/go"
 )
+
+// skipIfShareRefused skips a live test when New refuses the configured store
+// because it is on a network share. Since 0.8.0 (W0-06a) CAS refuses such a
+// store (CAS-L2); the replacement is the remote-runtime path.
+func skipIfShareRefused(t *testing.T, root string) {
+	t.Helper()
+	if _, err := New(root); errors.Is(err, identity.ErrNotLocalPath) {
+		t.Skipf("CAS-L2: a store on a network share is refused since 0.8.0; use the remote runtime (%v)", err)
+	}
+}
 
 // TestLiveRoundTrip runs the arrangement against a real NAS over a real share.
 //
@@ -50,6 +62,9 @@ func TestLiveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, err := New(remoteRoot)
+	if errors.Is(err, identity.ErrNotLocalPath) {
+		t.Skipf("CAS-L2: a store on a network share is refused since 0.8.0; use the remote runtime (%v)", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +167,7 @@ func TestLiveExclusiveCreate(t *testing.T) {
 	if remoteRoot == "" {
 		t.Skip("set ABSTRACTION_NAS_STORE to the shared store")
 	}
+	skipIfShareRefused(t, remoteRoot)
 	dir := filepath.Join(remoteRoot, "excl-probe")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

@@ -55,7 +55,9 @@ type Delegator struct {
 	// Root is the remote store as THIS machine sees it — a UNC path, a mapped
 	// drive, an NFS mount. The machine on the other side sees the same
 	// directory as something else entirely, and neither has to know that,
-	// because records in it name their files relative to the store.
+	// because records in it name their files relative to the store. New
+	// refuses such a root today (cas CAS-L2); a store on this host's own
+	// volume is the one New accepts.
 	Root string
 
 	// Dir is where finished files land inside the remote store. Relative,
@@ -72,6 +74,13 @@ type Delegator struct {
 }
 
 // New returns a delegator for a store on a shared filesystem.
+//
+// The store is a job file store, and a job file store rooted on a network
+// share (a UNC path, a mapped network drive, an NFS or SMB mount) is refused
+// here with cas's reason, errors.Is identity.ErrNotLocalPath: both hosts
+// write the record and the cas lock holds within one host, so writers on the
+// PC and on the NAS lost or refused 147 to 149 of 2150 updates (cas CAS-L2).
+// The refusal comes when the store is configured, before any job is written.
 func New(root string) (*Delegator, error) {
 	if root == "" {
 		return nil, errors.New("nas: no store configured")

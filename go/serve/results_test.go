@@ -7,11 +7,58 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	download "github.com/openabstractions/abstraction-download/go"
+	identity "github.com/openabstractions/abstraction-identity"
 	job "github.com/openabstractions/abstraction-job/go"
 	"github.com/openabstractions/abstraction-job/go/acceptanceprovider"
 )
+
+func TestResultReadRefusesSameSizeRestoredTimeRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result")
+	if err := os.WriteFile(path, []byte("old bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	before, info, err := identity.FileStamp(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(data []byte, offset int64) (int, error) {
+		// Observe the change clock, rather than guessing its tick with a sleep.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := os.WriteFile(path, []byte("new bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			after, current, err := identity.FileStamp(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Size() != info.Size() || !current.ModTime().Equal(info.ModTime()) {
+				t.Fatal("fixture did not restore metadata")
+			}
+			if after != before {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Skip("filesystem does not expose an advanced change stamp")
+			}
+		}
+		return f.ReadAt(data, offset)
+	}
+	if data, _, err := readResultFile(f, 0, 9, read); err == nil || len(data) != 0 || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("rewrite accepted: %q %v", data, err)
+	}
+}
 
 func TestCompletedHTTPResultBoundsAndAbsence(t *testing.T) {
 	root := t.TempDir()

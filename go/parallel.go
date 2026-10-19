@@ -2,6 +2,8 @@ package download
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -269,10 +271,17 @@ func byPriority(sources []Source) []Source {
 // cannot be reused here, and why a range past the end of the file is dropped
 // rather than the whole checkpoint being distrusted.
 func resumable(rec *job.Record, partial string) (job.Ranges, error) {
-	rs, err := rec.CheckpointRanges()
+	cp, err := CheckpointOf(rec)
 	if err != nil {
 		return nil, err
 	}
+	// Ranges proven under a weak Last-Modified may belong to a version the
+	// source replaced within the same second; a range fetched now would splice
+	// the two [DL-V4]. They prove nothing, the same rule planResume applies.
+	if restartsWeak(cp) {
+		return nil, nil
+	}
+	rs := cp.Verified
 	onDisk := int64(0)
 	if st, err := os.Stat(partial); err == nil {
 		onDisk = st.Size()
@@ -301,7 +310,7 @@ func resumable(rec *job.Record, partial string) (job.Ranges, error) {
 // on a fresh download that is one extra read of the file at disk speed, and on
 // a resume it is the same read the single-stream path already does to rebuild
 // its rolling hash over the prefix it is keeping.
-func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, partial string, serving []rangeSource, p plan, have job.Ranges, onIntent func(job.Want)) (int64, error) {
+func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, partial string, serving []rangeSource, p plan, have job.Ranges, carried Validators, onIntent func(job.Want)) (int64, error) {
 	f, err := os.OpenFile(partial, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return 0, err
@@ -318,10 +327,6 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 			return 0, err
 		}
 	}
-	cp, err := CheckpointOf(rec)
-	if err != nil {
-		return 0, err
-	}
 
 	// The cancel is taken BEFORE the keeper starts, so the intent callback can
 	// be set once, at construction, and read without a lock. It used to be
@@ -336,7 +341,8 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 		file: f, size: p.size,
 		have:       append(job.Ranges(nil), have...),
 		landed:     map[int64]int64{},
-		validators: cp.Validators,
+		validators: carried.Version(),
+		owner:      carried.Source,
 		onIntent:   func(want job.Want) { onIntent(want); stop() },
 	}
 	// The keeper holds the lease here, and reads intent too. Renewal cannot ride
@@ -368,8 +374,8 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 		go func() {
 			defer wg.Done()
 			for rng := range work {
-				err := r.fetchRange(ctx, rec.ID, serving, RangeRequest{
-					Range: rng, Out: f, Validators: w.validators, Beat: keep.beat,
+				err := r.fetchRange(ctx, rec.ID, serving, w, RangeRequest{
+					Range: rng, Out: f, Beat: keep.beat,
 					Landed: w.arrival(rng.Start),
 				})
 				if err == nil {
@@ -433,7 +439,7 @@ feed:
 // re-planned onto the same source by the next sweep and refused again. The
 // preference between failures is the one the single-stream path makes: a source
 // that says no does not speak for a mirror that merely dropped the connection.
-func (r *Runner) fetchRange(ctx context.Context, operationID string, serving []rangeSource, req RangeRequest) error {
+func (r *Runner) fetchRange(ctx context.Context, operationID string, serving []rangeSource, w *progress, req RangeRequest) error {
 	var last error
 	credentials := r.credentialsForOperation(operationID)
 	// A source that fails part way has still landed its bytes, and the next
@@ -457,6 +463,13 @@ func (r *Runner) fetchRange(ctx context.Context, operationID string, serving []r
 			req.Range.Start = at
 		}
 		req.Source = s.src
+		if w != nil {
+			// Validators belong to the source that named them: a mirror of the
+			// same bytes carries its own ETag and Last-Modified [DL-V2].
+			key := sourceKey(s.src)
+			req.Validators = w.versionFor(key)
+			req.Observed = func(v Validators) error { return w.served(key, v) }
+		}
 		// Credentials are resolved per range, not once for the run. A read token
 		// from a content-addressed store is good for minutes and a 40 GB
 		// artifact is 132 of these over hours; headers taken once would start
@@ -472,6 +485,13 @@ func (r *Runner) fetchRange(ctx context.Context, operationID string, serving []r
 			return nil
 		}
 		if ctx.Err() != nil {
+			return err
+		}
+		// A source that names another version has said the artifact changed.
+		// The next source's range would land beside proven ranges of the old
+		// version, and a job without a digest would deliver the splice, so the
+		// run ends here and transfer restarts it from byte zero [DL-V2].
+		if errors.Is(err, ErrVersionChanged) {
 			return err
 		}
 		if last == nil || Permanent(last) || !Permanent(err) {
@@ -490,12 +510,24 @@ type progress struct {
 	keep  *keeper
 	size  int64
 
-	// onIntent and validators are set once, before any goroutine exists, and
-	// read without the lock. onIntent especially: the keeper calls it, and a
-	// keeper that has to wait for a checkpoint stops renewing the lease it is
-	// there to hold.
-	onIntent   func(job.Want)
+	// onIntent is set once, before any goroutine exists, and read without a
+	// lock: the keeper calls it, and a keeper that has to wait for a checkpoint
+	// stops renewing the lease it is there to hold.
+	onIntent func(job.Want)
+
+	// validators name the version every proven range came from. They start as
+	// the predecessor's and, when it recorded none, are what the first range
+	// response names [DL-V1]. vmu is never held across a record write.
+	vmu        sync.Mutex
 	validators Validators
+	// owner is the source that named validators; the checkpoint keeps it as
+	// Validators.Source. Empty means they were carried from a checkpoint that
+	// does not name the source, and they go to every source.
+	owner string
+	// mirrors holds the first validators each other source named in this run,
+	// by source key. They are never checkpointed: a resume starts them afresh,
+	// and the digest guards a mirror's bytes across runs [DL-V2].
+	mirrors map[string]Validators
 
 	mu   sync.Mutex
 	have job.Ranges
@@ -505,6 +537,83 @@ type progress struct {
 	// path, and mu is held across a record write.
 	lmu    sync.Mutex
 	landed map[int64]int64
+}
+
+// version is the validators the checkpoint records: the version and the
+// source that named it.
+func (p *progress) version() Validators {
+	p.vmu.Lock()
+	defer p.vmu.Unlock()
+	v := p.validators
+	v.Source = p.owner
+	return v
+}
+
+// sourceKey names a source for scoping validators, and is what the checkpoint
+// records as validators.source: the locator exactly as the job's source list
+// spells it, scheme included, such as "https://host/path" [DL-V2].
+func sourceKey(s Source) string { return s.Locator }
+
+// versionFor is the If-Range a range asks the source key for: the recorded
+// validators when that source named them or they were carried, and for another
+// source the validators it named earlier in this run, if any.
+func (p *progress) versionFor(key string) Validators {
+	p.vmu.Lock()
+	defer p.vmu.Unlock()
+	if p.owner != "" && p.owner != key {
+		return p.mirrors[key]
+	}
+	return p.validators
+}
+
+// served is the Observed callback for the source key: it records the version
+// the first response names when none is known, and refuses a range the same
+// source serves from any other version. Another source is held to the first
+// validators it named in this run, since a mirror's validators name the
+// mirror; across runs the digest guards its bytes. A response naming only a
+// weak Last-Modified records Weak, and the next resume restarts from byte zero
+// [DL-V4]. One naming nothing proves nothing either way.
+func (p *progress) served(key string, v Validators) error {
+	if v.Empty() && !v.Weak {
+		return nil
+	}
+	p.vmu.Lock()
+	defer p.vmu.Unlock()
+	if p.validators.Empty() && !p.validators.Weak {
+		p.validators = v
+		p.owner = key
+		return nil
+	}
+	want := p.validators
+	mirror := false
+	if p.owner != "" && p.owner != key {
+		known, ok := p.mirrors[key]
+		if !ok {
+			if p.mirrors == nil {
+				p.mirrors = map[string]Validators{}
+			}
+			p.mirrors[key] = v
+			return nil
+		}
+		want = known
+		mirror = true
+	}
+	// The source has strengthened the same timestamp, rather than named a
+	// different version. A legacy weak record without a timestamp cannot prove
+	// this comparison and keeps the existing refusal/restart behavior.
+	if want.Weak && want.ETag == "" && want.LastModified != "" &&
+		!v.Weak && v.ETag == "" && v.LastModified == want.LastModified {
+		if mirror {
+			p.mirrors[key] = v
+		} else {
+			p.validators = v
+		}
+		return nil
+	}
+	if v != want {
+		return fmt.Errorf("%w: %s was held to %+v and served this range of %+v", ErrVersionChanged, key, want, v)
+	}
+	return nil
 }
 
 // arrival is the Landed callback for the range starting at start.
@@ -617,7 +726,7 @@ func (p *progress) record() error {
 		// far it got but not WHICH version it got that far through is what lets
 		// a successor splice two artifacts into one file, and writing the ranges
 		// without them erased what a stream predecessor had recorded.
-		return setCheckpoint(rr, Checkpoint{Verified: p.have, Validators: p.validators})
+		return setCheckpoint(rr, Checkpoint{Verified: p.have, Validators: p.version()})
 	})
 	if err != nil {
 		p.keep.refused(err)
@@ -644,4 +753,21 @@ func (p *progress) snapshot() job.Ranges {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append(job.Ranges(nil), p.have...)
+}
+
+// restartsWeak reports that a checkpoint was taken under a weak Last-Modified
+// and proves no bytes to either resume path [DL-V4].
+func restartsWeak(cp Checkpoint) bool { return cp.Validators.Weak }
+
+// carriedValidators is what a resumed transfer starts from: the version its
+// proven ranges came from, sent as If-Range. A weak checkpoint restarts from
+// byte zero and carries nothing; the restarted run, like a fresh one, records
+// the validators its first range response names (progress.served), so carrying
+// Weak onto its bytes would discard them again at the next interruption.
+// planResume returns the same zero Validators for a weak restart.
+func carriedValidators(cp Checkpoint) Validators {
+	if restartsWeak(cp) {
+		return Validators{}
+	}
+	return cp.Validators
 }

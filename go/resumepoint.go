@@ -140,11 +140,9 @@ func (p resumePlan) oneStream() bool {
 //
 // A checkpoint proving nothing needs none of this: there is nothing to keep, so
 // the transfer starts at zero whatever is on disk. And a partial that is missing
-// entirely is not a short file — a file that is THERE and too short still has
-// content, and something other than this library shortened it, so no part of
-// that content can be believed; a file that is not there has no content at all,
-// a temp cleaner took it, and starting from zero is not a compromise but the
-// correct and complete answer.
+// entirely has no content at all: a temp cleaner took it, and starting from zero
+// is the complete answer. A file that is there and too short keeps the ranges
+// it still holds, as above.
 //
 // # size
 //
@@ -161,7 +159,10 @@ func planResume(partial string, cp Checkpoint, size int64) (resumePlan, error) {
 		return resumePlan{}, err
 	}
 
-	if len(have) == 0 {
+	// A prefix taken under a Last-Modified that was not strong may come from a
+	// version the source replaced within the same second, and a bare Range
+	// would splice the two [DL-V4]. The transfer starts again from byte zero.
+	if len(have) == 0 || restartsWeak(cp) {
 		return resumePlan{Gaps: gapsFor(nil, size)}, nil
 	}
 

@@ -16,11 +16,13 @@ export {
   encodeConstraints,
   encodeRequest,
   encodeSource,
+  fromJson,
   networkCostGuarantees,
   newArtifact,
   newConstraints,
   newRequest,
   newSource,
   scopedCredentialGuarantees,
+  toJson,
   waitingExtensions,
 } from "./internal.mjs";

@@ -120,9 +120,43 @@ func checkCredentialsAdmission(kind string, raw []byte, required []string, check
 		if refusal.Outcome == credentialNotPermitted {
 			// The rights decision refused this caller the credential: a
 			// rights refusal, unsealed like any admission refusal [JOB-A16].
-			return api.AcceptanceOutcomeForbidden, "credential:" + refusal.Outcome + ":" + use[0]
+			// It names each first-use question the check raised or joined
+			// that is still pending, so the submitter's client waits for the
+			// person's answer and submits again (INF-W11).
+			return api.AcceptanceOutcomeForbidden, namePendingQuestions("credential:"+refusal.Outcome+":"+use[0], err)
 		}
 		return api.AcceptanceOutcomeInvalid, "credential:" + refusal.Outcome + ":" + use[0]
 	}
 	return 0, ""
+}
+
+// questionPendingPrefix begins the refusal word naming one pending first-use
+// question (inference INF-W11).
+const questionPendingPrefix = "rights:question_pending:"
+
+// maxAdmissionReason is the acceptance reason bound (JOB-A16).
+const maxAdmissionReason = 1024
+
+// namePendingQuestions appends " rights:question_pending:<id>" to reason for
+// each question a checker's refusal carries through an optional
+// PendingQuestions method, in order and once each. The grant words come first
+// and stay whole; naming stops at the acceptance reason bound.
+func namePendingQuestions(reason string, err error) string {
+	var carrier interface{ PendingQuestions() []string }
+	if !errors.As(err, &carrier) {
+		return reason
+	}
+	seen := map[string]bool{}
+	for _, id := range carrier.PendingQuestions() {
+		if id == "" || strings.ContainsAny(id, " \t\r\n") || seen[id] {
+			continue
+		}
+		word := " " + questionPendingPrefix + id
+		if len(reason)+len(word) > maxAdmissionReason {
+			break
+		}
+		seen[id] = true
+		reason += word
+	}
+	return reason
 }

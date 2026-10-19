@@ -170,12 +170,14 @@ func (s *client) ResumeOrGet(source, destination string) (Handle, Outcome, error
 //     recovers a download whose owner was killed rather than stopped.
 //
 //   - The resume point is the checkpoint's proven ranges, checked against the
-//     partial file only for whether the file is long enough to hold them: one
-//     that is not has no resume point at all and the transfer starts again from
-//     zero, and one that is has its tail above the highest proven byte
-//     discarded. A vanished or truncated partial therefore cannot make a runner
-//     ask a server to continue from bytes that are not there. The file's length
-//     is never read as progress; see planResume.
+//     partial file only for whether the file is long enough to hold them. A
+//     file shorter than its checkpoint is kept, and the checkpoint is cut down,
+//     per range, to what the file holds; the transfer carries on from there
+//     (DL-R3, DL-R4). The tail above the highest proven byte is discarded, and
+//     a missing partial starts again from zero. A vanished or truncated partial
+//     therefore cannot make a runner ask a server to continue from bytes that
+//     are not there. The file's length is never read as progress; see
+//     planResume.
 //
 //   - Two callers racing for one destination produce one record, because the
 //     record id is derived from the destination and both store bindings refuse
@@ -285,13 +287,12 @@ func (s *client) outcome(rec *job.Record, want Spec) Outcome {
 // past the first one; `discarded` is the tail above the highest proven byte,
 // which is the only part of the file that is actually thrown away.
 //
-// A file too short to hold what its checkpoint claims is a different situation
-// again: a temp cleaner, a half-finished copy onto a full disk, a user tidying
-// up. The old answer was to believe the smaller of the two and carry on from
-// there, which quietly turned "these two disagree" into a lower offset and a
-// resume onto bytes nothing vouches for. That case has no resume point at all —
-// the partial is discarded and the transfer starts again — so this reports zero
-// proven and the whole file discarded.
+// A file too short to hold what its checkpoint claims (a temp cleaner, a
+// half-finished copy onto a full disk, a user tidying up) is the floor
+// [DL-R3]. planResume cuts the checkpoint down, per range, to what the file
+// holds [DL-R4], and this reports those ranges as proven and only the tail above
+// the highest of them as discarded. The digest over the whole artifact, taken
+// before delivery, decides whether the kept bytes can be trusted.
 func (s *client) resumeFrom(rec *job.Record) (from, proven, discarded int64) {
 	spec, err := SpecOf(rec)
 	if err != nil {

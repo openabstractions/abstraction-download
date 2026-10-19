@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	download "github.com/openabstractions/abstraction-download/go"
-	"github.com/openabstractions/abstraction-download/go/powershell"
+	"github.com/openabstractions/abstraction-facade/go-core/powershell"
 )
 
 type refusal struct{ host, reason string }

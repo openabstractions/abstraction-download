@@ -73,64 +73,18 @@ func strs(out []byte, v []string, depth int) []byte {
 	return append(out, ']')
 }
 
+// raw writes an opaque value's bytes as they are ([DEF-A3]); whitespace
+// around the value is not part of it.
 func raw(out []byte, s string, depth int) []byte {
 	ws := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
-	for i := 0; i < len(s); {
-		c := s[i]
-		if ws(c) {
-			i++
-			continue
-		}
-		switch c {
-		case '"':
-			j := i + 1
-			for j < len(s) {
-				if s[j] == '\\' {
-					j += 2
-					continue
-				}
-				if s[j] == '"' {
-					j++
-					break
-				}
-				j++
-			}
-			out = append(out, s[i:j]...)
-			i = j
-		case '{', '[':
-			out = append(out, c)
-			i++
-			j := i
-			for j < len(s) && ws(s[j]) {
-				j++
-			}
-			if j < len(s) && (s[j] == '}' || s[j] == ']') {
-				out = append(out, s[j])
-				i = j + 1
-			} else {
-				depth++
-				out = append(out, '\n')
-				out = pad(out, depth)
-			}
-		case '}', ']':
-			depth--
-			out = append(out, '\n')
-			out = pad(out, depth)
-			out = append(out, c)
-			i++
-		case ',':
-			out = append(out, ',', '\n')
-			out = pad(out, depth)
-			i++
-		case ':':
-			out = append(out, ':', ' ')
-			i++
-		default:
-			out = append(out, c)
-			i++
-		}
+	i, j := 0, len(s)
+	for i < j && ws(s[i]) {
+		i++
 	}
-	return out
+	for j > i && ws(s[j-1]) {
+		j--
+	}
+	return append(out, s[i:j]...)
 }
 
 func byteLess(a, b string) bool {
@@ -296,6 +250,9 @@ func (v *Network) UnmarshalJSON(data []byte) error {
 func NetworkValues() []Network {
 	return []Network{NetworkAny, NetworkUnmetered}
 }
+
+// IsKnown reports whether v is a declared member of Network.
+func (v Network) IsKnown() bool { return v.Known() }
 
 // Known reports whether v is a member of Network.
 func (v Network) Known() bool {
@@ -483,10 +440,22 @@ func decimal(n int64) string { return string(num(nil, n)) }
 const depthLimit = 64
 
 type reader struct {
-	buf   []byte
-	pos   int
-	depth int
- limit int
+	buf     []byte
+	pos     int
+	depth   int
+	limit   int
+	ceiling int
+}
+
+func (r *reader) depthLimit() int {
+	ceiling := depthLimit
+	if r.ceiling > 0 {
+		ceiling = r.ceiling
+	}
+	if r.limit > 0 && r.limit < ceiling {
+		return r.limit
+	}
+	return ceiling
 }
 
 func (r *reader) refuse(word string) error { return &Refusal{Word: word, Offset: r.pos} }
@@ -1285,6 +1254,118 @@ func Decode(in []byte) (*Request, error) {
 	return v, nil
 }
 
+// ToJSON writes one record of this package, given as a value or a pointer,
+// as JSON laid out as its documents are and without the document terminator.
+// Anything else, a nil pointer included, is refused with wrong_type.
+func ToJSON(v any) (out []byte, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			if e, ok := p.(*Refusal); ok {
+				out, err = nil, e
+				return
+			}
+			panic(p)
+		}
+	}()
+	switch v := v.(type) {
+	case Constraints:
+		return encConstraints(nil, &v, 0), nil
+	case *Constraints:
+		if v == nil {
+			return nil, &Refusal{Word: "wrong_type"}
+		}
+		return encConstraints(nil, v, 0), nil
+	case Artifact:
+		return encArtifact(nil, &v, 0), nil
+	case *Artifact:
+		if v == nil {
+			return nil, &Refusal{Word: "wrong_type"}
+		}
+		return encArtifact(nil, v, 0), nil
+	case Source:
+		return encSource(nil, &v, 0), nil
+	case *Source:
+		if v == nil {
+			return nil, &Refusal{Word: "wrong_type"}
+		}
+		return encSource(nil, v, 0), nil
+	case Request:
+		return encRequest(nil, &v, 0), nil
+	case *Request:
+		if v == nil {
+			return nil, &Refusal{Word: "wrong_type"}
+		}
+		return encRequest(nil, v, 0), nil
+	}
+	return nil, &Refusal{Word: "wrong_type"}
+}
+
+// FromJSON reads one record from data into v, a pointer to a record of this
+// package. A refused input returns *Refusal.
+func FromJSON(data []byte, v any) error {
+	r := &reader{buf: data}
+	r.ws()
+	switch p := v.(type) {
+	case *Constraints:
+		if p == nil {
+			return &Refusal{Word: "wrong_type"}
+		}
+		x, err := r.decodeConstraints()
+		if err != nil {
+			return err
+		}
+		r.ws()
+		if r.pos < len(r.buf) {
+			return r.refuse("trailing_bytes")
+		}
+		*p = *x
+		return nil
+	case *Artifact:
+		if p == nil {
+			return &Refusal{Word: "wrong_type"}
+		}
+		x, err := r.decodeArtifact()
+		if err != nil {
+			return err
+		}
+		r.ws()
+		if r.pos < len(r.buf) {
+			return r.refuse("trailing_bytes")
+		}
+		*p = *x
+		return nil
+	case *Source:
+		if p == nil {
+			return &Refusal{Word: "wrong_type"}
+		}
+		x, err := r.decodeSource()
+		if err != nil {
+			return err
+		}
+		r.ws()
+		if r.pos < len(r.buf) {
+			return r.refuse("trailing_bytes")
+		}
+		*p = *x
+		return nil
+	case *Request:
+		if p == nil {
+			return &Refusal{Word: "wrong_type"}
+		}
+		x, err := r.decodeRequest()
+		if err != nil {
+			return err
+		}
+		r.ws()
+		if r.pos < len(r.buf) {
+			return r.refuse("trailing_bytes")
+		}
+		*p = *x
+		return nil
+	}
+	return &Refusal{Word: "wrong_type"}
+}
+
 // refusals is in the order two of them are chosen between.
 
 var refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"}
@@ -1298,24 +1379,22 @@ func refusalRank(word string) int {
 	return -1
 }
 
-func(r *reader)depthLimit()int{if r.limit>0 && r.limit<depthLimit{return r.limit};return depthLimit}
-
 func DecodeConstraintsAt(in []byte,depth,limit int)(*Constraints,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeConstraints();return v,r.pos,e}
-func EncodeConstraintsAt(v *Constraints,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encConstraints(nil,v,depth);if _,_,e:=DecodeConstraintsAt(out,depth,depthLimit);e!=nil{panic(e)};return out}
+func EncodeConstraintsAt(v *Constraints,depth int)[]byte{if depth<0||depth>=64{panic(&Refusal{Word:"depth_exceeded"})};out:=encConstraints(nil,v,depth);if _,_,e:=DecodeConstraintsAt(out,depth,64);e!=nil{panic(e)};return out}
 func EncodeConstraints(v *Constraints)[]byte{return append(EncodeConstraintsAt(v,0),"\n"...)}
-func DecodeConstraints(in []byte)(*Constraints,error){v,n,e:=DecodeConstraintsAt(in,0,depthLimit);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
+func DecodeConstraints(in []byte)(*Constraints,error){v,n,e:=DecodeConstraintsAt(in,0,64);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
 
 func DecodeArtifactAt(in []byte,depth,limit int)(*Artifact,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeArtifact();return v,r.pos,e}
-func EncodeArtifactAt(v *Artifact,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encArtifact(nil,v,depth);if _,_,e:=DecodeArtifactAt(out,depth,depthLimit);e!=nil{panic(e)};return out}
+func EncodeArtifactAt(v *Artifact,depth int)[]byte{if depth<0||depth>=64{panic(&Refusal{Word:"depth_exceeded"})};out:=encArtifact(nil,v,depth);if _,_,e:=DecodeArtifactAt(out,depth,64);e!=nil{panic(e)};return out}
 func EncodeArtifact(v *Artifact)[]byte{return append(EncodeArtifactAt(v,0),"\n"...)}
-func DecodeArtifact(in []byte)(*Artifact,error){v,n,e:=DecodeArtifactAt(in,0,depthLimit);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
+func DecodeArtifact(in []byte)(*Artifact,error){v,n,e:=DecodeArtifactAt(in,0,64);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
 
 func DecodeSourceAt(in []byte,depth,limit int)(*Source,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeSource();return v,r.pos,e}
-func EncodeSourceAt(v *Source,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encSource(nil,v,depth);if _,_,e:=DecodeSourceAt(out,depth,depthLimit);e!=nil{panic(e)};return out}
+func EncodeSourceAt(v *Source,depth int)[]byte{if depth<0||depth>=64{panic(&Refusal{Word:"depth_exceeded"})};out:=encSource(nil,v,depth);if _,_,e:=DecodeSourceAt(out,depth,64);e!=nil{panic(e)};return out}
 func EncodeSource(v *Source)[]byte{return append(EncodeSourceAt(v,0),"\n"...)}
-func DecodeSource(in []byte)(*Source,error){v,n,e:=DecodeSourceAt(in,0,depthLimit);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
+func DecodeSource(in []byte)(*Source,error){v,n,e:=DecodeSourceAt(in,0,64);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
 
 func DecodeRequestAt(in []byte,depth,limit int)(*Request,int,error){r:=&reader{buf:in,depth:depth,limit:limit};if depth<0||limit<1{return nil,0,r.refuse("depth_exceeded")};r.ws();v,e:=r.decodeRequest();return v,r.pos,e}
-func EncodeRequestAt(v *Request,depth int)[]byte{if depth<0||depth>=depthLimit{panic(&Refusal{Word:"depth_exceeded"})};out:=encRequest(nil,v,depth);if _,_,e:=DecodeRequestAt(out,depth,depthLimit);e!=nil{panic(e)};return out}
+func EncodeRequestAt(v *Request,depth int)[]byte{if depth<0||depth>=64{panic(&Refusal{Word:"depth_exceeded"})};out:=encRequest(nil,v,depth);if _,_,e:=DecodeRequestAt(out,depth,64);e!=nil{panic(e)};return out}
 func EncodeRequest(v *Request)[]byte{return append(EncodeRequestAt(v,0),"\n"...)}
-func DecodeRequest(in []byte)(*Request,error){v,n,e:=DecodeRequestAt(in,0,depthLimit);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}
+func DecodeRequest(in []byte)(*Request,error){v,n,e:=DecodeRequestAt(in,0,64);if e!=nil{return nil,e};r:=&reader{buf:in,pos:n};r.ws();if r.pos!=len(in){return nil,r.refuse("trailing_bytes")};return v,nil}

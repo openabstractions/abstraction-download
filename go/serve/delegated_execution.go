@@ -23,6 +23,11 @@ type DelegatedExecution struct {
 
 func (DelegatedExecution) Profile() string { return "download-delegated-request-v1" }
 
+// Delegated storage, including NAS, has no local collection authority here.
+func (DelegatedExecution) OperationTmpNames(*job.Record) (string, string, error) {
+	return "", "", acceptanceprovider.ErrResultNotNamed
+}
+
 // ExecutionGuarantees offers recoverable submission only while a configured
 // delegate can reconcile it, and credentials@1 while a configured delegate
 // applies credentials by name on its own side [DL-K3]. RecoveryGuarantees

@@ -10,6 +10,7 @@ import (
 
 	identity "github.com/openabstractions/abstraction-identity"
 	job "github.com/openabstractions/abstraction-job/go"
+	contentdigest "github.com/openabstractions/abstraction-storage/go/digest"
 )
 
 // Kind is the job.Record.Kind this package understands. A process that finds a
@@ -28,6 +29,13 @@ type Spec struct {
 	Artifact Artifact `json:"artifact"`
 	Sources  []Source `json:"sources"`
 	Sink     Sink     `json:"sink"`
+
+	// ArchiveOnly is written solely by the runtime's private restore
+	// admission. Public download requests cannot set it.
+	ArchiveOnly bool `json:"archive_only,omitempty"`
+	// ArchiveAdmission belongs to the runtime consumer of a private delivery.
+	// Download never uses it to select a source or a sink.
+	ArchiveAdmission json.RawMessage `json:"archive_admission,omitempty"`
 
 	// Request identifies this handoff to a delegate, and is the same string on
 	// every attempt at the same job.
@@ -223,6 +231,9 @@ func (s Spec) Validate() error { return s.ValidateFor("") }
 // needed because one relative path in the store — work/<id> — is reserved
 // against every job except the one it belongs to.
 func (s Spec) ValidateFor(owner string) error {
+	if s.ArchiveOnly || len(s.ArchiveAdmission) != 0 {
+		return errors.New("download: use the private archive restore admission")
+	}
 	if err := ValidateCredentialRoutes(s.Sources); err != nil {
 		return err
 	}
@@ -253,7 +264,7 @@ func (s Spec) ValidateFor(owner string) error {
 			return err
 		}
 	}
-	if s.Artifact.Digest != "" && !strings.HasPrefix(s.Artifact.Digest, "sha256:") {
+	if s.Artifact.Digest != "" && !strings.HasPrefix(s.Artifact.Digest, contentdigest.Prefix) {
 		return fmt.Errorf("download: digest %q is not sha256:<hex>", s.Artifact.Digest)
 	}
 	return nil
@@ -610,22 +621,7 @@ func Portable(p string) string {
 // it, deliberately. So a reader has to be liberal about a label it can infer,
 // while staying exact about the part that carries the meaning.
 func sameDigest(a, b string) bool {
-	return bareHex(a) != "" && bareHex(a) == bareHex(b)
-}
-
-func bareHex(d string) string {
-	s := strings.ToLower(strings.TrimSpace(d))
-	s = strings.TrimPrefix(s, "sha256:")
-	s = strings.TrimPrefix(s, "sha256-") // how Ollama names its blobs
-	if len(s) != 64 {
-		return ""
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return ""
-		}
-	}
-	return s
+	return contentdigest.Normalize(a) != "" && contentdigest.Normalize(a) == contentdigest.Normalize(b)
 }
 
 // NormalDigest is a digest reduced to the thing that carries the meaning.
@@ -638,8 +634,8 @@ func bareHex(d string) string {
 // An unrecognised digest returns empty rather than itself, so a comparison
 // cannot accidentally succeed on two things neither implementation understood.
 func NormalDigest(d string) string {
-	if h := bareHex(d); h != "" {
-		return "sha256:" + h
+	if h := contentdigest.Normalize(d); h != "" {
+		return contentdigest.Prefix + h
 	}
 	return ""
 }

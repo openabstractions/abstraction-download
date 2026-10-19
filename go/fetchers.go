@@ -11,6 +11,7 @@ import (
 	"time"
 
 	job "github.com/openabstractions/abstraction-job/go"
+	acceptance "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 )
 
 // reportWriter counts bytes on their way through and tells the runner. Counting
@@ -351,15 +352,15 @@ func (e *StatusError) Unwrap() error {
 func (e *StatusError) Cause() string {
 	switch {
 	case e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden || e.Code == http.StatusProxyAuthRequired:
-		return "unauthorized"
+		return string(acceptance.FailureCauseUnauthorized)
 	case e.Code == http.StatusNotFound || e.Code == http.StatusGone:
-		return "not_found"
+		return string(acceptance.FailureCauseNotFound)
 	case e.Code >= 500:
-		return "server_error"
+		return string(acceptance.FailureCauseServerError)
 	case e.refused:
-		return "refused"
+		return string(acceptance.FailureCauseRefused)
 	default:
-		return "other"
+		return string(acceptance.FailureCauseOther)
 	}
 }
 
@@ -401,6 +402,10 @@ func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK && hreq.Header.Get("If-Range") != "" {
+		return fmt.Errorf("%w: asked %s for bytes %d-%d under If-Range %s and got the whole file (200)",
+			ErrVersionChanged, req.Source.Locator, req.Range.Start, last, hreq.Header.Get("If-Range"))
+	}
 	if resp.StatusCode != http.StatusPartialContent {
 		if refused(resp.StatusCode) {
 			return answered(req.Source.Locator, resp)
@@ -413,6 +418,11 @@ func (h HTTP) FetchRange(ctx context.Context, req RangeRequest) error {
 	// could attribute. The server names what it sent; hold it to that.
 	if got := resp.Header.Get("Content-Range"); !namesRange(got, req.Range) {
 		return fmt.Errorf("download: asked for bytes %d-%d, server sent Content-Range %q", req.Range.Start, last, got)
+	}
+	if req.Observed != nil {
+		if err := req.Observed(StrongValidators(resp.Header)); err != nil {
+			return err
+		}
 	}
 	return copyRange(ctx, req, resp.Body)
 }

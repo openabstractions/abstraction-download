@@ -18,6 +18,14 @@ export interface Constraints {
   network: Network;
 }
 
+// JsonRecords maps each record name toJson and fromJson take to its type.
+export interface JsonRecords {
+  Constraints: Constraints;
+  Artifact: Artifact;
+  Source: Source;
+  Request: Request;
+}
+
 export type Network = (typeof Network)[keyof typeof Network];
 export declare const Network: Readonly<{ Any: "any"; Unmetered: "unmetered" }>;
 
@@ -83,6 +91,8 @@ export declare function encodeRequest(v: Request): Uint8Array;
 
 export declare function encodeSource(v: Source): Uint8Array;
 
+export declare const fromJson: <K extends keyof JsonRecords>(kind: K, data: Uint8Array) => JsonRecords[K];
+
 export declare const networkCostGuarantees: readonly ["abstraction.download/network-cost@1"];
 
 export declare function newArtifact(): Artifact;
@@ -94,6 +104,8 @@ export declare function newRequest(): Request;
 export declare function newSource(): Source;
 
 export declare const scopedCredentialGuarantees: readonly ["abstraction.download/credentials@2"];
+
+export declare const toJson: <K extends keyof JsonRecords>(kind: K, value: JsonRecords[K]) => Uint8Array;
 
 export declare const waitingExtensions: readonly ["abstraction.download/waiting@1"];
 

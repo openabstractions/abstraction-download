@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // This file is about one question: are the bytes a server is offering now the
@@ -24,14 +25,44 @@ import (
 // Validators identify the VERSION of an artifact a server served, so that a
 // later request can say which version its bytes on disk came from.
 //
-// Only strong validators are ever put in here; see StrongValidators.
+// Weak Last-Modified timestamps retain their spelling for a same-source
+// metadata upgrade; Weak keeps them out of If-Range and resume.
 type Validators struct {
 	// ETag is the entity tag exactly as the server wrote it, quotes included,
 	// and never a weak one.
 	ETag string `json:"etag,omitempty"`
 	// LastModified is the Last-Modified header, used only when there is no
-	// usable ETag.
+	// usable ETag. Weak says whether it is usable for If-Range.
 	LastModified string `json:"last_modified,omitempty"`
+	// Weak records that the source named its version only by a Last-Modified
+	// that was not strong [DL-V4]. Bytes taken under it cannot be tied to one
+	// version, so both resume paths restart from byte zero instead of
+	// continuing them with a bare Range: planResume on the single stream and
+	// resumable on the parallel path, through restartsWeak. Neither carries
+	// Weak onto the bytes it proves afterwards (carriedValidators).
+	Weak bool `json:"weak,omitempty"`
+	// Source names the source that issued these validators [DL-V2].
+	// A mirror of the same bytes carries its own
+	// ETag and Last-Modified, so the validators go as If-Range to that source
+	// only. Empty means every source, as a checkpoint written before this
+	// field says. It is never read from a response.
+	Source string `json:"source,omitempty"`
+}
+
+// Version is the validators without the source that issued them: what a
+// response names and what If-Range compares.
+func (v Validators) Version() Validators {
+	v.Source = ""
+	return v
+}
+
+// forSource applies the checkpoint's source scope at either request owner.
+// Older checkpoints without Source retain their documented all-source scope.
+func (v Validators) forSource(key string) Validators {
+	if v.Source != "" && v.Source != key {
+		return Validators{}
+	}
+	return v.Version()
 }
 
 // Empty reports that nothing here identifies a version.
@@ -45,6 +76,9 @@ func (v Validators) Empty() bool { return v.ETag == "" && v.LastModified == "" }
 // learns the file changed and must then spend a second round trip asking for it.
 // A failed If-Range is the new file, in the same response.
 func (v Validators) IfRange() string {
+	if v.Weak {
+		return ""
+	}
 	if v.ETag != "" {
 		return v.ETag
 	}
@@ -62,9 +96,13 @@ func (v Validators) IfRange() string {
 // having no validator at all, because no validator at least leaves the 200
 // path (and its restart) available.
 //
-// Last-Modified is used only when there is no usable ETag, and only when it
-// parses as an HTTP date, so a malformed header is not echoed back to a server
-// that would then have to guess what it meant.
+// Last-Modified is used only when there is no usable ETag, only when it is an
+// HTTP date, so a malformed header is not echoed back to a server that would
+// then have to guess what it meant, and only when it is strong. RFC 9110
+// section 8.8.2.2 makes it strong when the response's Date is at least one
+// second later. A file can change twice within the second it was stamped, and
+// both versions then carry the same Last-Modified: a weak one names two files,
+// and a resume on it splices them.
 func StrongValidators(h http.Header) Validators {
 	var v Validators
 	etag := strings.TrimSpace(h.Get("ETag"))
@@ -73,11 +111,32 @@ func StrongValidators(h http.Header) Validators {
 	}
 	if v.ETag == "" {
 		lm := strings.TrimSpace(h.Get("Last-Modified"))
-		if httpDate(lm) {
+		if strongLastModified(lm, strings.TrimSpace(h.Get("Date"))) {
 			v.LastModified = lm
+		} else if httpDate(lm) {
+			v.LastModified = lm
+			v.Weak = true
 		}
 	}
 	return v
+}
+
+// strongLastModified reports whether lm is an HTTP date at least one second
+// before date, the response's own Date. Both are read as times only for that
+// comparison; lm is still echoed back verbatim.
+func strongLastModified(lm, date string) bool {
+	if !httpDate(lm) || !httpDate(date) {
+		return false
+	}
+	modified, err := http.ParseTime(lm)
+	if err != nil {
+		return false
+	}
+	served, err := http.ParseTime(date)
+	if err != nil {
+		return false
+	}
+	return !modified.After(served.Add(-time.Second))
 }
 
 // httpDate reports whether s is one of the three spellings of an HTTP-date RFC

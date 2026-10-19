@@ -51,6 +51,7 @@ func TestLiveRecordFreshness(t *testing.T) {
 	if root == "" {
 		t.Skip("set ABSTRACTION_NAS_STORE to the shared store")
 	}
+	skipIfShareRefused(t, root)
 	host := os.Getenv("ABSTRACTION_NAS_SSH")
 	if host == "" {
 		t.Skip("set ABSTRACTION_NAS_SSH=admin@host to let this test write from the other side")

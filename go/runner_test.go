@@ -41,6 +41,79 @@ func newRunner(t *testing.T) (*Runner, job.Store, string) {
 	return r, store, root
 }
 
+func TestManagedDownloadChecksRemainingBytesBeforeWriting(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(fmt.Sprint(refused), func(t *testing.T) {
+			r, store, root := newRunner(t)
+			content, digest := payload(t, 4096)
+			server := rangeServer(t, content)
+			id := job.NewID()
+			_, err := submitAs(store, id, Spec{
+				Artifact: Artifact{Digest: digest, Size: int64(len(content))},
+				Sources:  []Source{{Scheme: "https", Locator: server.URL}},
+				Sink:     Sink{Partial: "work/" + id, Final: "results/" + id},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			partial := partialOf(t, store, id)
+			const prefix = 1024
+			if err := os.MkdirAll(filepath.Dir(partial), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(partial, content[:prefix], 0600); err != nil {
+				t.Fatal(err)
+			}
+			stageDeadOwner(t, store, id, prefix, prefix)
+			checks := 0
+			r.CheckWriteSpace = func(folder string, additional int64) error {
+				checks++
+				if folder != filepath.Join(root, "work") || additional != int64(len(content)-prefix) {
+					t.Fatalf("reserve check for %s: %d additional bytes", folder, additional)
+				}
+				if refused {
+					return Terminal(ErrRefused)
+				}
+				return nil
+			}
+			err = r.Run(t.Context(), id)
+			if checks != 1 || refused != errors.Is(err, ErrRefused) || !refused && err != nil {
+				t.Fatal(checks, err)
+			}
+			if refused {
+				if current, err := os.ReadFile(partial); err != nil || string(current) != string(content[:prefix]) {
+					t.Fatal("reserve refusal changed the partial", err)
+				}
+			} else if result, err := os.ReadFile(finalOf(t, store, id)); err != nil || string(result) != string(content) {
+				t.Fatal("allowed download did not publish", err)
+			}
+		})
+	}
+}
+
+func TestManagedDownloadStreamNeverWritesPastKnownSize(t *testing.T) {
+	r, store, _ := newRunner(t)
+	content, _ := payload(t, 8192)
+	server := rangeServer(t, content)
+	id := job.NewID()
+	const size = 4096
+	_, err := submitAs(store, id, Spec{
+		Artifact: Artifact{Size: size},
+		Sources:  []Source{{Scheme: "https", Locator: server.URL}},
+		Sink:     Sink{Partial: "work/" + id, Final: "results/" + id},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.CheckWriteSpace = func(string, int64) error { return nil }
+	if err := r.Run(t.Context(), id); !errors.Is(err, ErrOversize) {
+		t.Fatal("expected a size refusal", err)
+	}
+	if info, err := os.Stat(partialOf(t, store, id)); !errors.Is(err, os.ErrNotExist) && (err != nil || info.Size() > size) {
+		t.Fatal("oversize source wrote past the known limit", info, err)
+	}
+}
+
 func submit(t *testing.T, store job.Store, root, digest string, size int64, sources ...Source) string {
 	t.Helper()
 	id, err := Submit(store, Spec{

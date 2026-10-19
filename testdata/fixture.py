@@ -46,6 +46,11 @@ MODIFIED = "Mon, 07 Nov 1994 08:49:37 GMT"
 # one that cannot, and nothing else in a transcript tells the two apart.
 OBSOLETE = "Sunday, 06-Nov-94 08:49:37 GMT"
 
+# The Date every response carries, fixed so a transcript never depends on the
+# clock, and a day after both dates above so each is a strong validator under
+# RFC 9110 section 8.8.2.2 [DL-V4].
+SERVED = "Tue, 08 Nov 1994 08:49:37 GMT"
+
 # The token the `gated` behaviour admits. A driver holds it under the credential
 # name a scenario gives, so what arrives on this wire is what the runner chose
 # to send — the whole question the deputy scenarios ask.
@@ -91,7 +96,7 @@ class Wire(socketserver.StreamRequestHandler):
         head = "HTTP/1.1 %d %s\r\n" % (status, REASON.get(status, "Status"))
         if length is not None:
             head += "Content-Length: %d\r\n" % length
-        head += "Accept-Ranges: bytes\r\nConnection: close\r\n"
+        head += "Accept-Ranges: bytes\r\nConnection: close\r\nDate: %s\r\n" % SERVED
         for name, value in headers.items():
             head += "%s: %s\r\n" % (name, value)
         self.wfile.write(head.encode("latin-1") + b"\r\n" + body)

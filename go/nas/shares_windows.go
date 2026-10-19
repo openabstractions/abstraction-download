@@ -6,6 +6,8 @@ import (
 	"net"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // shares asks Windows what a host serves, through the API rather than through
@@ -35,7 +37,7 @@ const (
 )
 
 var (
-	netapi32       = syscall.NewLazyDLL("netapi32.dll")
+	netapi32       = windows.NewLazySystemDLL("netapi32.dll")
 	netShareEnum   = netapi32.NewProc("NetShareEnum")
 	netBufferFree  = netapi32.NewProc("NetApiBufferFree")
 	preferredBytes = uint32(64 << 10)

@@ -1,5 +1,12 @@
 # abstraction.download contract
 
+Remote profile: the current service methods retain `local` (explicit or
+default); the general paired listener does not offer this capability. Retained
+capability-specific delegation keeps its existing contract and is separate
+from that listener. Held by: `idl/gen/service_test.go`
+(`TestDispatcherTableCarriesRemoteProfile`) and `serve/runtime_remote_test.go`
+(`TestRemoteRuntimeDescribeUsesLiveGrantAndExplicitServices`).
+
 Binds: `request.thrift`
 
 `request.thrift` defines the download request: the job specification an
@@ -20,6 +27,8 @@ resumes from what was proven and delivers the file. The record itself is
 one example that runs. That page cites rules by their ids and defines none.
 
 ## Reading this page
+
+The conventions every OA contract carries are stated once in [CONVENTIONS.md](https://github.com/openabstractions/abstractions/blob/main/idl/CONVENTIONS.md); a rule here that applies one cites its `CONV-` id.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
 "SHOULD NOT", "RECOMMENDED", "MAY" and "OPTIONAL" in this page are to be
@@ -243,7 +252,7 @@ transfer stops. The next owner MUST ask only for the rest of that range, and
 so MUST a fallback source in the same run. Go only; held by
 `go/serve/range_resume_test.go`.
 
-**[DL-R35] A stopped job is adopted within its lease.** An attempt MUST clear
+**[DL-R35] A stopped job is adopted within its [lease](https://openabstractions.github.io/reference.html#concept-job.lease).** An attempt MUST clear
 the failure an earlier attempt recorded when it starts and MUST record its
 own failure if it fails. Retry backoff (`abstraction-job/CONTRACT.md`
 JOB-B2) MUST follow only a failed last attempt. A runtime that stops
@@ -270,7 +279,7 @@ byte zero. The download service's execution profile
 `download-http-request-v1` ends a digest mismatch (DL-E17), and only one over
 bytes fetched from zero.
 
-**[DL-R41] Progress carries a total when one is known.** A declared artifact
+**[DL-R41] [Progress](https://openabstractions.github.io/reference.html#concept-job.progress) carries a total when one is known.** A declared artifact
 size MUST be the record's `progress.total` before any byte moves. Without a
 declared size, the first response that discloses a length MUST set it, and
 delivery MUST set it to the delivered size.
@@ -305,38 +314,164 @@ whose destination that file was does not matter: a caller's earlier one, or
 a delegate's own `files/`, which the submitter cannot see and the record
 cannot name. See [`already-here`](testdata/scenarios/already-here.txt).
 
+**[DL-R44] The download archive is checked before the sources.** A service
+runner configured with the person's download archive, a folder the person
+names in the Panel and often a NAS share, MUST look there before it opens
+any source of a job whose digest is a SHA-256 and that has proven no byte.
+Any app whose download job the service admits gets this, with no further
+right. The runner looks for the file under its content name `sha256/<hex>`,
+then under the names a stored listing of the folder records by SHA-256, by
+the hex in the name and by the job's size. With no candidate, a folder that
+answers and a listing older than ten minutes, it lists the folder again
+first, within the walk's bounds of 30 seconds and 50,000 entries. It copies
+a candidate into the job's own partial file, hashing every byte, and the
+app sees the bytes only after the SHA-256 of the whole copy equals the
+digest. A content-name entry whose bytes or size differ is renamed to
+`sha256/.bad/<hex>` with one log line; another candidate that differs,
+stalls or is reached through a link is skipped with one log line. After two
+such copies the job goes to its sources. A folder that does not answer
+costs one probe of at most three seconds, bounded also by the caller's
+deadline, and is not asked again for a minute.
+
+After the sources deliver and verify a file of 50 MB or more, the runner
+queues it, and a background copy in the runtime writes it to
+`sha256/<hex>.partial` and renames it to `sha256/<hex>`. It skips the copy
+with one log line when the archive volume's free space after it would fall
+below the smaller of 10% of the volume and 50 GB, when the person turned
+Keep a copy of new downloads here off, or when the listing records that
+SHA-256 under another name. Every archive path is built from the person's
+folder and a validated lowercase 64-hex digest. No result, progress,
+receipt or error an app sees names the archive folder or a credential; the
+runtime opens the share with the person's own logon. The local queue keeps
+at most 32 GB, the archive has no per-app quota, and the runtime never
+evicts from it. The runtime counts the bytes it wrote for each app in its
+own state. The archive is never served in place, and it never fails a job.
+
+Architect ruling of 2026-11-11, as given:
+
+> Read and write go through any app's download job with no new right, a
+> 50 MB floor for copies and a free-space reserve on the NAS.
+>
+> 1. Read: accepted as is. The membership probe equals DL-R28's local one.
+>    Conditions:
+>    - The runtime verifies the bytes against the app's digest before the
+>      app sees any of them.
+>    - On a mismatch it falls back to the internet, renames the bad archive
+>      entry to `sha256\.bad\<hash>`, and writes a log line. OA repairs its
+>      own folder.
+>    - If the NAS is unreachable, it falls back to the internet within the
+>      caller-derived timeout.
+>
+> 2. Copy-into-archive: any app whose job the download service already
+>    admits. Third-party apps get what our own adopters get. Content
+>    addressing makes write poisoning impossible, since a file under
+>    `sha256\<H>` hashes to H, and every reader verifies its own digest
+>    anyway. Conditions:
+>    - Copy only after the internet download is verified.
+>    - Copy only files of 50 MB or more. The archive holds models, per the
+>      owner rule.
+>    - The runtime does the copy with the NAS credential. The app never gets
+>      the NAS path or credential.
+>    - Write to a temporary name in the archive, then rename.
+>    - Build the path only from a validated lowercase 64-hex digest. No
+>      app-supplied path parts.
+>
+> 3. Caps: a free-space reserve, with no per-app quota.
+>    - Skip the copy when the NAS volume's free space after it would fall
+>      below the smaller of 10% of the volume and 50 GB.
+>    - Keep the 32 GB local copy queue.
+>    - Never evict from the archive automatically.
+>    - A skipped copy writes one log line.
+>    - The Panel's storage page shows the archive size and the per-app
+>      bytes written, read from the log or index.
+>
+> 4. Security review: rides the single R30 pass. Checklist:
+>    - verification before hand-off;
+>    - digest format validation and path build;
+>    - no NAS credential or path in any app-visible result or error;
+>    - temporary-then-rename on both sides;
+>    - the fallback when the NAS is unreachable or an entry mismatches.
+
+
 ## Versions
 
 **[DL-V1] A resumed request names the version it continues.** A bare
 `Range` names no file. A source that replaced the artifact answers honestly
 with a valid range of something else, and the splice has exactly the right
 length and the wrong contents. A ranged request MUST therefore name the
-version its proven bytes came from.
+version its proven bytes came from. A validator is scoped to the source that
+issued it: a mirror serving the same bytes names them with its own `ETag`
+and `Last-Modified`.
 
 **[DL-V2] The validator travels as `If-Range`.** The checkpoint MUST carry
-the strong validator the proven bytes came from, and every ranged request
-MUST send it as `If-Range`. The source answers `206` for the same file and
-`200`, the whole new one, for a different one, which DL-R5 and DL-R6
-already handle.
+the strong validator the proven bytes came from, and every ranged request to
+the source that issued it MUST send it as `If-Range`. The source answers
+`206` for the same file and `200`, the whole new one, for a different one,
+which DL-R5 and DL-R6 already handle. Single-stream and parallel requests
+both apply the issuing source's scope. A job with several sources follows
+these rules on its parallel run:
+
+- The checkpoint MUST record the issuing source as `validators.source`.
+- A range asked of another source MUST go without the recorded validator.
+  The artifact digest guards that range's bytes when the job has one.
+- Within one run, each other source MUST be held to the first validators
+  it named: they go with its later ranges as `If-Range`, and a range it
+  serves under another version is a version change.
+- A version change reported by any source MUST end the run, and the
+  runner MUST restart it from byte zero once, after clearing the
+  checkpoint. The range MUST NOT fail over to the next source. On a job
+  without a digest, this restart keeps two versions out of one file.
+
+`validators.source` is the source's `locator` exactly as the job's
+`sources` list spells it, scheme included, for example
+`"https://host/path"`, and it is compared with each locator byte for byte.
+A checkpoint without it sends its validators to every source, as every
+checkpoint written before the field did. The single stream records the
+issuing source and sends its validators only to that source. A source naming
+another version answers `200` and restarts it from byte zero (DL-R6).
+File and SMB sources name no validators. A resume holds only the recorded
+source to a version; every other
+source starts afresh. See `TestAMirrorWithItsOwnValidatorsCompletesTheRun`,
+`TestAResumeSendsAValidatorOnlyToTheSourceThatNamedIt`,
+`TestAnOwnersVersionChangeRestartsTheRunFromZero` and
+`TestAMirrorReplacedMidRunAfterTheOwnerWentDownRestarts`.
 
 **[DL-V3] Only a strong validator is kept.** A weak `ETag` MUST NOT be kept.
 It asserts semantic equivalence, and a resume depends on byte equality.
 
 **[DL-V4] `Last-Modified` stands in for a missing `ETag`.** The runner MUST
-use `Last-Modified` when there is no usable `ETag`.
+use `Last-Modified` when there is no usable `ETag`, and only when it is
+strong: the response carries a `Date` at least one second later (RFC 9110
+section 8.8.2.2). Two versions written within one second share a
+`Last-Modified`. A source whose only validator is a `Last-Modified` that is
+not strong is recorded as weak, retaining its timestamp for comparison, and
+the runner MUST restart such a resume
+from byte zero, because neither a bare `Range` nor `If-Range` on that value
+can tell the two versions apart. A weak timestamp MUST NOT travel as
+`If-Range`. Within a run, the same source strengthening the same timestamp
+upgrades its held metadata; a different timestamp or validator remains a
+version change. An older weak record without a timestamp cannot prove this
+upgrade. See `TestAWeakLastModifiedBecomesStrongWithoutRestart`,
+`TestWeakValidatorUpgradeRequiresSameSourceAndVersion`,
+`TestSingleStreamScopesValidatorsToTheirSource`,
+`TestAWeakLastModifiedResumeNeverSplices`,
+`TestAWeakLastModifiedParallelResumeNeverSplices` and
+`TestAWeakRestartParallelProgressSurvivesInterruption`.
 
 **[DL-V5] Three date spellings are recognised, by shape.** The accepted
 `Last-Modified` spellings MUST be the three RFC 9110 requires a recipient to
 accept: IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`, the only one a sender
 may use, and the two obsolete forms `Sunday, 06-Nov-94 08:49:37 GMT` and
 `Sun Nov  6 08:49:37 1994`. Recognition MUST be a shape check, and no time
-is parsed out of the value. The value is echoed back verbatim and an origin
-server evaluates `If-Range` by exact match, so the only question is which
-spellings are recognised. Each language's standard library disagrees about
-what an HTTP date is: Go's grammar excludes a three-letter zone the obsolete
-forms carry, Python parses RFC 2822 with numeric zones, C++ reads
-IMF-fixdate alone. A validator one implementation records and another drops
-is a resume that cannot name its version. See
+is parsed out of the value except for the DL-V4 comparison with `Date`. The
+value is echoed back verbatim and an origin server evaluates `If-Range` by
+exact match, so the only question is which spellings are recognised. Each
+standard library disagrees about what an HTTP date is: Go's grammar excludes
+a three-letter zone the obsolete forms carry, and Python's `email.utils`
+parses RFC 2822 with numeric zones. A validator one implementation records
+and another drops is a resume that cannot name its version. Go is the one
+implementation since 2026-09-17 (`docs/REMOVED.md` entry 10); the rule holds
+any second one to the same shapes. See
 [`wire-version-changed`](testdata/scenarios/wire-version-changed.txt),
 [`wire-version-modified`](testdata/scenarios/wire-version-modified.txt) and
 [`wire-obsolete-date`](testdata/scenarios/wire-obsolete-date.txt).
@@ -428,8 +563,11 @@ partial. Abandoning a job removes its partial. A caller-named destination
 belongs to the user and carries no class of this runtime's. The classes are
 `abstraction-storage/CONTRACT.md` STO-T1, and STO-T2 asks every module to
 state the class of each kind it keeps (`research/storage-classes/DECISION.md`
-§3, §8, D6; `research/storage-classes/REVIEW.md` finding 2). Collection is
-[Not built](#not-built).
+§3, §8, D6; `research/storage-classes/REVIEW.md` finding 2). The explicit
+service-owned collection pass adds the declared result retention and configured
+temporary grace, retains aliased or unobserved link counts, and excludes migrated
+and delegated destinations. Runtime scheduling remains off in 0.8.0; activation
+requires the separate installed/data-loss acceptance.
 
 The runtime's `download-provider.json` is provider-binding `data`: it retains
 the selected backend and canonical NAS root beside the managed job store.
@@ -438,7 +576,7 @@ is refused at startup so existing accepted jobs keep their provider. The NAS
 share is owned by its serving runtime and carries no storage class of this
 requesting runtime.
 
-## Intent
+## [Intent](https://openabstractions.github.io/reference.html#concept-job.intent)
 
 **[DL-R25] What somebody asked for is honoured.** The runner MUST check the
 job's `intent` (`abstraction-job/CONTRACT.md`) before any byte moves, on
@@ -496,7 +634,10 @@ ask its selected applier with consumer
 `abstraction.download/http-execution@1`, MUST send the returned headers
 once, and MUST keep them out of the record. An applier refusal MUST end the
 attempt *no*, with message `credential:<outcome>:<name>` and cause
-`credential`. An applier that cannot answer MUST leave the attempt *not
+`credential`. The applier MUST decide each execution-time use without
+raising a first-use question (abstraction-rights RIGHTS-R23); DL-K1
+admission asks. A rule removed after admission refuses `not_permitted`,
+which ends the attempt as above. An applier that cannot answer MUST leave the attempt *not
 now*, with the same cause and the outcome `unavailable`. A service with no
 applier MUST answer every such request `unavailable`. The environment
 reader `EnvCredentials` is the library's own bridge and MUST NOT be
@@ -605,7 +746,9 @@ records no failure. Observation reports the word beside the job's state.
 **[DL-N6] Waiting belongs to the accepted attempt.** The caller exiting
 MUST leave the attempt waiting. `CancelWork` while waiting MUST end it
 `cancelled` with no source opened. A waiting attempt MUST hold no lease and
-no awake lease; a moving one holds both.
+no awake lease. A moving one holds its execution lease and requests wake under
+the authenticated job owner's existing rule. The Resource Book owns that wake
+lease; an absent or refused owner never becomes the runner's own wake grant.
 
 **[DL-N7] Constraints are evaluated where the bytes move.** A delegated or
 remote submission MUST carry `constraints` unchanged; the remote executor
@@ -1131,7 +1274,11 @@ three languages on one host lost none of 1800. The job module's own page
 states the consequence, that a record written from two hosts needs a
 protocol that store does not have, and this channel is that case. How often
 it bites here, where the two sides write at different moments in a job's
-life, is unmeasured.
+life, is unmeasured. Since 0.8.0 the Go `job` file store refuses a root on a
+share when it opens (`abstraction-cas` `CONTRACT.md` CAS-L2), so `nas.New`
+and `Check` refuse such a store with that reason, and a runtime configured
+with one stops at start and pins no provider. The channel waits for a
+requester that reaches the far runner through a service.
 
 Obligations the implementation places on a delegate that no id states yet
 are listed under [Not built](#not-built).
@@ -1163,10 +1310,9 @@ this project exists for.
 implementation MUST attach the class to each error where that error is
 defined and MUST NOT keep a list. A list is a second place to update, and
 two lists in two languages disagreed by a row for as long as both existed.
-Go marks a sentinel by constructing it with `forever`; Python derives the
-class from `Permanent`; a further implementation uses whatever its language
-already has for "this error is one of these": an enum tag, a marker trait,
-a field.
+Go marks a sentinel by constructing it with `forever`; a further
+implementation uses whatever its language already has for "this error is
+one of these": an enum tag, a marker trait, a field.
 
 **[DL-E4] What is *no*.** The following MUST be *no*: the source refused;
 nothing registered can serve the job's sources; the destination escapes
@@ -1248,9 +1394,8 @@ names it like any other name its implementation writes.
 
 **[DL-E17] A typed cause rides under its own key.**
 `extensions["abstraction.download/failure@2"]` carries the failure@1 shape
-plus `cause`, one of `digest_mismatch`, `oversize`, `short_transfer`,
-`unauthorized`, `not_found`, `refused`, `server_error`, `transport`,
-`credential` or `other`. `credential` is a named credential the service
+plus `cause`, a member of abstraction.job `FailureCause` other than
+`result_lost`. `credential` is a named credential the service
 could not apply, and the error carries `credential:<outcome>:<name>` with the
 applier's outcome. An empty cause is unreported. Only a runner whose owner
 opts in MUST write failure@2, always beside failure@1 in the same write, and
@@ -1283,18 +1428,17 @@ record with the host spelled plainly runs here unchanged.
 Where a locator's host decides something (whether a credential may be
 attached, DL-R29; whether a host is reachable, DL-E8), the host MUST be the
 one the transport will open, read by the parser the transport itself uses:
-`net/url` in Go, `urllib.parse` in Python, and `WinHttpCrackUrl` in C++, the
-call whose result is handed to `WinHttpConnect`. It is folded to lower case
+`net/url` in Go, the one implementation. It is folded to lower case
 per RFC 3986 §3.2.2 and §6.2.2.1 and compared with the port and the brackets
 of an IPv6 literal removed. A host is merged where a locator is split
 (DL-S24), for the opposite reason: merging two spellings of one host can
 only make a refusal list match more often and bind a credential to the
 origin it was already going to, and splitting one host into two is what
 lets a refusal be walked around. No IDNA table is carried, and an
-internationalised name is refused: Go's transport applies IDNA and dials
-the A-label, WinHTTP applies its own, `urllib` raises `UnicodeEncodeError`
-before it reaches a socket, and the only table that could reconcile them is
-a copy of Unicode that would go stale inside a shipped binary. An adopter
+internationalised name is refused: transports disagree on IDNA (Go's
+applies it and dials the A-label), and the only table that could reconcile
+them is a copy of Unicode that would go stale inside a shipped binary
+([HISTORY.md](HISTORY.md#dl-e15) keeps the full account). An adopter
 names the host in punycode; `xn--n3h.example` is accepted and was measured
 identical to its dialled form. One authority is still read by hand,
 `\\server\share`: it is no URI, and no URI parser accepts one.
@@ -1378,24 +1522,16 @@ Implementations and what each claims:
 
 | implementation | shape | schemes | resume | survives process exit | status |
 |---|---|---|---|---|---|
-| `HTTP` | Fetcher | `http`, `https` | yes, `Range` | **no** | working |
-| `File` | Fetcher | `file`, `smb` | yes, seek | **no** | working |
-| `bits` | Delegator | `http`, `https`, `smb` | yes | **yes** | working, 12 tests against real BITS |
-| `nas` | Delegator | `http`, `https` | **no**: declines `resume`; the far side resumes its own partials | **yes** | working, verified against a Synology |
+| `HTTP` | Fetcher | `http`, `https` | yes, `Range` | **no** | working; the runtime runs it |
+| `File` | Fetcher | `file`, `smb` | yes, seek | **no** | in the Go package; the runtime does not run it |
+| `bits` | Delegator | `http`, `https`, `smb` | yes | **yes** | in the Go package, 12 tests against real BITS; the runtime does not run it |
+| `nas` | Delegator | `http`, `https` | **no**: declines `resume`; the far side resumes its own partials | **yes** | the runtime runs it over a store on its own host's volume; a share root is refused (CAS-L2, `docs/REMOVED.md` entry 14), and the Synology verification predates that refusal |
 
 A caller asks for bytes, and the runner offers the job to whatever is
 registered and capable (DL-R24, DL-R33); registration comes from
 configuration. A NAS outranks BITS because it is always on; BITS outranks
 in-process because it survives this process exiting. No argument anywhere
 names a hop; see [`addon-synology`](https://github.com/openabstractions/addon-synology).
-
-C++ has no URL parser in its standard library. On Windows, `WinHttpCrackUrl`
-is the transport's parser and answers DL-E15. On every other platform
-`https_available()` is false, no fetcher opens a socket, and the authority
-is read by RFC 3986 §3.2's delimiters in `offline_authority`, held to the
-other implementations by the shared corpus. That is the weaker guarantee
-and the reason DL-E15 is a refusal and not a normalisation. The day a
-fetcher lands on that platform, its parser answers instead.
 
 ## Divergences
 
@@ -1451,21 +1587,39 @@ fetcher lands on that platform, its parser answers instead.
 
 ## Not built
 
-- **DL-R37's collection.** The runtime places no `tmp/` directory, and no
-  collector removes a result document or an abandoned partial past
-  `tmp_max_retention` (`research/storage-classes/DECISION.md` §4, §8). A
-  result document is kept at least `result_retention_ms` and nothing
-  collects it afterwards; a partial lives at `work/<id>` in the job store,
-  or beside an absolute final, until its job ends or is abandoned.
+- **The remote form.** An application reaching this service on another
+  machine's runtime has no binding; the delegate channel between runtimes is
+  no application-facing service. When it is built, a remote receiver MUST
+  refuse every request that needs a person with the outcome `forbidden`
+  (the submission refusal of DL-K1) and the reason "no person reachable on
+  this runtime", until remote questions exist. A forwarded
+  caller is the forwarding runtime's certificate subject; the agent behind
+  it is an unverified label.
+
+- **DL-R37's runtime activation and placement.** The explicit pass exists
+  behind the existing Job journal owner, with no scheduled pass in 0.8.0.
+  Activation is a separate 0.9.0 change after installed/data-loss acceptance.
+  The runtime still places no `tmp/` directory and has no low-space trigger
+  (`research/storage-classes/DECISION.md` §4, §8). Caller-named destinations,
+  migrated work and delegated/NAS storage remain outside this collector.
 - **The destination at the wire.** Prose says destination; the spec
   document, the Go type `Sink` and the refusal texts keep `sink` until the
   release [Reading this page](#reading-this-page)'s table names.
   `request.thrift` carries no destination field today: the service owns
   result allocation (DL-R36).
-- **DL-E9 in every command.** `modelget` speaks the exit status table as of
-  2026-09-08. `dlc` still exits `1` for every non-delivered answer; its `3`
-  for `list` and `watch` is already right. `jobd` and `jobctl` spoke it until
-  they were removed in 0.1.8, and `dl` never distinguished `1` from `3`.
+- **DL-E9 in every command.** `openabstractions download` exits with the
+  runtime's job codes (`serve/jobs.go`): `1` no runtime resolved or a
+  transport failure, `3` refused, `4` unavailable, `5` ended failed or
+  cancelled, `6` unknown, `7` still waiting. DL-E9 has `1` for *not now*
+  and `4` for *unknown*, and DL-E10 requires its numbers. This is a code
+  defect held open by the runtime's `RUN-E2` (`serve/CONTRACT.md`): CQ-6
+  writes one exit-code table for the binary, and this table and the
+  command's codes converge on it (TODO, W0-03 repair rows). `modelget`
+  speaks DL-E9's table as of 2026-09-08. The example `dlc`
+  (`abstraction-download-over-curl/example/dlc.cpp`) still exits `1` for
+  every non-delivered answer; its `3` for `list` and `watch` is already
+  right. `jobd` and `jobctl` spoke the table until they were removed in
+  0.1.8, and `dl`, removed with them, never distinguished `1` from `3`.
 - **Delegate obligations no id states yet.** The implementation places these
   on a delegate, and a second implementer meets them here:
   - The delegate is a `job` file store implementation at the same root,

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/openabstractions/abstraction-download/go/powershell"
+	"github.com/openabstractions/abstraction-facade/go-core/powershell"
 )
 
 // TestLoaderReadsEveryCharacterBack runs scripts through loader itself, the
