@@ -20,5 +20,5 @@ state A
 
 # expect 6: ok state=transferred ... [DL-V1]
 # expect 6: done=64 err=none ...
-# expect 6: cp={"verified_prefix":64,"validators":{"etag":"\"v2\""}} ... [DL-V2]
+# expect 6: cp={"verified_prefix":64,"validators":{"etag":"\"v2\"","source":"@FIXTURE@/etag/64"}} ... [DL-V2]
 # expect 7: ok -

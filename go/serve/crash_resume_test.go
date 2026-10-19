@@ -346,7 +346,9 @@ func TestHTTPExecutionLostResultPermitsNextAttempt(t *testing.T) {
 	if !bytes.Equal(readAll(t, p, retry), body) {
 		t.Fatal("retry result differs")
 	}
-	if log := source.log(); len(log) != 2 || strings.Join(log, "") != "" {
+	// The retry copies the bytes that reappeared under the lost operation's
+	// record, which the store proved by digest, and opens no source [DL-R28].
+	if log := source.log(); len(log) != 1 || strings.Join(log, "") != "" {
 		t.Fatalf("source requests %q", log)
 	}
 }

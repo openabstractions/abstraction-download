@@ -28,14 +28,32 @@ var ErrNoTrustStore = errors.New("download: no TLS trust store on this machine")
 // Authorization, Cookie and WWW-Authenticate there, and a credential applied as
 // another header must not follow the source to a host it was not applied for.
 // A request carrying a credential applies it again for every redirect host,
-// same host included, and the credential's own hosts decide [DL-K2].
+// same origin only, and the credential's own hosts decide [DL-K2]. A
+// credentialed request goes only over https, and a redirect to any other
+// origin, an http hop included, goes without the credential [DL-K5].
 func (h HTTP) do(hreq *http.Request, reach Reach, supplied map[string]string) (*http.Response, error) {
+	// A runner with an egress policy checks the scheme of the source and of
+	// every redirect hop [DL-G1, DL-G3], and its names at every hop of a
+	// request sent without a Reach of its own, such as a range probe [DL-G6].
+	egress, guarded := egressOf(hreq.Context())
+	if reach == nil && guarded {
+		reach = egress.egress.Name
+	}
 	if err := reach.checkURL(hreq.URL); err != nil {
 		return nil, err
 	}
+	if guarded {
+		if err := egress.egress.SchemeAllowed(hreq.URL, egress.digestBound); err != nil {
+			return nil, err
+		}
+	}
 	hop := credentialHops(hreq.Context())
 	var credentialNames []string
+	bound := origin(hreq.URL)
 	if hop != nil {
+		if !CredentialTransport(hreq.URL) {
+			return nil, CredentialRefusal(hop.name, OutcomeInsecureTransport)
+		}
 		if hop.refreshInitial != nil && hop.initialSent {
 			for _, name := range hop.applied {
 				hreq.Header.Del(name)
@@ -59,6 +77,11 @@ func (h HTTP) do(hreq *http.Request, reach Reach, supplied map[string]string) (*
 		if err := reach.checkURL(to.URL); err != nil {
 			return err
 		}
+		if guarded && len(via) > 0 {
+			if err := egress.egress.redirectAllowed(via[len(via)-1].URL, to.URL, egress.digestBound); err != nil {
+				return err
+			}
+		}
 		if len(via) > 0 && !sameOrSubdomain(to.URL.Hostname(), via[0].URL.Hostname()) {
 			for name := range supplied {
 				to.Header.Del(name)
@@ -68,13 +91,19 @@ func (h HTTP) do(hreq *http.Request, reach Reach, supplied map[string]string) (*
 			for _, name := range credentialNames {
 				to.Header.Del(name)
 			}
-			applied, err := hop.apply(to.URL.Hostname())
-			if err != nil {
-				return err
-			}
-			for name, value := range applied {
-				to.Header.Set(name, value)
-				credentialNames = append(credentialNames, name)
+			credentialNames = nil
+			// A hop to another origin goes without the credential, as curl
+			// without --location-trusted and browsers drop Authorization; an
+			// http hop is another origin [DL-K5].
+			if CredentialTransport(to.URL) && origin(to.URL) == bound {
+				applied, err := hop.apply(to.URL.Hostname())
+				if err != nil {
+					return err
+				}
+				for name, value := range applied {
+					to.Header.Set(name, value)
+					credentialNames = append(credentialNames, name)
+				}
 			}
 		}
 		if next != nil {

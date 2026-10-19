@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	download "github.com/openabstractions/abstraction-download/go"
+	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
 )
 
 func TestHTTPPreparationOwnsDestinations(t *testing.T) {
@@ -72,7 +73,23 @@ func TestHTTPPreparationNamesInputRefusalAndKeepsNamedCredentials(t *testing.T) 
 			}
 		})
 	}
-	for _, scheme := range []string{"http", "https"} {
+	// A named credential over http is refused at admission before the
+	// applier is asked [DL-K5]; preparation still reads it, so recovery of
+	// an accepted record ends at execution with the same outcome.
+	t.Run("named-http-refused", func(t *testing.T) {
+		applier := &switchApplier{check: "applied"}
+		e := HTTPExecution{Credentials: applier}
+		// The digest satisfies the egress scheme rule, leaving the credential's.
+		raw, _ := json.Marshal(map[string]any{"artifact": map[string]any{"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}, "sources": []map[string]string{{"scheme": "http", "locator": "http://example.com/input", "credential": "fixture-name"}}})
+		outcome, reason := e.CheckAdmission("fixture-scope", download.Kind, raw, []string{CredentialGuarantee})
+		if outcome != api.AcceptanceOutcomeInvalid || reason != "credential:insecure_transport:fixture-name" {
+			t.Fatalf("http credential admitted: %v %q", outcome, reason)
+		}
+		if len(applier.checked) != 0 {
+			t.Fatal("the applier was asked about an http source")
+		}
+	})
+	for _, scheme := range []string{"https"} {
 		t.Run("named-"+scheme, func(t *testing.T) {
 			applier := &switchApplier{check: "applied"}
 			e := HTTPExecution{Credentials: applier}

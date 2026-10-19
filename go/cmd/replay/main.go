@@ -37,7 +37,6 @@ import (
 	dl "github.com/openabstractions/abstraction-download/go"
 	job "github.com/openabstractions/abstraction-job/go"
 	wire "github.com/openabstractions/abstraction-job/go/rec"
-	"github.com/openabstractions/abstraction-resource/go/wake"
 	watch "github.com/openabstractions/abstraction-watch/go"
 )
 
@@ -52,12 +51,7 @@ type replay struct {
 	// window's file holds, held in memory so a driver never reads the machine.
 	refused map[string]string
 	out     *bufio.Writer
-}
-
-type resourceWakeHolder struct{}
-
-func (resourceWakeHolder) Hold(who, why string) (job.Held, error) {
-	return (wake.Holder{}).Hold(who, why)
+	secure  *secureFixture
 }
 
 // fixture is where abstraction-download/testdata/fixture.py is listening, or "" when the
@@ -79,7 +73,7 @@ func capabilities() string {
 // that observe a hold are this driver's only when the platform grants one: a
 // container with no session bus has no seat to inhibit.
 func inhibitor() bool {
-	return inhibitorWith(resourceWakeHolder{})
+	return inhibitorWith(job.Platform)
 }
 
 func inhibitorWith(holder job.Holder) bool {
@@ -172,6 +166,11 @@ func main() {
 		out:     bufio.NewWriter(os.Stdout),
 	}
 	defer p.out.Flush()
+	defer func() {
+		if p.secure != nil {
+			p.secure.Close()
+		}
+	}()
 
 	n := 0
 	for _, raw := range strings.Split(strings.ReplaceAll(string(script), "\r\n", "\n"), "\n") {
@@ -427,13 +426,14 @@ func (p *replay) fields(rec *job.Record) string {
 }
 
 // hold keeps the machine awake for the lease the record carries right now,
-// the way a runner does for the lease it just claimed.
+// through Resource's native platform owner. This standalone conformance
+// fixture owns its request without selecting an installed runtime.
 func (p *replay) hold(alias string) string {
 	rec, err := p.store.Load(p.ids[alias])
 	if err != nil {
 		return outcome(err)
 	}
-	p.holds[rec.ID] = job.KeepAwakeVia(resourceWakeHolder{}, p.store, rec)
+	p.holds[rec.ID] = job.KeepAwake(p.store, rec)
 	return p.show(alias, nil)
 }
 
@@ -587,6 +587,12 @@ func (p *replay) submit(alias string, a map[string]string) string {
 		// answer and a scenario and no driver in any language changes.
 		spec.Sources = []dl.Source{{Scheme: "http",
 			Locator: fmt.Sprintf("%s/%s/%d", fixture(), strings.TrimPrefix(kind, "http:"), size)}}
+	case kind == "https:gated":
+		if p.secure == nil {
+			p.secure = newSecureFixture()
+		}
+		spec.Sources = []dl.Source{{Scheme: "https",
+			Locator: fmt.Sprintf("%s/gated/%d", p.secure.URL, size)}}
 	}
 
 	if c := a["cred"]; c != "" {
@@ -776,6 +782,11 @@ func (p *replay) runShared(alias, owner string) string { return p.runWith(alias,
 
 func (p *replay) runWith(alias, owner string, shared bool) string {
 	r := dl.NewRunner(p.store, owner)
+	if p.secure != nil {
+		// Trust this fixture's test CA only; certificate and hostname checks
+		// remain enabled on the real HTTP fetcher.
+		r.Fetchers = dl.NewFetchers(dl.HTTP{Client: p.secure.Client()}, dl.File{})
+	}
 	r.LeaseTTL = 5 * time.Second
 	r.SharedStore = shared
 	r.Reach = func(host string) error {

@@ -347,7 +347,16 @@ func serveExecutionArchived(ctx context.Context, store job.Store, onError func(e
 	// A service profile with its own terminal policy, and delegated execution
 	// relaying a receiving service's refusal, also report typed causes.
 	runner.RecordCause = terminal != nil || delegates != nil
-	runner.Fetchers = download.NewFetchers(download.HTTP{})
+	// The egress policy is asked by name before every connection, each
+	// redirect and resumed range included, by scheme for the source and every
+	// redirect hop, and by address at every dial [DL-E8, DL-G1 to DL-G8].
+	// The files this store already proved by digest go first [DL-R28].
+	// Admission refuses every caller file locator; ProvenFile copies only the
+	// store's own.
+	egress := serviceEgress()
+	runner.Reach = egress.Name
+	runner.Egress = egress
+	runner.Fetchers = download.NewFetchers(download.GuardedHTTP(egress.Address), download.ProvenFile{})
 	if delegates != nil {
 		runner.Delegators = download.NewDelegators(delegates...)
 	}

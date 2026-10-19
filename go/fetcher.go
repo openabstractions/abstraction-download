@@ -267,6 +267,10 @@ var (
 	// size the request named. The library class stays "not now"; a service
 	// execution profile may end it through Runner.Terminal.
 	ErrOversize = errors.New("download: source sent more than the expected size")
+	// ErrDiskFloor ends a managed download that would leave its disk below
+	// the runtime's free-space floor. The text after it says, in plain words,
+	// how much the download needs and how much the disk has [DL-R45].
+	ErrDiskFloor = forever("download: not enough disk space")
 	// ErrResumedMismatch marks a digest mismatch over bytes that included a
 	// resumed prefix, which a crash may have left corrupt. The partial and its
 	// checkpoint are already discarded, so the next run starts from zero.
@@ -305,6 +309,10 @@ func CauseOf(err error) string {
 	case errors.As(err, &status):
 		return status.Cause()
 	case errors.Is(err, ErrRefused):
+		return string(acceptance.FailureCauseRefused)
+	case errors.Is(err, ErrUnreachable):
+		// This machine refused the connection [DL-E8]; the reason follows
+		// ErrUnreachable's text.
 		return string(acceptance.FailureCauseRefused)
 	case errors.As(err, &transport):
 		return string(acceptance.FailureCauseTransport)

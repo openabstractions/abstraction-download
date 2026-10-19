@@ -8,5 +8,10 @@ import (
 )
 
 // TestMain runs this package's tests with the person's per-user folders
-// inside a temporary folder (personfolders.Main).
-func TestMain(m *testing.M) { os.Exit(personfolders.Main(m)) }
+// inside a temporary folder (personfolders.Main), with loopback fixtures
+// reachable.
+func TestMain(m *testing.M) {
+	// Fixtures serve on loopback; egress tests turn this off [DL-G4].
+	AllowLoopbackForTesting()
+	os.Exit(personfolders.Main(m))
+}

@@ -556,6 +556,7 @@ func credentialDelegationRefusal(spec Spec, requires []string) string {
 		return "scoped credential authorization cannot be delegated"
 	}
 	for _, source := range spec.Sources {
+		//unchecked: ValidateCredentialRoutes above refused every source whose route does not parse
 		if route, _ := CredentialRoute(source); route == CredentialRouteScoped {
 			return "scoped credential authorization cannot be delegated"
 		}

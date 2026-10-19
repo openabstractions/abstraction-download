@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,7 +162,7 @@ func TestScopedAdmissionRequiresReceivingSubjectAndKeepsIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	submission := credentialSubmission(window, "scoped", "http://example.invalid/file")
+	submission := credentialSubmission(window, "scoped", "https://example.invalid/file")
 	submission.RequiredGuarantees = []string{ScopedCredentialGuarantee}
 	result, err := p.Bind("opaque-only").Submit(submission)
 	if err != nil || result.Outcome != api.AcceptanceOutcomeUnavailable {
@@ -266,7 +265,7 @@ func TestScopedCredentialRecoveryRetainsRouteWithOriginalApplierOnly(t *testing.
 				}
 				return e
 			}
-			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				t.Error("scoped recovery downgraded and contacted origin")
 			}))
 			defer origin.Close()
@@ -332,7 +331,7 @@ func TestOperationBoundCredentialsForParallelProbesRangesAndRedirects(t *testing
 			var mu sync.Mutex
 			var ranges, headers, hosts []string
 			var targetURL string
-			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				ranges, headers, hosts = append(ranges, r.Header.Get("Range")), append(headers, r.Header.Get("Authorization")), append(hosts, r.Host)
 				mu.Unlock()
@@ -346,7 +345,9 @@ func TestOperationBoundCredentialsForParallelProbesRangesAndRedirects(t *testing
 				}
 			}))
 			defer origin.Close()
-			targetURL = strings.Replace(origin.URL, "127.0.0.1", "localhost", 1)
+			// Both redirects stay on the origin the credential was applied to
+			// [DL-K5].
+			targetURL = origin.URL
 			p, err := acceptanceprovider.OpenWithExecutor(t.TempDir(), "scoped-ranges", HTTPExecution{Credentials: applier})
 			if err != nil {
 				t.Fatal(err)
@@ -355,7 +356,7 @@ func TestOperationBoundCredentialsForParallelProbesRangesAndRedirects(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			input := request.Encode(&request.Request{Artifact: request.Artifact{Size: int64(len(body)), Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(body))}, Sources: []request.Source{{Scheme: "http", Locator: origin.URL + "/start", Credential: "hf"}}})
+			input := request.Encode(&request.Request{Artifact: request.Artifact{Size: int64(len(body)), Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(body))}, Sources: []request.Source{{Scheme: "https", Locator: origin.URL + "/start", Credential: "hf"}}})
 			id := api.RequestIdentity{Key: "range-job", HistoryEpoch: window.HistoryEpoch}
 			result, err := p.BindBinding(binding).Submit(api.Submission{Identity: id, Kind: download.Kind, Spec: input, RequiredGuarantees: []string{route}})
 			if err != nil || result.Outcome != api.AcceptanceOutcomeAccepted {

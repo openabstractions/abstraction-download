@@ -111,6 +111,11 @@ type Source struct {
 	// expressible.
 	Attrs map[string]string `json:"attrs,omitempty"`
 
+	// proven marks a file this runner's store verified by digest, offered by
+	// proven() ahead of the record's sources [DL-R28]. It has no JSON form, so
+	// no record, request or delegate can set it; ProvenFile reads only these.
+	proven bool
+
 	// Headers are what the caller intends to send, named one at a time.
 	//
 	// Deliberately not a place for a secret. A credential is named in Attrs and

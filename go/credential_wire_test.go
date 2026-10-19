@@ -3,7 +3,6 @@ package download
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,7 +23,7 @@ func TestTokenNeverReachesAnUnboundHost(t *testing.T) {
 
 	var mu sync.Mutex
 	var authSeen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		authSeen = append(authSeen, r.Header.Get("Authorization"))
 		mu.Unlock()
@@ -46,7 +45,7 @@ func TestTokenNeverReachesAnUnboundHost(t *testing.T) {
 	id, err := Submit(store, Spec{
 		Artifact: Artifact{Size: 16},
 		Sources: []Source{{
-			Scheme:  "http",
+			Scheme:  "https",
 			Locator: srv.URL + "/models/x.gguf",
 			Attrs:   map[string]string{CredentialAttr: "hf"},
 		}},
@@ -76,7 +75,7 @@ func TestTokenReachesTheBoundHost(t *testing.T) {
 
 	var mu sync.Mutex
 	var got string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		got = r.Header.Get("Authorization")
 		mu.Unlock()
@@ -95,7 +94,7 @@ func TestTokenReachesTheBoundHost(t *testing.T) {
 	id, err := Submit(store, Spec{
 		Artifact: Artifact{Size: 16},
 		Sources: []Source{{
-			Scheme:  "http",
+			Scheme:  "https",
 			Locator: srv.URL + "/x",
 			Attrs:   map[string]string{CredentialAttr: "hf"},
 		}},

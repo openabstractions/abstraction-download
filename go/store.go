@@ -140,6 +140,7 @@ func proven(store job.Store, digest, except string) []Source {
 			Locator:  final,
 			Priority: -200 + len(out),
 			Attrs:    map[string]string{"store": "job", "job": rec.ID},
+			proven:   true,
 		})
 	}
 	return out

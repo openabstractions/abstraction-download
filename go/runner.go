@@ -71,6 +71,12 @@ type Runner struct {
 	// same last moment a credential is resolved. Nil reaches everything.
 	Reach Reach
 
+	// Egress is the scheme policy for an application's downloads, applied to
+	// each source and every redirect hop by the HTTP fetcher [DL-G1, DL-G3].
+	// Nil applies none. A service sets it with Reach to Egress.Name and an
+	// HTTP fetcher guarded by Egress.Address.
+	Egress *Egress
+
 	// Network is the cost source a job requiring network: unmetered waits on
 	// [DL-N3]. Nil means this runner cannot honour the constraint, and such a
 	// job is not now here (ErrNoNetworkCost).
@@ -131,19 +137,25 @@ type Runner struct {
 
 	// DeliverEach takes delivery of each job Adopt finishes as soon as it
 	// finishes, with the checks TakeDeliveryAll applies. A service that closes
-	// out finished work on every sweep sets it: Adopt runs a sweep's jobs one
-	// after another, and without it a file finished first stays TRANSFERRED
-	// until the last file of the sweep has arrived. Ten picture-model files
-	// submitted together once showed one complete for five minutes while the
-	// second sat finished on disk behind a 3.8 GB third.
+	// out finished work on every sweep sets it: without it a file finished
+	// first stays TRANSFERRED until the last file of the sweep has arrived.
+	// Ten picture-model files submitted together once showed one complete for
+	// five minutes while the second sat finished on disk behind a 3.8 GB third.
 	DeliverEach bool
+
+	// Workers bounds how many jobs Adopt runs at once. Zero means
+	// DefaultWorkers. Each job still runs under its own claim and lease, so a
+	// small file finishes while a large one is still transferring.
+	Workers int
 
 	// Archive is checked before the sources of a job that names its SHA-256,
 	// and keeps a copy of what the sources delivered [DL-R44]. Nil checks
 	// none.
 	Archive        DownloadArchive
 	archiveRestore bool
-	// CheckWriteSpace is a managed profile's local reserve check.
+	// CheckWriteSpace is a managed profile's local free-space floor check. It
+	// is asked for a known size's remaining bytes before writing, and for each
+	// floorStep bytes of a stream whose size is unknown [DL-R45].
 	CheckWriteSpace func(folder string, additional int64) error
 }
 
@@ -311,7 +323,7 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 
 	// A network constraint is evaluated before anything is opened, and its
 	// gate rides the context so every later open asks it again [DL-N3].
-	gctx, gate, err := r.gateNetwork(ctx, rec, spec)
+	gctx, gate, err := r.gateNetwork(withEgress(ctx, r.Egress, spec.Artifact.Digest), rec, spec)
 	if err != nil {
 		return err
 	}
@@ -483,10 +495,24 @@ func (r *Runner) run(ctx context.Context, rec *job.Record, epoch int64) error {
 }
 
 func (r *Runner) managedSpaceCheck(rec *job.Record, spec Spec) func(string, int64) error {
-	if spec.Sink.Partial == "work/"+rec.ID && spec.Sink.Final == "results/"+rec.ID && spec.Artifact.Size > 0 {
+	if managedSink(rec, spec) && spec.Artifact.Size > 0 {
 		return r.CheckWriteSpace
 	}
 	return nil
+}
+
+// managedFloorCheck is the space check for a managed download whose size is
+// unknown. It is admitted, and its writes ask for floorStep bytes at a time,
+// so it stops before the disk falls below the runtime's floor [DL-R45].
+func (r *Runner) managedFloorCheck(rec *job.Record, spec Spec) func(string, int64) error {
+	if managedSink(rec, spec) && spec.Artifact.Size <= 0 {
+		return r.CheckWriteSpace
+	}
+	return nil
+}
+
+func managedSink(rec *job.Record, spec Spec) bool {
+	return spec.Sink.Partial == "work/"+rec.ID && spec.Sink.Final == "results/"+rec.ID
 }
 
 // keepProven writes down what a failed attempt reached, before the failure is
@@ -770,6 +796,32 @@ func (w managedWriteLimit) Write(p []byte) (int, error) {
 	return w.w.Write(p)
 }
 
+// floorStep is how many bytes of an unknown-size download one space check
+// admits. It stays below the 64 MiB a download needs before the runtime warns
+// about a nearly full disk, so a stream of unknown size checks only the floor.
+const floorStep int64 = 16 << 20
+
+// floorWriter asks check for room before each floorStep bytes of a stream
+// whose size is unknown, and stops the stream with check's refusal.
+type floorWriter struct {
+	w       io.Writer
+	check   func(string, int64) error
+	folder  string
+	allowed int64
+}
+
+func (w *floorWriter) Write(p []byte) (int, error) {
+	if n := int64(len(p)); n > w.allowed {
+		step := max(floorStep, n)
+		if err := w.check(w.folder, step); err != nil {
+			return 0, err
+		}
+		w.allowed = step
+	}
+	w.allowed -= int64(len(p))
+	return w.w.Write(p)
+}
+
 func (c acceptedBytes) Write(p []byte) (int, error) {
 	written, err := c.w.Write(p)
 	c.n.Add(int64(written))
@@ -1023,6 +1075,9 @@ func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch in
 		if r.managedSpaceCheck(rec, spec) != nil {
 			w = managedWriteLimit{w: w, remaining: func() int64 { return spec.Artifact.Size - from - onDisk.Load() }}
 		}
+		if check := r.managedFloorCheck(rec, spec); check != nil {
+			w = &floorWriter{w: w, check: check, folder: filepath.Dir(f.Name())}
+		}
 		mu.Lock()
 		lastPersist = from
 		lastPersistAt = time.Now()
@@ -1244,69 +1299,185 @@ func readable(recs []*job.Record, err error) (kept []*job.Record, unread, fatal 
 	return recs, err, nil
 }
 
+// DefaultWorkers is how many jobs Adopt runs at once when Runner.Workers is
+// zero.
+const DefaultWorkers = 3
+
+// adoptRescan is how often Adopt looks for new work while its workers are
+// busy, so a job submitted during a long transfer starts in a free slot.
+var adoptRescan = time.Second
+
 // Adopt runs every download nobody is working on. This is the reclamation path:
 // a service calls it on start and finds the transfers that were in flight when
 // the machine went to sleep, the app was closed, or the power went out.
+//
+// Up to Workers jobs run at once, started in the order the store lists them,
+// each through Run and its claim. While any runs, Adopt looks again for work
+// whenever a job ends and every adoptRescan, and starts what it finds in a free
+// slot. Each job is tried at most once per call. Adopt returns when nothing it
+// started is running and a look finds nothing new.
 func (r *Runner) Adopt(ctx context.Context) (int, error) {
 	orphans, unread, err := readable(r.Store.Orphans())
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	failed := []error{unread}
+	workers := r.Workers
+	if workers <= 0 {
+		workers = DefaultWorkers
+	}
+	var (
+		mu      sync.Mutex
+		n       int
+		failed  = []error{unread}
+		wg      sync.WaitGroup
+		running int
+	)
+	slots := make(chan struct{}, workers)
+	ended := make(chan struct{}, 1)
+	tried := map[string]bool{}
+	ticker := time.NewTicker(adoptRescan)
+	defer ticker.Stop()
+	for {
+		for _, o := range orphans {
+			if ctx.Err() != nil {
+				break
+			}
+			if tried[o.ID] || !r.adoptable(o) {
+				continue
+			}
+			tried[o.ID] = true
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				continue
+			}
+			mu.Lock()
+			running++
+			mu.Unlock()
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				adopted, err := r.adoptOne(ctx, id)
+				mu.Lock()
+				if adopted {
+					n++
+				}
+				if err != nil {
+					failed = append(failed, err)
+				}
+				running--
+				mu.Unlock()
+				<-slots
+				select {
+				case ended <- struct{}{}:
+				default:
+				}
+			}(o.ID)
+		}
+		mu.Lock()
+		idle := running == 0
+		mu.Unlock()
+		if idle || ctx.Err() != nil {
+			// Nothing is running: one more look catches work that arrived
+			// while the last job ran, and an empty look ends the call.
+			if ctx.Err() != nil || !r.anyAdoptable(tried) {
+				break
+			}
+		} else {
+			select {
+			case <-ended:
+			case <-ticker.C:
+			case <-ctx.Done():
+			}
+		}
+		//unchecked: the first listing reports the unreadable records; a record that turns unreadable during this call is reported by the next Adopt
+		next, _, err := readable(r.Store.Orphans())
+		if err != nil {
+			mu.Lock()
+			failed = append(failed, err)
+			mu.Unlock()
+			break
+		}
+		orphans = next
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	return n, errors.Join(failed...)
+}
+
+// anyAdoptable reports whether the store now lists work Adopt has not tried.
+func (r *Runner) anyAdoptable(tried map[string]bool) bool {
+	//unchecked: an unreadable record is never adoptable; Adopt reports unreadable records from its first listing
+	orphans, _, err := readable(r.Store.Orphans())
+	if err != nil {
+		return false
+	}
 	for _, o := range orphans {
-		// Someone else's kind of job is none of our business.
-		if o.Kind != Kind {
-			continue
+		if !tried[o.ID] && r.adoptable(o) {
+			return true
 		}
-		// Neither is someone else's job. A record holding a delegation handle is
-		// in another system's hands; Reconcile is the path for it, and running it
-		// here would fetch the same bytes a second time while the first transfer
-		// is still going. If the handle has gone stale, Reconcile is what clears
-		// the delegation and returns the job to pending — and only then is it
-		// ours to adopt.
-		if o.Delegated() {
-			continue
-		}
-		// Neither is a job whose destination only the submitting machine has.
-		// Claiming it in order to refuse it spends that machine's attempt, bumps
-		// the backoff, and writes this supervisor's policy into a record the
-		// submitter's own client reads back as the caller's error — so a
-		// destination that worked before this supervisor existed stops working
-		// on the machine that can still deliver it. Run still refuses out loud
-		// when somebody asks for this job by name.
-		if spec, err := SpecOf(o); err == nil && r.refuseUnportableSink(spec.Sink) != nil {
-			continue
-		}
-		// Work already recorded as waiting stays unclaimed while the path is
-		// metered; the cost notice that ends the wait brings the next sweep
-		// [DL-N4]. Work not yet recorded as waiting is run, so it says so.
-		waiting := Waiting(o) != ""
-		if waiting && r.networkHolds(o) {
-			continue
-		}
-		// A wait is no failed attempt, so the backoff of an earlier failure
-		// does not delay resuming it.
-		if !waiting && time.Now().Before(RetryAfter(o)) {
-			continue
-		}
-		if err := r.Run(ctx, o.ID); errors.Is(err, ErrWaiting) {
-			continue
-		} else if err == nil && r.DeliverEach {
-			if rec, err := r.Store.Load(o.ID); err == nil {
+	}
+	return false
+}
+
+// adoptable reports whether Adopt should run o now.
+func (r *Runner) adoptable(o *job.Record) bool {
+	// Someone else's kind of job is none of our business.
+	if o.Kind != Kind {
+		return false
+	}
+	// Neither is someone else's job. A record holding a delegation handle is
+	// in another system's hands; Reconcile is the path for it, and running it
+	// here would fetch the same bytes a second time while the first transfer
+	// is still going. If the handle has gone stale, Reconcile is what clears
+	// the delegation and returns the job to pending — and only then is it
+	// ours to adopt.
+	if o.Delegated() {
+		return false
+	}
+	// Neither is a job whose destination only the submitting machine has.
+	// Claiming it in order to refuse it spends that machine's attempt, bumps
+	// the backoff, and writes this supervisor's policy into a record the
+	// submitter's own client reads back as the caller's error — so a
+	// destination that worked before this supervisor existed stops working
+	// on the machine that can still deliver it. Run still refuses out loud
+	// when somebody asks for this job by name.
+	if spec, err := SpecOf(o); err == nil && r.refuseUnportableSink(spec.Sink) != nil {
+		return false
+	}
+	// Work already recorded as waiting stays unclaimed while the path is
+	// metered; the cost notice that ends the wait brings the next sweep
+	// [DL-N4]. Work not yet recorded as waiting is run, so it says so.
+	waiting := Waiting(o) != ""
+	if waiting && r.networkHolds(o) {
+		return false
+	}
+	// A wait is no failed attempt, so the backoff of an earlier failure
+	// does not delay resuming it.
+	return waiting || !time.Now().Before(RetryAfter(o))
+}
+
+// adoptOne runs one adopted job and reports whether it counts as adopted.
+func (r *Runner) adoptOne(ctx context.Context, id string) (bool, error) {
+	err := r.Run(ctx, id)
+	switch {
+	case errors.Is(err, ErrWaiting):
+		return false, nil
+	case err == nil:
+		if r.DeliverEach {
+			if rec, err := r.Store.Load(id); err == nil {
 				r.deliverPresent(rec)
 			}
-		} else if err != nil {
-			// One bad job must not stop the rest being rescued -- and must not
-			// disappear either. A bare `continue` here meant a job that failed
-			// every single sweep was indistinguishable from one nobody needed
-			// to touch.
-			failed = append(failed, fmt.Errorf("%s: %w", o.ID, err))
-			continue
 		}
-		n++
+		return true, nil
+	default:
+		// One bad job must not stop the rest being rescued -- and must not
+		// disappear either. A bare `continue` here meant a job that failed
+		// every single sweep was indistinguishable from one nobody needed
+		// to touch.
+		return false, fmt.Errorf("%s: %w", id, err)
 	}
-	return n, errors.Join(failed...)
 }
 
 // hashFile reads a whole file and returns its size and digest. Used after a

@@ -51,6 +51,7 @@ tested, linked from here and linking back.
 | V | version: the validator a resumed request sends |
 | K | credential: admitting, applying and delegating a named credential |
 | N | network cost: the `unmetered` constraint |
+| G | egress: the schemes, redirects and addresses an application's download may reach |
 | S | spec: reading, normalising and refusing a spec document and its paths |
 | W | wanted: the drop folder a sweep answers |
 | E | error and outcome: *not now* against *no*, the failure payloads, the exit status |
@@ -392,6 +393,22 @@ Architect ruling of 2026-11-11, as given:
 >    - temporary-then-rename on both sides;
 >    - the fallback when the NAS is unreachable or an entry mismatches.
 
+**[DL-R45] A managed download is refused only at the disk's floor.** The
+runtime's managed download keeps a floor of free space on the volume that
+holds its work: the smaller of 1 GiB and 2% of the volume. A download of
+known size MUST be refused, before any byte moves, only when its remaining
+bytes would leave less than the floor. The refusal ends the job as failed,
+and its failure message names the bytes the download needs, the bytes the
+disk has free and the floor, as in `not enough disk space: this download
+needs 20.0 GiB and the disk has 12.0 GiB free; OpenAbstractions keeps 1.0
+GiB free`. A download of unknown size MUST be admitted. Its writes ask for
+room 16 MiB at a time, and it ends the same way before the volume falls
+below the floor. A volume whose space the runtime cannot read takes the
+download. The larger comfort reserve, the smaller of 20 GiB and 10% of the
+volume, never refuses: a download of 64 MiB or more that would leave less
+than it writes one log line saying the disk is nearly full. The NAS
+archive's reserve in DL-R44 is separate.
+
 
 ## Versions
 
@@ -671,12 +688,26 @@ alone MUST return `unavailable`.
 
 **[DL-K2] Each redirect host is its own use.** A redirect of a request that
 carried an applied credential MUST drop that credential's headers and MUST
-ask the applier again for the redirect target. The credential's own target
+ask the applier again for a redirect target within the source's origin;
+a redirect to another origin goes without the credential (DL-K5). The credential's own target
 list decides: `target_refused` sends the redirected request without the
 credential, `applied` sends the headers applied for that host, including on
 a same-host redirect, and any other refusal ends the request as DL-K4 says.
 Headers the request itself supplied MUST follow a redirect only to the
 source host and its subdomains.
+
+**[DL-K5] A named credential travels only over https, to one origin.** A
+request, redirect or resumed range MUST carry an applied credential only to
+an `https` URL, and only to the origin (scheme, host and port, the default
+port written out) of the source it was applied for. Admission MUST refuse a
+source that names a credential and is not `https` `invalid` with reason
+`credential:insecure_transport:<name>`, before asking the applier. Execution
+MUST end such a request *no* with the same outcome and cause `credential`,
+and nothing is sent. A redirect to any other origin, an `http` hop included,
+MUST drop the credential's headers and MUST NOT ask the applier, as curl does
+without `--location-trusted`; DL-K2's re-application holds for a redirect
+within the origin. The ruling is design B of
+`decisions/RULINGS-2026-11-22-owner-designs.md`, rule 2.
 
 **[DL-K3] Delegation carries the credential name, never its value.**
 Delegated execution and remote job handoff MUST refuse `credentials@2` until
@@ -693,6 +724,126 @@ remote admission refusal `credential:<outcome>:<name>` MUST end the local
 job with that reason unchanged and cause `credential`, and the local service
 MUST fetch nothing itself. The remote result bytes are read back into the
 local destination and verified there.
+
+## Egress
+
+The download service applies design B of the architect ruling of
+2026-11-22 (`decisions/RULINGS-2026-11-22-owner-designs.md`) to every
+download an application asks it for. Rule n of the ruling is DL-Gn:
+DL-G1 schemes, DL-G2 credentials (stated as DL-K5), DL-G3 redirects, DL-G4
+addresses, DL-G5 the local network, DL-G6 the person's refused hosts (stated
+with DL-E8), DL-G7 the system proxy and DL-G8 refusals. The ruling, verbatim:
+
+> **B. Download egress, as established downloaders do it. 0.8.1**
+>
+> The owner: "smart but not too smart … how would any normal downloader handle
+> this".
+>
+> 1. **Schemes.**
+>    - `https` is always allowed.
+>    - `http` is allowed only when the request carries a SHA-256 digest
+>      (integrity is then proven), as apt and package mirrors do.
+>    - Every other scheme (`file`, `ftp`, `smb`, `data`) is refused.
+> 2. **Credentials.**
+>    - Sent only over https, and only to the exact origin (scheme, host and
+>      port) the credential is bound to.
+>    - Dropped on any redirect to another origin, as curl does without
+>      `--location-trusted` and as browsers drop Authorization.
+> 3. **Redirects.**
+>    - At most 10.
+>    - Every hop is re-checked against rules 1, 4 and 5.
+>    - An https-to-http downgrade is refused unless the request carries a
+>      digest. Credentials are already gone by rule 2.
+> 4. **Addresses, checked at connect time on the address actually dialled.**
+>    This is safe against DNS rebinding because the dialer checks the socket
+>    address, not a name resolved earlier. Always refused:
+>    - loopback (127.0.0.0/8, ::1);
+>    - link-local (169.254.0.0/16, which includes cloud metadata, and
+>      fe80::/10);
+>    - unspecified, multicast and broadcast;
+>    - IPv4-mapped and IPv4-compatible forms of any of these.
+> 5. **LAN (private ranges).** 10/8, 172.16/12, 192.168/16, 100.64/10 and
+>    fc00::/7 are refused for app-requested downloads by default. This matches
+>    browsers' Private Network Access rule: public content can't reach the
+>    person's network.
+>    - The person's "allowed local hosts" list opens a named host, e.g. a NAS.
+>    - OA's own NAS archive and paired-machine traffic are unaffected; they
+>      don't go through app download jobs.
+> 6. **The person's refused-host list** applies at every hop, to the host name
+>    (subdomains included) and to its resolved addresses. Their allowed-hosts
+>    list is the counterpart for the LAN.
+> 7. **System proxy** is honoured. The proxy resolves names, so through a proxy
+>    rules 1–3 and 6 apply by host name, and rule 4 by name only. This
+>    limitation is documented.
+> 8. **Refusals** name the rule: "Refused: address is on your local network".
+>    These are security boundaries, so no fail-open.
+>
+> **The existing branches fit:**
+>
+> - `fix/download-credential-https` is rule 2. Extend it with same-origin
+>   binding and stripping on redirect.
+> - `fix/download-refused-hosts` is rule 6. Apply it per hop and to resolved
+>   addresses.
+>
+> The allowed-local-hosts UI can follow in 0.9.0. Until then the list is a
+> setting with a command-line edit.
+
+**[DL-G1] Schemes.** The download service MUST allow `https` always and
+`http` only for a request that carries a SHA-256 digest, and MUST refuse every
+other scheme (`file`, `ftp`, `smb`, `data`).
+
+**[DL-G2] Credentials.** A credential MUST travel only over https to the exact
+origin it is bound to, and MUST be dropped on a redirect to another origin.
+DL-K5 states this rule.
+
+**[DL-G3] Redirects.** A download MUST follow at most 10 redirects, MUST check
+every hop against DL-G1, DL-G4 and DL-G5, and MUST refuse an https-to-http
+downgrade unless the request carries a digest.
+
+**[DL-G4] Addresses.** The service MUST check the address it dials and MUST
+refuse loopback, link-local, unspecified, multicast and broadcast addresses and
+the IPv4-mapped and IPv4-compatible forms of each, whatever any list names.
+
+**[DL-G5] The local network.** The service MUST refuse the private ranges 10/8,
+172.16/12, 192.168/16, 100.64/10 and fc00::/7 for app-requested downloads
+unless the person's allowed local hosts list names the host.
+
+**[DL-G6] The person's refused hosts.** The refused-host list MUST apply at
+every hop, to the host name with its subdomains and to each resolved address.
+DL-E8 states how a refused host ends the attempt.
+
+**[DL-G7] The system proxy.** The service MUST honour the system proxy. Through
+a proxy DL-G1, DL-G2, DL-G3 and DL-G6 MUST apply by host name and DL-G4 by name
+only, and the service MUST document that limitation.
+
+**[DL-G8] Refusals.** A refusal MUST name the rule in plain words, such as
+"Refused: address is on your local network", and MUST NOT fail open.
+
+What the service does with it:
+
+- Admission refuses a source whose scheme breaks DL-G1 `invalid`, and a
+  request whose every source host a name rule refuses `unavailable`, each
+  with the rule's plain reason, before anything is journaled.
+- The HTTP fetcher checks the scheme of the source and of every redirect hop,
+  and the name of every hop. The dial checks each address the name resolves
+  to, on the address it connects to (`GuardedHTTP`). A refused attempt is
+  *not now* with cause `refused`, and its message is the rule's reason.
+- The allowed local hosts are `download/allowed-local.json` beside the
+  refused list, a host name and a note each, matched by exact name. An entry
+  opens only the local network ranges of DL-G5. Loopback and every other
+  DL-G4 class stay refused whatever the list names. The architect's ruling on
+  this branch, 2026-11-22, verbatim: "Loopback is where the person's
+  unauthenticated local services live (ComfyUI's API, engine ports, other
+  apps' localhost servers), the main SSRF target. A same-user-writable list
+  entry shouldn't open it, and the product shouldn't carry a test-shaped
+  exception." A test mirror listens on the machine's own local-network
+  address and is named there.
+- Through a proxy, the proxy resolves names: the address rules apply to a
+  host written as an address or naming this computer, and the refused list
+  to the name. This is DL-G7's limitation.
+- `AllowLoopbackForTesting` lets a test binary reach loopback fixtures,
+  http without a digest to a loopback host included. It does nothing outside
+  a test binary (`testing.Testing`), and the runtime never calls it.
 
 ## Network cost
 
@@ -1355,6 +1506,16 @@ unchanged on a machine that may reach the host, or here once a person turns
 it back on. What implements `Reach` is the machine's choice: `Discover`
 wires the hosts a person switched off, kept in `download/refused.json` under
 the user settings directory; a bare runner reaches everything.
+The download service asks the same list of the account it runs as at every
+hop: by host name, subdomains included, before every connection, redirect
+and resumed range, and by each address the name resolves to, checked on the
+address the connection dials. Through a proxy the proxy resolves names, and
+the list applies by name only. Its admission MUST refuse a request whose
+every source host the list refuses `unavailable`, with the reason this rule
+records, before anything is journaled; a request with one reachable source
+is admitted and the refused sources are skipped. A refused attempt reports
+cause `refused` and names the reason. The ruling is design B of
+`decisions/RULINGS-2026-11-22-owner-designs.md`, rule 6.
 
 **[DL-E14] The class reaches the caller.** A record MUST carry the reason an
 attempt ended and its class, and the error an application receives when it

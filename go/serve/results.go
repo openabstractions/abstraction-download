@@ -66,6 +66,19 @@ func (HTTPExecution) OperationFailure(record *job.Record) *api.WorkFailure {
 			if cause != "" {
 				message += ": " + strings.ReplaceAll(string(cause), "_", " ")
 			}
+			// A host or address this machine will not reach names the reason
+			// the policy gave, so an application can show it [DL-E8].
+			if i := strings.Index(failure.Error, download.ErrUnreachable.Error()); cause == api.FailureCauseRefused && i >= 0 {
+				message = "download attempt failed: refused:" + failure.Error[i+len(download.ErrUnreachable.Error()):]
+				if j := strings.Index(failure.Error[i:], "Refused: "); j >= 0 {
+					// An egress rule names itself in plain words [DL-G8].
+					message = "download attempt failed: " + failure.Error[i+j:]
+				}
+			}
+			// A download the disk has no room for says so with its sizes [DL-R45].
+			if i := strings.Index(failure.Error, download.ErrDiskFloor.Error()); i >= 0 {
+				message = failure.Error[i+len("download: "):]
+			}
 			// A credential failure names the applier's outcome and the credential,
 			// never a secret: credential:<outcome>:<name>.
 			if word := credentialWord.FindStringSubmatch(failure.Error); cause == api.FailureCauseCredential && word != nil {

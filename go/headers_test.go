@@ -26,7 +26,7 @@ type headerSpy struct {
 func newHeaderSpy(t *testing.T, body []byte) *headerSpy {
 	t.Helper()
 	s := &headerSpy{}
-	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.Server = newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.seen = append(s.seen, r.Header.Clone())
 		s.mu.Unlock()

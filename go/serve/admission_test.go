@@ -3,9 +3,9 @@ package serve
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,7 +73,7 @@ func (a *switchApplier) ApplySubjectCredential(_ context.Context, subject accept
 }
 
 func credentialSubmission(window api.HistoryWindow, key, locator string) api.Submission {
-	spec := request.Encode(&request.Request{Sources: []request.Source{{Scheme: "http", Locator: locator, Credential: "hf"}}})
+	spec := request.Encode(&request.Request{Sources: []request.Source{{Scheme: strings.SplitN(locator, ":", 2)[0], Locator: locator, Credential: "hf"}}})
 	return api.Submission{Identity: api.RequestIdentity{Key: key, HistoryEpoch: window.HistoryEpoch}, Kind: "download", Spec: spec, RequiredGuarantees: []string{CredentialGuarantee}}
 }
 
@@ -86,7 +86,7 @@ func credentialSubmission(window api.HistoryWindow, key, locator string) api.Sub
 func TestCredentialRefusedAtAdmissionAndTypedAtExecution(t *testing.T) {
 	var mu sync.Mutex
 	seen := []string{}
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	origin := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
 		mu.Unlock()
@@ -143,7 +143,7 @@ func TestCredentialRefusedAtAdmissionAndTypedAtExecution(t *testing.T) {
 }
 
 func TestReceiverSubjectSurvivesRestartAndRevocation(t *testing.T) {
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	origin := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("revoked credential reached origin")
 	}))
 	defer origin.Close()

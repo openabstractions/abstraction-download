@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -596,6 +597,42 @@ func (File) FetchRange(ctx context.Context, req RangeRequest) error {
 	return copyRange(ctx, req, io.NewSectionReader(f, req.Range.Start, req.Range.End-req.Range.Start))
 }
 
+// ProvenFile copies only files this runner's store has already verified by
+// digest, the sources DL-R28 puts ahead of a record's own. A service that
+// refuses caller file locators registers it to reuse bytes it already holds
+// without opening a local path a caller named: every other file source is
+// refused, and the runner tries the record's next source.
+type ProvenFile struct{}
+
+// errNotProven refuses a file source the store did not offer. Not Permanent:
+// the record's other sources still run.
+var errNotProven = errors.New("download: this runner copies only files its store proved by digest")
+
+func (ProvenFile) Schemes() []string { return []string{"file"} }
+
+func (ProvenFile) Capabilities() []Capability { return []Capability{CapResume} }
+
+func (ProvenFile) Fetch(ctx context.Context, req Request) (Result, error) {
+	if !req.Source.proven {
+		return Result{}, errNotProven
+	}
+	return File{}.Fetch(ctx, req)
+}
+
+func (ProvenFile) Ranged(ctx context.Context, src Source, headers map[string]string) (int64, bool, error) {
+	if !src.proven {
+		return 0, false, errNotProven
+	}
+	return File{}.Ranged(ctx, src, headers)
+}
+
+func (ProvenFile) FetchRange(ctx context.Context, req RangeRequest) error {
+	if !req.Source.proven {
+		return errNotProven
+	}
+	return File{}.FetchRange(ctx, req)
+}
+
 // DefaultFetchers is the set of fetchers that need nothing configured. The
 // Windows service tier (BITS) and any NAS-side delegation are added by whoever
 // has them, which is the whole point of the split.
@@ -607,4 +644,5 @@ func DefaultFetchers() *Fetchers {
 var (
 	_ RangeFetcher = HTTP{}
 	_ RangeFetcher = File{}
+	_ RangeFetcher = ProvenFile{}
 )

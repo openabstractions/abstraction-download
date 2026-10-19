@@ -25,8 +25,10 @@ var outcomeWord = regexp.MustCompile(`^[a-z_]{1,32}$`)
 // refused the caller the credential (credentials CRED-A2).
 const credentialNotPermitted = "not_permitted"
 
-// CheckAdmission refuses a submission naming a credential the submitting
-// caller may not apply, before anything is journaled [JOB-A16, DL-K1]. For
+// CheckAdmission refuses a submission whose every source host the person
+// switched off, unavailable with the list's reason [DL-E8], and a submission
+// naming a credential the submitting caller may not apply, before anything is
+// journaled [JOB-A16, DL-K1]. For
 // every source naming a credential it asks the applier's CredentialChecker
 // with the submitting scope and the source host. A rights refusal
 // (not_permitted) returns forbidden and any other refusal invalid, each with
@@ -36,6 +38,12 @@ const credentialNotPermitted = "not_permitted"
 // without an original checker are admitted here on credentials@1. The scoped
 // route requires its checker and the receiving boundary's subject.
 func (e HTTPExecution) CheckAdmission(scope, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
+	if outcome, reason := schemeRefusal(kind, raw); outcome != 0 {
+		return outcome, reason
+	}
+	if outcome, reason := refusedHosts(kind, raw); outcome != 0 {
+		return outcome, reason
+	}
 	if kind == download.Kind {
 		route, err := credentialRouteFor(required)
 		if err != nil {
@@ -55,6 +63,12 @@ func (e HTTPExecution) CheckAdmission(scope, kind string, raw []byte, required [
 }
 
 func (e HTTPExecution) CheckSubjectAdmission(binding acceptanceprovider.Binding, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
+	if outcome, reason := schemeRefusal(kind, raw); outcome != 0 {
+		return outcome, reason
+	}
+	if outcome, reason := refusedHosts(kind, raw); outcome != 0 {
+		return outcome, reason
+	}
 	if kind == download.Kind {
 		route, err := credentialRouteFor(required)
 		if err != nil {
@@ -100,6 +114,11 @@ func checkCredentialsAdmission(kind string, raw []byte, required []string, check
 		u, err := url.Parse(source.Locator)
 		if err != nil || u.Hostname() == "" {
 			continue
+		}
+		if !download.CredentialTransport(u) {
+			// A credential sent in clear is refused before the person is asked
+			// about it [DL-K5].
+			return api.AcceptanceOutcomeInvalid, "credential:" + download.OutcomeInsecureTransport + ":" + source.Credential
 		}
 		use := [2]string{source.Credential, strings.ToLower(u.Hostname())}
 		if checked[use] {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -116,7 +118,8 @@ type OperationCredentials interface {
 // CredentialError is a named credential the service could not apply to one
 // request. Outcome is the applier's word (unknown, expired, revoked, lost,
 // not_permitted, target_refused, consumer_refused, unsupported_kind, invalid,
-// forbidden or unavailable). Every outcome but unavailable ends the attempt:
+// forbidden or unavailable), or this layer's own insecure_transport [DL-K5].
+// Every outcome but unavailable ends the attempt:
 // the same request cannot succeed until the credential or its rule changes, and
 // the operation stays retryable through a new attempt. The message names the
 // credential and never carries a secret.
@@ -139,6 +142,33 @@ func CredentialRefusal(name, outcome string) error {
 		return e
 	}
 	return permanent{e}
+}
+
+// OutcomeInsecureTransport is the refusal of a named credential for a request
+// that would carry it in clear: a source or redirect whose scheme is not https
+// [DL-K5].
+const OutcomeInsecureTransport = "insecure_transport"
+
+// CredentialTransport reports whether a named credential may be sent to u:
+// only over https [DL-K5].
+func CredentialTransport(u *url.URL) bool {
+	return u != nil && strings.EqualFold(u.Scheme, "https")
+}
+
+// origin is u's scheme, host and port, with the scheme's default port written
+// out, so https://hf.co and https://hf.co:443 are one origin [DL-K5].
+func origin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(strings.TrimSuffix(u.Hostname(), ".")), port)
 }
 
 // CredentialHeaderAttr optionally names the header the secret goes into.
@@ -212,6 +242,8 @@ func credEnvName(name string) string {
 // leads to [DL-K2]. It rides the request context, so every fetcher sending the
 // request through HTTP.do meets it without learning that a credential exists.
 type hopCredential struct {
+	// name is the credential the source names, for a refusal's message.
+	name string
 	// applied names the headers the credential set on the first request.
 	applied []string
 	// apply returns the credential's headers for host, nil when the
@@ -235,7 +267,7 @@ func withCredentialHops(ctx context.Context, src Source, creds Credentials, head
 	if name == "" || creds == nil {
 		return ctx
 	}
-	hop := &hopCredential{}
+	hop := &hopCredential{name: name}
 	if bound, ok := creds.(SourceCredentials); ok {
 		hop.refreshInitial = func(host string) (map[string]string, error) {
 			host, err := plainHost(host)
@@ -310,6 +342,11 @@ func headersFor(src Source, creds Credentials) (map[string]string, error) {
 	host, err := hostOf(src.Locator)
 	if err != nil {
 		return nil, err
+	}
+	if u, err := url.Parse(src.Locator); err != nil || !CredentialTransport(u) {
+		// Refused before anything is asked or sent: no host may receive a
+		// secret in clear, whatever the credential's own target list says.
+		return nil, CredentialRefusal(name, OutcomeInsecureTransport)
 	}
 	if bound, ok := creds.(SourceCredentials); ok {
 		got, err := bound.LookupSource(src, host)

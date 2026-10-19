@@ -25,6 +25,8 @@ func TestDeliverEachClosesAJobBeforeTheNextRuns(t *testing.T) {
 		t.Run(fmt.Sprintf("DeliverEach=%v", each), func(t *testing.T) {
 			r, store, root := newRunner(t)
 			r.DeliverEach = each
+			// One worker: the assertion reads other jobs between two fetches.
+			r.Workers = 1
 			bodies := map[string][]byte{}
 			var mu sync.Mutex
 			var waiting []string // jobs seen TRANSFERRED while another job fetched

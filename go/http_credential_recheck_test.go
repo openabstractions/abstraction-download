@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -41,7 +40,7 @@ func TestCredentialAuthorizationRecheckedForRestartedFullGET(t *testing.T) {
 					creds := &revocableSourceCredentials{}
 					var mu sync.Mutex
 					requests := 0
-					origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					origin := newTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						mu.Lock()
 						requests++
 						mu.Unlock()
@@ -67,7 +66,7 @@ func TestCredentialAuthorizationRecheckedForRestartedFullGET(t *testing.T) {
 						}
 					}))
 					defer origin.Close()
-					src := Source{Scheme: "http", Locator: origin.URL + "/file", Attrs: map[string]string{CredentialAttr: "hf", CredentialScopeAttr: "owner"}}
+					src := Source{Scheme: "https", Locator: origin.URL + "/file", Attrs: map[string]string{CredentialAttr: "hf", CredentialScopeAttr: "owner"}}
 					if route == CredentialRouteScoped {
 						src.Attrs[CredentialRouteAttr] = route
 					}

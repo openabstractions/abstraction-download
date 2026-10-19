@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openabstractions/abstraction-identity/fileid"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
@@ -342,79 +344,267 @@ func sizeOf(t *testing.T, path string) int64 {
 	return st.Size()
 }
 
-// Renew is load, edit, write. So is SetIntent, and so is Update. None of them
-// presents what it loaded, so any two that overlap lose one. The keeper renews
-// three times a TTL for the whole transfer; this measures how often a pause
-// pressed during a renewal is silently erased, and how often a checkpoint goes
-// backwards.
+// Renewal must preserve every checkpoint and pause whose write was acknowledged.
+// A transient locality probe refusal happens before publication, so these pure
+// fixture edits can be attempted afresh within the invoking test's lifetime.
+type renewalFixtureOperation func(string, int64, func() error) error
+
 func TestRenewalErasesConcurrentWrites(t *testing.T) {
-	const rounds = 40
-	lostPause, regressed, refused := 0, 0, 0
-	for i := 0; i < rounds; i++ {
-		root := t.TempDir()
-		store, err := job.NewFileStore(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, err := Submit(store, Spec{
-			Artifact: Artifact{Size: 1},
-			Sources:  []Source{{Scheme: "https", Locator: "https://example.invalid/x"}},
-			Sink:     Sink{Final: filepath.Join(root, "final.bin")},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		held, err := store.Claim(id, "owner", time.Minute)
-		if err != nil {
-			t.Fatal(err)
-		}
-		epoch := held.Lease.Epoch
+	renewalFixtureStress(t, 40, nil)
+}
 
-		stop := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
+func TestRenewalErasesConcurrentWritesRetriesVolumeProbeRefusal(t *testing.T) {
+	for _, wanted := range []string{"update", "pause"} {
+		t.Run(wanted, func(t *testing.T) {
+			attempts, applied := 0, 0
+			renewalFixtureStress(t, 1, func(op string, n int64, apply func() error) error {
+				if op == wanted && n == 20 {
+					attempts++
+					if attempts == 1 {
+						return fmt.Errorf("injected before %s: %w", op, &fileid.NotLocalPathError{
+							Path: "fixture", Reason: "its volume did not answer in time"})
+					}
+					applied++
 				}
-				store.Renew(id, epoch, time.Minute)
-				time.Sleep(time.Millisecond)
+				return apply()
+			})
+			if attempts != 2 || applied != 1 {
+				t.Fatalf("%s: %d attempts, %d actual applications", wanted, attempts, applied)
 			}
-		}()
+		})
+	}
+}
 
-		const steps = 20
-		for n := int64(1); n <= steps; n++ {
-			if _, err := store.Update(id, epoch, func(rr *job.Record) error {
-				rr.Progress.Done = n
-				return nil
-			}); err != nil {
-				refused++
+func TestRenewalFixtureStopsOnOtherRefusals(t *testing.T) {
+	transient := &fileid.NotLocalPathError{Path: "fixture", Reason: "its volume did not answer in time"}
+	for _, tc := range []struct {
+		name, operation string
+		err             error
+		cancel          bool
+	}{
+		{"permission", "update", os.ErrPermission, false},
+		{"network", "update", &fileid.NotLocalPathError{Path: "fixture", Reason: "a network drive"}, false},
+		{"untyped lookalike", "update", errors.New(transient.Reason), false},
+		{"lease expiry", "update", job.ErrLeaseExpiry, false},
+		{"pause permission", "pause", os.ErrPermission, false},
+		{"renew permission", "renew", os.ErrPermission, false},
+		{"caller expiry", "update", transient, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(renewalFixtureContext(t))
+			defer cancel()
+			attempts := 0
+			renewed := make(chan struct{})
+			result := renewalFixtureRound(t, ctx, func(op string, n int64, apply func() error) error {
+				if tc.operation == "renew" && op == "update" && n == 1 {
+					select {
+					case <-renewed:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				if op == tc.operation && (n == 20 || op == "renew") {
+					attempts++
+					if op == "renew" {
+						close(renewed)
+					}
+					if tc.cancel {
+						cancel()
+					}
+					return tc.err
+				}
+				return apply()
+			})
+			if attempts != 1 || !errors.Is(result.err, tc.err) || result.final == nil || result.loadErr != nil {
+				t.Fatalf("attempts=%d error=%v last acknowledged=%d final=%v load error=%v", attempts, result.err, result.lastAcknowledged, result.final, result.loadErr)
+			}
+			if tc.cancel && !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("caller expiry was lost: %v", result.err)
+			}
+			if tc.operation == "update" && (result.lastAcknowledged != 19 || result.final.Progress.Done != 19) {
+				t.Fatalf("rejected update changed state: last acknowledged=%d final=%d", result.lastAcknowledged, result.final.Progress.Done)
+			}
+		})
+	}
+}
+
+func renewalFixtureContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		bounded, cancel := context.WithDeadline(ctx, deadline)
+		t.Cleanup(cancel)
+		return bounded
+	}
+	return ctx
+}
+
+func renewalFixtureRetry(ctx context.Context, apply func() error, refused *atomic.Int64) error {
+	var last error
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, last)
+		}
+		err := apply()
+		if err == nil {
+			return nil
+		}
+		var locality *fileid.NotLocalPathError
+		if !errors.As(err, &locality) || locality.Reason != "its volume did not answer in time" {
+			return err
+		}
+		last = err
+		refused.Add(1)
+		runtime.Gosched()
+	}
+}
+
+type renewalFixtureResult struct {
+	operation           string
+	n, lastAcknowledged int64
+	pauseAcknowledged   bool
+	final               *job.Record
+	err, loadErr        error
+	transientRefusals   int64
+}
+
+func renewalFixtureRound(t *testing.T, caller context.Context, operation renewalFixtureOperation) (result renewalFixtureResult) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := job.NewFileStore(root)
+	if err != nil {
+		result.operation, result.err = "new store", err
+		return
+	}
+	id, err := Submit(store, Spec{
+		Artifact: Artifact{Size: 1},
+		Sources:  []Source{{Scheme: "https", Locator: "https://example.invalid/x"}},
+		Sink:     Sink{Final: filepath.Join(root, "final.bin")},
+	})
+	if err != nil {
+		result.operation, result.err = "submit", err
+		return
+	}
+	held, err := store.Claim(id, "owner", time.Minute)
+	if err != nil {
+		result.operation, result.err = "claim", err
+		return
+	}
+	epoch := held.Lease.Epoch
+	ctx, cancelFailure := context.WithCancel(caller)
+	defer cancelFailure()
+	renewCtx, stopRenew := context.WithCancel(ctx)
+	var refused atomic.Int64
+	var renewErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			err := renewalFixtureRetry(renewCtx, func() error {
+				return operation("renew", 0, func() error {
+					_, err := store.Renew(id, epoch, time.Minute)
+					return err
+				})
+			}, &refused)
+			if err != nil {
+				if renewCtx.Err() == nil || !errors.Is(err, renewCtx.Err()) {
+					renewErr = err
+					cancelFailure()
+				}
+				return
+			}
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-time.After(time.Millisecond):
 			}
 		}
-		if _, err := store.SetIntent(id, job.WantPause, "ui"); err != nil {
-			refused++
-		}
-		close(stop)
+	}()
+	// Every failure returns through this join before the caller reports it.
+	defer func() {
+		stopRenew()
 		wg.Wait()
+		if renewErr != nil {
+			result.err = errors.Join(result.err, fmt.Errorf("renew: %w", renewErr))
+			if result.operation == "" {
+				result.operation = "renew"
+				result.n = 0
+			}
+		}
+		if err := caller.Err(); err != nil {
+			result.err = errors.Join(result.err, err)
+			if result.operation == "" {
+				result.operation = "caller lifetime"
+			}
+		}
+		result.final, result.loadErr = store.Load(id)
+		result.transientRefusals = refused.Load()
+	}()
+	for n := int64(1); n <= 20; n++ {
+		result.operation, result.n = "update", n
+		result.err = renewalFixtureRetry(ctx, func() error {
+			return operation("update", n, func() error {
+				_, err := store.Update(id, epoch, func(rr *job.Record) error {
+					rr.Progress.Done = n
+					return nil
+				})
+				return err
+			})
+		}, &refused)
+		if result.err != nil {
+			return
+		}
+		result.lastAcknowledged = n
+	}
+	result.operation, result.n = "pause", 20
+	result.err = renewalFixtureRetry(ctx, func() error {
+		return operation("pause", 20, func() error {
+			_, err := store.SetIntent(id, job.WantPause, "ui")
+			return err
+		})
+	}, &refused)
+	result.pauseAcknowledged = result.err == nil
+	if result.err == nil {
+		result.operation = ""
+	}
+	return
+}
 
-		rec, err := store.Load(id)
-		if err != nil {
-			t.Fatal(err)
+func renewalFixtureStress(t *testing.T, rounds int, operation renewalFixtureOperation) {
+	t.Helper()
+	if operation == nil {
+		operation = func(_ string, _ int64, apply func() error) error { return apply() }
+	}
+	ctx := renewalFixtureContext(t)
+	lostPause, regressed, refused := 0, 0, int64(0)
+	for i := 0; i < rounds; i++ {
+		result := renewalFixtureRound(t, ctx, operation)
+		refused += result.transientRefusals
+		final := "unavailable"
+		if result.final != nil {
+			final = fmt.Sprintf("done=%d want=%s", result.final.Progress.Done, result.final.Wants())
 		}
-		if rec.Wants() != job.WantPause {
+		if result.err != nil || result.loadErr != nil {
+			t.Fatalf("round=%d operation=%s n=%d error=%v last acknowledged=%d pause acknowledged=%t final={%s} load error=%v",
+				i+1, result.operation, result.n, result.err, result.lastAcknowledged, result.pauseAcknowledged, final, result.loadErr)
+		}
+		if result.lastAcknowledged != 20 || !result.pauseAcknowledged || result.final == nil {
+			t.Fatalf("round=%d incomplete fixture: last acknowledged=%d pause acknowledged=%t final={%s}",
+				i+1, result.lastAcknowledged, result.pauseAcknowledged, final)
+		}
+		if result.final.Wants() != job.WantPause {
 			lostPause++
+			t.Errorf("round=%d acknowledged pause erased: last acknowledged=%d final={%s}", i+1, result.lastAcknowledged, final)
 		}
-		if rec.Progress.Done != steps {
+		if result.final.Progress.Done != 20 {
 			regressed++
+			t.Errorf("round=%d acknowledged checkpoint regressed: last acknowledged=%d final={%s}", i+1, result.lastAcknowledged, final)
 		}
 	}
-	t.Logf("%d rounds: pause erased %d times, checkpoint went backwards %d times, %d writes refused outright", rounds, lostPause, regressed, refused)
+	t.Logf("%d rounds: pause erased %d times, checkpoint went backwards %d times, %d prepublication volume refusals retried", rounds, lostPause, regressed, refused)
 	if lostPause > 0 || regressed > 0 {
-		t.Fatalf("a renewal overwrote another writer: %d pauses lost, %d checkpoints regressed in %d rounds", lostPause, regressed, rounds)
+		t.Fatalf("a renewal overwrote an acknowledged write: %d pauses lost, %d checkpoints regressed in %d rounds", lostPause, regressed, rounds)
 	}
 }
 
