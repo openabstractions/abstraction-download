@@ -126,6 +126,18 @@ func main() {
 }
 ```
 
+Build the program, then grant it the downloads bundle once. The grant names
+the built program's absolute path:
+
+```console
+go build -o fetch.exe .
+openabstractions rights grant --for downloads --program C:\absolute\path\to\fetch.exe
+```
+
+The bundle lets the program submit download jobs and look up models on the
+`hf` and `ollama` registries. `--registry` names other registries, and
+`--credential` names registered credentials the program may have applied.
+
 `request.Encode` serializes the generated download request into the job's
 `Spec`, and `Submit` with `download.Kind` routes it to the download service.
 The digest and size are optional: an empty digest and a zero size mean
