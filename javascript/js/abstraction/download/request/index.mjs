@@ -21,5 +21,6 @@ export {
   newConstraints,
   newRequest,
   newSource,
+  scopedCredentialGuarantees,
   waitingExtensions,
 } from "./internal.mjs";

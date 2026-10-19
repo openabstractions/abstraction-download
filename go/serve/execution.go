@@ -27,6 +27,10 @@ const CredentialConsumer = "abstraction.download/http-execution@1"
 // requires (request.thrift credential_guarantees).
 var CredentialGuarantee = request.CredentialGuarantees[0]
 
+// ScopedCredentialGuarantee explicitly selects credentials/applier@2 for the
+// whole submitted request. It never changes credentials@1 preparation.
+var ScopedCredentialGuarantee = request.ScopedCredentialGuarantees[0]
+
 // NetworkCostGuarantee is the execution guarantee a request with network
 // unmetered requires (request.thrift network_cost_guarantees) [DL-N2].
 var NetworkCostGuarantee = request.NetworkCostGuarantees[0]
@@ -67,11 +71,34 @@ type SubjectCredentialChecker interface {
 	CheckSubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) error
 }
 
+// ScopedSubjectCredentialApplier applies the explicit credentials@2 route for
+// the receiving job owner's subject, with current scoped authorization.
+type ScopedSubjectCredentialApplier interface {
+	ApplyScopedSubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) (map[string]string, error)
+}
+
+type ScopedSubjectCredentialChecker interface {
+	CheckScopedSubjectCredential(ctx context.Context, subject acceptanceprovider.AuthenticatedSubject, name, host string) error
+}
+
+// ScopedCredentialAvailability reports whether the scoped enforcer and its
+// typed policy are configured. Temporary decision outages retain this route.
+type ScopedCredentialAvailability interface {
+	ScopedCredentialsAvailable() bool
+}
+
+func scopedCredentialsAvailable(applier CredentialApplier) bool {
+	available, ok := applier.(ScopedCredentialAvailability)
+	_, applies := applier.(ScopedSubjectCredentialApplier)
+	_, checks := applier.(ScopedSubjectCredentialChecker)
+	return ok && applies && checks && available.ScopedCredentialsAvailable()
+}
+
 // HTTPExecution is an explicitly configured service provider. Its input is the
 // generated request payload; destinations are allocated by operation identity
 // inside the private service root. It reuses the existing HTTP(S) runner.
-// A source naming a credential needs Credentials and the
-// abstraction.download/credentials@1 guarantee; external delegators require
+// A source naming a credential needs Credentials and exactly one credential
+// route guarantee; external delegators require
 // separately configured providers.
 type HTTPExecution struct {
 	OnError func(error)
@@ -104,17 +131,21 @@ var credentialName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // Prepare accepts anonymous requests. A request naming a credential needs the
 // credentials guarantee and the submitting scope, through PrepareScoped.
 func (e HTTPExecution) Prepare(id, kind string, raw []byte) ([]byte, error) {
-	work, _, err := prepareRequest("", id, kind, raw, false, false)
+	work, _, err := prepareRequest("", id, kind, raw, "", false)
 	return work, err
 }
 
 // ExecutionGuarantees advertises abstraction.download/credentials@1 when a
-// credentials applier is configured, and abstraction.download/network-cost@1
+// credentials applier is configured, credentials@2 with its configured scoped
+// checker and applier, and abstraction.download/network-cost@1
 // when this platform has a network cost source [DL-N2].
 func (e HTTPExecution) ExecutionGuarantees() []string {
 	guarantees := []string{}
 	if e.Credentials != nil {
 		guarantees = append(guarantees, CredentialGuarantee)
+	}
+	if scopedCredentialsAvailable(e.Credentials) {
+		guarantees = append(guarantees, ScopedCredentialGuarantee)
 	}
 	if e.network() != nil {
 		guarantees = append(guarantees, NetworkCostGuarantee)
@@ -133,7 +164,7 @@ func (e HTTPExecution) PrepareWithGuarantees(id, kind string, raw []byte, requir
 // credential ends each attempt credential:unavailable until an applier is
 // configured [JOB-A15, DL-N8].
 func (HTTPExecution) RecoveryGuarantees() []string {
-	return []string{CredentialGuarantee, NetworkCostGuarantee}
+	return []string{CredentialGuarantee, ScopedCredentialGuarantee, NetworkCostGuarantee}
 }
 
 // PrepareScoped records each named credential and the submitting scope in the
@@ -142,24 +173,27 @@ func (HTTPExecution) RecoveryGuarantees() []string {
 // guarantees: whether an applier or a cost source answers now is decided by
 // admission, so recovery prepares the same work while either is absent.
 func (e HTTPExecution) PrepareScoped(scope, id, kind string, raw []byte, required []string) ([]byte, []string, error) {
-	credentials, network := false, false
+	route, err := credentialRouteFor(required)
+	if err != nil {
+		return nil, nil, err
+	}
+	network := false
 	for _, guarantee := range required {
 		switch guarantee {
-		case CredentialGuarantee:
-			credentials = true
+		case CredentialGuarantee, ScopedCredentialGuarantee:
 		case NetworkCostGuarantee:
 			network = true
 		default:
 			return nil, nil, errors.New("unsupported execution guarantee")
 		}
 	}
-	return prepareRequest(scope, id, kind, raw, credentials, network)
+	return prepareRequest(scope, id, kind, raw, route, network)
 }
 
 // ValidateRequest applies the profile's request checks without preparing work.
 // A credential name is accepted when well formed.
 func ValidateRequest(raw []byte) error {
-	_, _, err := prepareRequest("validation", "validation", download.Kind, raw, true, true)
+	_, _, err := prepareRequest("validation", "validation", download.Kind, raw, CredentialGuarantee, true)
 	return err
 }
 
@@ -167,7 +201,7 @@ func ValidateRequest(raw []byte) error {
 // with network unmetered carries the constraint in its spec and
 // abstraction.download/network-cost@1 in requires; network any and an absent
 // constraint prepare exactly as before [DL-N1].
-func prepareRequest(scope, id, kind string, raw []byte, credentials, network bool) ([]byte, []string, error) {
+func prepareRequest(scope, id, kind string, raw []byte, route string, network bool) ([]byte, []string, error) {
 	if kind != download.Kind {
 		return nil, nil, errors.New("unsupported work kind")
 	}
@@ -183,13 +217,16 @@ func prepareRequest(scope, id, kind string, raw []byte, credentials, network boo
 	for _, source := range input.Sources {
 		prepared := download.Source{Scheme: source.Scheme, Locator: source.Locator}
 		if source.Credential != "" {
-			if !credentials {
+			if route == "" {
 				return nil, nil, fmt.Errorf("a source naming a credential requires %s", CredentialGuarantee)
 			}
 			if !credentialName.MatchString(source.Credential) || scope == "" {
 				return nil, nil, errors.New("invalid credential reference")
 			}
 			prepared.Attrs = map[string]string{download.CredentialAttr: source.Credential, download.CredentialScopeAttr: scope}
+			if route == ScopedCredentialGuarantee {
+				prepared.Attrs[download.CredentialRouteAttr] = route
+			}
 		}
 		spec.Sources = append(spec.Sources, prepared)
 	}
@@ -332,6 +369,9 @@ func (noExecutionCredentials) Lookup(string, string) (map[string]string, bool) {
 // LookupSource answers a source naming a credential in a service with no
 // applier: nothing can apply it now, and the attempt stays retryable.
 func (noExecutionCredentials) LookupSource(src download.Source, _ string) (map[string]string, error) {
+	if _, err := download.CredentialRoute(src); err != nil {
+		return nil, err
+	}
 	return nil, download.CredentialRefusal(src.Attrs[download.CredentialAttr], "unavailable")
 }
 
@@ -353,14 +393,26 @@ func (appliedCredentials) Lookup(string, string) (map[string]string, bool) { ret
 
 func (c appliedCredentials) LookupSource(src download.Source, host string) (map[string]string, error) {
 	name, scope := src.Attrs[download.CredentialAttr], src.Attrs[download.CredentialScopeAttr]
+	route, err := download.CredentialRoute(src)
+	if err != nil {
+		return nil, err
+	}
 	if scope == "" {
 		return nil, download.CredentialRefusal(name, "forbidden")
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
 	var headers map[string]string
-	var err error
-	if c.lookup != nil {
+	if route == ScopedCredentialGuarantee {
+		if !scopedCredentialsAvailable(c.applier) || c.lookup == nil || c.operationID == "" {
+			return nil, download.CredentialRefusal(name, "unavailable")
+		}
+		subject, found, lookupErr := c.lookup(c.operationID, scope)
+		if lookupErr != nil || !found || subject == nil {
+			return nil, download.CredentialRefusal(name, "unavailable")
+		}
+		headers, err = c.applier.(ScopedSubjectCredentialApplier).ApplyScopedSubjectCredential(ctx, *subject, name, host)
+	} else if c.lookup != nil {
 		if c.operationID == "" {
 			return nil, download.CredentialRefusal(name, "unavailable")
 		}
@@ -395,5 +447,20 @@ func (c appliedCredentials) LookupSource(src download.Source, host string) (map[
 
 // requiresCredentials reports whether a guarantee list names the credentials guarantee.
 func requiresCredentials(required []string) bool {
-	return slices.Contains(required, CredentialGuarantee)
+	return slices.Contains(required, CredentialGuarantee) || slices.Contains(required, ScopedCredentialGuarantee)
+}
+
+func credentialRouteFor(required []string) (string, error) {
+	original := slices.Contains(required, CredentialGuarantee)
+	scoped := slices.Contains(required, ScopedCredentialGuarantee)
+	if original && scoped {
+		return "", errors.New("a request requires exactly one credential route")
+	}
+	if scoped {
+		return ScopedCredentialGuarantee, nil
+	}
+	if original {
+		return CredentialGuarantee, nil
+	}
+	return "", nil
 }

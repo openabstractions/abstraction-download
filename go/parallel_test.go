@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,9 +240,20 @@ func TestParallelResumesFromARangeSetNotAPrefix(t *testing.T) {
 // has to be the one stream that still works — not a failure.
 func TestFallsBackToOneStreamWhenRangesAreRefused(t *testing.T) {
 	body, digest := payload(t, minParallel+1)
-	var n int
+	var n atomic.Int32
+	probeClosed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
+		n.Add(1)
+		if r.Header.Get("Range") == "bytes=0-0" {
+			// This server ignores Range. Its whole-body response could be many
+			// gigabytes, so the probe must close it before reading any body.
+			w.Header().Set("Content-Length", "4070624520")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(probeClosed)
+			return
+		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)
@@ -248,11 +261,18 @@ func TestFallsBackToOneStreamWhenRangesAreRefused(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	r, store, id := parallelJob(t, body, digest, srv.URL+"/blob.bin")
-	if err := r.Run(context.Background(), id); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.Run(ctx, id); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("expected a refused probe and one whole-file stream, got %d requests", n)
+	select {
+	case <-probeClosed:
+	case <-ctx.Done():
+		t.Fatal("ignored-Range probe body was not closed")
+	}
+	if n.Load() != 2 {
+		t.Fatalf("expected a refused probe and one whole-file stream, got %d requests", n.Load())
 	}
 	got, err := os.ReadFile(finalOf(t, store, id))
 	if err != nil {
@@ -261,6 +281,40 @@ func TestFallsBackToOneStreamWhenRangesAreRefused(t *testing.T) {
 	sum := sha256.Sum256(got)
 	if "sha256:"+hex.EncodeToString(sum[:]) != digest {
 		t.Fatal("the fallback stream did not deliver the artifact")
+	}
+}
+
+func TestRangeProbeCancellationBeforeHeaders(t *testing.T) {
+	requested := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=0-0" {
+			t.Errorf("probe Range = %q", r.Header.Get("Range"))
+		}
+		close(requested)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, _, err := (HTTP{}).Ranged(ctx, Source{Scheme: "http", Locator: srv.URL}, nil)
+		finished <- err
+	}()
+	select {
+	case <-requested:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe request did not reach the source")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled probe error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled probe did not return")
 	}
 }
 

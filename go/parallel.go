@@ -211,6 +211,7 @@ func (r *Runner) rangePlan(ctx context.Context, rec *job.Record, spec Spec) ([]r
 	}
 	var serving []rangeSource
 	var p plan
+	credentials := r.credentialsForOperation(rec.ID)
 	for _, src := range byPriority(spec.Sources) {
 		if networkAllows(ctx) != nil {
 			return nil, plan{}, false
@@ -226,11 +227,11 @@ func (r *Runner) rangePlan(ctx context.Context, rec *job.Record, spec Spec) ([]r
 		if r.Reach.check(src.Locator) != nil {
 			continue
 		}
-		headers, err := headersFor(src, r.Credentials)
+		headers, err := headersFor(src, credentials)
 		if err != nil {
 			continue
 		}
-		size, ranged, err := rf.Ranged(withCredentialHops(ctx, src, r.Credentials, headers), src, headers)
+		size, ranged, err := rf.Ranged(withCredentialHops(ctx, src, credentials, headers), src, headers)
 		if err != nil || !ranged {
 			continue
 		}
@@ -367,7 +368,7 @@ func (r *Runner) parallel(ctx context.Context, rec *job.Record, epoch int64, par
 		go func() {
 			defer wg.Done()
 			for rng := range work {
-				err := r.fetchRange(ctx, serving, RangeRequest{
+				err := r.fetchRange(ctx, rec.ID, serving, RangeRequest{
 					Range: rng, Out: f, Validators: w.validators, Beat: keep.beat,
 					Landed: w.arrival(rng.Start),
 				})
@@ -432,8 +433,9 @@ feed:
 // re-planned onto the same source by the next sweep and refused again. The
 // preference between failures is the one the single-stream path makes: a source
 // that says no does not speak for a mirror that merely dropped the connection.
-func (r *Runner) fetchRange(ctx context.Context, serving []rangeSource, req RangeRequest) error {
+func (r *Runner) fetchRange(ctx context.Context, operationID string, serving []rangeSource, req RangeRequest) error {
 	var last error
+	credentials := r.credentialsForOperation(operationID)
 	// A source that fails part way has still landed its bytes, and the next
 	// source is asked only for the rest of the range.
 	var reached atomic.Int64
@@ -460,11 +462,11 @@ func (r *Runner) fetchRange(ctx context.Context, serving []rangeSource, req Rang
 		// artifact is 132 of these over hours; headers taken once would start
 		// returning 401 two thirds of the way through, at the point where the
 		// cost of being wrong is highest.
-		headers, err := headersFor(s.src, r.Credentials)
+		headers, err := headersFor(s.src, credentials)
 		if err == nil {
 			req.Headers = headers
 			req.Reach = r.Reach
-			err = s.rf.FetchRange(withCredentialHops(ctx, s.src, r.Credentials, headers), req)
+			err = s.rf.FetchRange(withCredentialHops(ctx, s.src, credentials, headers), req)
 		}
 		if err == nil {
 			return nil

@@ -37,6 +37,24 @@ jobs:
         with:
           go-version-file: ${{ matrix.module }}/go.mod
           cache: false
+      - name: select verified Windows Go SDK and smoke duplex pipes
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python3 tools/windows_go_sdk.py --cache-dir "$RUNNER_TEMP/windows-go-sdk" --github-env --smoke-dir "$RUNNER_TEMP/windows-go-smoke" > windows-go-sdk-proof.json
+          printf '\n### Verified Windows Go SDK and duplex race smoke\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat windows-go-sdk-proof.json >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: preserve Windows Go SDK source identity and smoke
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-go-sdk-${{ github.job }}-${{ github.run_attempt }}
+          path: |
+            windows-go-sdk-proof.json
+            ${{ runner.temp }}/windows-go-smoke/named-pipe-race.log
+            ${{ runner.temp }}/windows-go-smoke/smoke-receipt.json
+          if-no-files-found: error
 
       - name: state
         run: |

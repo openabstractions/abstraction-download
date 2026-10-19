@@ -7,7 +7,7 @@ application submits with kind `download` to `abstraction.job/acceptance@1`,
 naming the artifact's digest and size, its ordered sources and an optional
 network-cost constraint. It also names the guarantees a request may require,
 `abstraction.download/recoverable-submission@1`,
-`abstraction.download/credentials@1` and
+`abstraction.download/credentials@1`, `abstraction.download/credentials@2` and
 `abstraction.download/network-cost@1`, and the extension key
 `abstraction.download/waiting@1`. `download.thrift` defines the failure
 payloads a job record carries, `abstraction.download/failure@1` and
@@ -399,12 +399,17 @@ the final component by asking that directory to demonstrate its own rule,
 creating a name it owns and looking for the other spelling of it. It MUST
 NOT create either destination to find out and MUST leave nothing behind.
 
-Two questions stay outside DL-R31. Containment, whether a resolved path
-stays under the store root, is lexical (DL-S8): both sides are folded alike
-and neither may exist. A destination key, the string a record id is derived
-from before any record exists, is derivable from the path alone; an
-implementation that keys on one MUST first scan by DL-R31, and the key is
-then a race window.
+Two questions stay outside DL-R31 (VISION.md L623 decides both alike: no
+rule is read off the host's name and no case is folded off the volume's
+rule). Containment, whether a resolved path stays under the store root, is
+lexical (DL-S8): a resolved destination is the root joined to a relative
+path, so it carries the root's own spelling, both sides compare exactly, and
+neither may exist. A destination key, the string a record id is derived from
+before any record exists, is the deepest existing folder's final path, with
+links, junctions and 8.3 aliases resolved by the volume, and the names still
+to be created below it, compared as the file system compares names
+(`abstraction-identity` `PlaceKey`); an implementation that keys on one MUST
+first scan by DL-R31, and the key is then a race window.
 
 **[DL-R36] A job-service download's result document is the downloaded
 bytes.** The download service MUST assign every job-service download's
@@ -471,13 +476,23 @@ and [`credential-bound`](testdata/scenarios/credential-bound.txt).
 
 **[DL-K4] The service applies a named credential for the caller that
 submitted the job.** In the download service a request's
-`Source.credential` names a credential registered with
-`abstraction.credentials/holder@1`, and the request requires
-`abstraction.download/credentials@1`, which a provider MUST advertise only
-with a credentials applier. Preparation MUST record the name and the
+`Source.credential` names a credential registered in the submitting account.
+The request MUST require exactly one of
+`abstraction.download/credentials@1` and `abstraction.download/credentials@2`.
+`credentials@1` retains `abstraction.credentials/applier@1` and its original
+exact authorization. Explicit `credentials@2` selects
+`abstraction.credentials/applier@2` and scoped authorization for every named
+credential in that request. Requiring both MUST be refused `invalid` before
+journaling. A provider MUST advertise `credentials@1` only with its original
+applier and `credentials@2` only with a configured scoped checker, applier and
+typed policy. Preparation MUST record the name and the
 submitting caller's opaque scope in the source attributes; neither goes on
-the wire. For every request, redirect and resumed range, the executor MUST
-ask `abstraction.credentials/applier@1` with consumer
+the wire. Scoped preparation MUST also record
+`credential_route=abstraction.download/credentials@2` on every named source.
+An absent route retains the original version. Unknown, malformed or mixed
+source routes MUST be refused before any fetch or handoff.
+For every request, redirect and resumed range, the executor MUST
+ask its selected applier with consumer
 `abstraction.download/http-execution@1`, MUST send the returned headers
 once, and MUST keep them out of the record. An applier refusal MUST end the
 attempt *no*, with message `credential:<outcome>:<name>` and cause
@@ -487,17 +502,31 @@ applier MUST answer every such request `unavailable`. The environment
 reader `EnvCredentials` is the library's own bridge and MUST NOT be
 configured in the service.
 
+The scoped route MUST obtain the authenticated subject from the receiving
+job owner for the claimed operation and submitting scope. A source attribute
+MUST NOT select another operation or supply caller authority. Missing subject
+evidence or a missing scoped dependency MUST answer `unavailable`. Recovery
+MUST reconstruct the same selected route from the journaled required
+guarantees while its dependency is unavailable; it MUST never substitute the
+original route. Accepted original requests retain their preparation and exact
+authorization. A full GET sent after an unusable ranged response is a new request
+and MUST recheck current authorization on either route.
+
 **[DL-K1] Admission refuses a credential the caller may not apply.** Before
 the job provider journals a submission naming a credential, the service
 MUST ask the applier's `Check` for the submitting caller, consumer
 `abstraction.download/http-execution@1`, the credential and each source host
-(`abstraction-job/CONTRACT.md` JOB-A16). Any outcome other than `applied`
-and `unavailable` MUST refuse the submission `invalid` with reason
-`credential:<outcome>:<name>`, and `unavailable` MUST refuse it
+(`abstraction-job/CONTRACT.md` JOB-A16). The outcome `not_permitted`, a
+rights refusal, MUST refuse the submission `forbidden`, and any other
+outcome except `applied` and `unavailable` MUST refuse it `invalid`, each
+with reason `credential:<outcome>:<name>`; `unavailable` MUST refuse it
 `unavailable` with `credential:unavailable:<name>`. Nothing is journaled or
 sealed, and the same identity is admissible once the credential or its rule
 changes. A credential revoked between admission and execution ends the
 attempt as DL-K4 says.
+The check MUST use the request's selected applier version. Scoped admission
+MUST use the receiving boundary's authenticated subject, and an opaque scope
+alone MUST return `unavailable`.
 
 **[DL-K2] Each redirect host is its own use.** A redirect of a request that
 carried an applied credential MUST drop that credential's headers and MUST
@@ -509,6 +538,9 @@ Headers the request itself supplied MUST follow a redirect only to the
 source host and its subdomains.
 
 **[DL-K3] Delegation carries the credential name, never its value.**
+Delegated execution and remote job handoff MUST refuse `credentials@2` until
+their explicit protocol preserves its authenticated subject and scoped
+authorization semantics. They MUST NOT reinterpret it as `credentials@1`.
 Delegated execution MUST refuse a request naming a credential unless a
 configured delegate claims `abstraction.download/credentials@1`. The remote
 job delegate submits the generated request with each source's credential
@@ -682,7 +714,17 @@ refused.** A reader MUST resolve first and ask where the answer landed;
 containment is measured from the root, so one `..` climbs out of it wherever
 it sits. Scanning the input for `..` fires on the contained `a/../b`. A
 backslash in a relative path is a separator: `..\..\Startup\evil.bat` is a
-climb, because a backslash cannot legally be in a Windows file name.
+climb, because a backslash cannot legally be in a Windows file name. The
+resolved path is the root joined to the relative path, so it is compared
+with the root exactly, folding no case on any host (VISION.md L623; DL-R31).
+That lexical check is the backstop. When the root exists on a local drive,
+the filesystem also decides (`abstraction-identity` `Within`, which
+resolves the deepest existing folder above the path): a folder inside the
+root that is a junction or link to a folder outside it carries the path out,
+and the destination MUST be refused. A root that does not exist, or that is
+not on a local drive, leaves the lexical check to decide; any other failure
+to answer MUST refuse. A link made inside the root after this check and
+before the write is outside this rule.
 
 **[DL-S9] A relative destination that names the store's own layout is
 refused.** A final of `jobs/<id>.json` overwrites a job record and a final
@@ -710,10 +752,9 @@ an id exists) MUST reserve the whole of `work/`.
 platform.** It MUST fold case and trim a trailing dot or space from every
 segment on every host. `Jobs/x.json` and `jobs./x.json` both open `jobs/`
 on NTFS, and a record refused by Windows and accepted by Linux would mean
-the refusal depends on who looked. Containment (DL-S8) folds case only when
-the host is Windows; that is a guess about the host that matches no
-filesystem exactly (DL-R31) and survives only because containment folds
-both sides alike. This comparison is against names the contract fixed.
+the refusal depends on who looked. Containment (DL-S8) folds no case: both
+of its sides carry the root's spelling (DL-R31). This comparison is against
+names the contract fixed.
 
 **[DL-S13] A segment of only dots and spaces is left alone.** Such a segment
 MUST be compared as written: it is a real name on POSIX and not one Windows

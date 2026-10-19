@@ -78,7 +78,8 @@ func credentialSubmission(window api.HistoryWindow, key, locator string) api.Sub
 }
 
 // A submission naming a credential the caller may not apply is refused at
-// Submit: invalid with credential:<outcome>:<name>, or unavailable, with no
+// Submit: forbidden for the rights refusal not_permitted, invalid for another
+// refusal, each with credential:<outcome>:<name>, or unavailable, with no
 // journal, seal or work. The same identity is accepted once the check admits
 // it. A credential refused at execution ends the attempt with the typed cause
 // credential and the applier's outcome in the message [JOB-A16, DL-K1].
@@ -105,7 +106,7 @@ func TestCredentialRefusedAtAdmissionAndTypedAtExecution(t *testing.T) {
 	}
 	s := credentialSubmission(window, "gated", origin.URL+"/gated")
 	for outcome, want := range map[string][2]string{
-		"not_permitted": {"invalid", "credential:not_permitted:hf"},
+		"not_permitted": {"forbidden", "credential:not_permitted:hf"},
 		"unknown":       {"invalid", "credential:unknown:hf"},
 		"unavailable":   {"unavailable", "credential:unavailable:hf"},
 	} {

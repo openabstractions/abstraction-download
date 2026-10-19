@@ -1,5 +1,17 @@
 # abstraction-download
 
+*For applications that fetch large files through OA. Provider authors start at
+[For provider implementers](#for-provider-implementers-and-the-deprecated-in-process-client).*
+
+A download here is a job: the application submits it to OA's shared runtime and
+reads the result later. The example is in
+[Through the shared runtime](#through-the-shared-runtime).
+
+**What's new here:** A download outlives the application that asked: the
+runtime runs it as a job, it survives the service restarting, the bytes are
+verified against a digest when one is given, and a digest already fetched is
+copied instead of fetched again.
+
 Give an application a download that can keep running after the application
 closes. The request says where the bytes may come from, how to verify them and
 where the finished content belongs. A digest identifies the bytes once: a
@@ -10,37 +22,38 @@ downloader, keeps progress in one job table and reports a recoverable result.
 A finished download is not readable through
 [`abstraction-storage`](https://github.com/openabstractions/abstraction-storage)'s
 `content-reader@1` by its digest: the runtime never copies a download's bytes
-into the content root on completion. [The worked bridge](#reading-a-finished-download-through-storage)
+into the content root on completion. [The worked bridge](#into-the-content-store)
 below reads a finished download's bytes and writes them through
 `content-writer@1`, the step that makes them readable by digest.
 
 ## Through the shared runtime
 
-Applications resolve durable jobs through
-[the facade](https://github.com/openabstractions/abstraction-facade), serialize
-the generated download request as the job specification, and retain the receipt
-and binding before waiting. A lost submit reply is reconciled with the same
-request identity. Waiting cancellation leaves the accepted job with the service.
+An application submits a download as a job through
+[the facade](https://github.com/openabstractions/abstraction-facade), shows
+its progress, and puts the finished file where it wants it:
 
 ```go
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	download "github.com/openabstractions/abstraction-download/go"
 	request "github.com/openabstractions/abstraction-download/go/abstraction/download/request"
 	facade "github.com/openabstractions/abstraction-facade/go"
 	api "github.com/openabstractions/abstraction-job/go/abstraction/job/acceptance"
-	content "github.com/openabstractions/abstraction-storage/go/abstraction/storage/content"
-	storage "github.com/openabstractions/abstraction-storage/go/client"
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	url, path := os.Args[1], os.Args[2] // an https URL, and where to save it
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
 	jobs, err := facade.Discover().ResolveJobs(ctx, facade.Requirements{})
@@ -51,155 +64,87 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	digest := "sha256:2fc237e65e1f963310e9c961d8e71e932734a72f90e3216a972d83edd1feb756"
-	size := int64(328597408)
-	spec := request.Encode(&request.Request{
-		Artifact: request.Artifact{
-			Digest: digest,
-			Size:   size,
-		},
-		Sources: []request.Source{
-			{Scheme: "https", Locator: "https://example.invalid/artifact"},
-		},
-	})
-
-	id := api.RequestIdentity{Key: "artifact-fetch", HistoryEpoch: window.HistoryEpoch}
+	// No digest and no size: both are unknown until the transfer reveals them.
+	spec := request.Encode(&request.Request{Sources: []request.Source{{Scheme: "https", Locator: url}}})
+	sum := sha256.Sum256([]byte(url)) // a key stays under 1 KiB whatever the URL
+	id := api.RequestIdentity{Key: "fetch-" + hex.EncodeToString(sum[:]), HistoryEpoch: window.HistoryEpoch}
 	accepted, err := jobs.Submit(ctx, api.Submission{Identity: id, Kind: download.Kind, Spec: spec})
 	if err != nil {
 		log.Fatal(err)
 	}
 	if accepted.Outcome != api.AcceptanceOutcomeAccepted {
-		log.Fatalf("submission not accepted: %s %s", accepted.Outcome, accepted.Reason)
-	}
-	// Keep id and jobs.Binding() so a later process can reconcile this job.
-	binding := jobs.Binding()
-
-	// A restarted process rebinds with the saved binding and reconciles the
-	// same identity instead of resubmitting.
-	restored, err := facade.Discover().RestoreJobs(ctx, binding)
-	if err != nil {
-		log.Fatal(err)
-	}
-	reconciled, err := restored.Reconcile(ctx, id)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("reconciled:", reconciled.Outcome)
-
-	// A later run, possibly after a restart, learns whether it finished.
-	observed, err := restored.ObserveWork(ctx, id)
-	if err != nil {
-		log.Fatal(err)
-	}
-	switch observed.Outcome {
-	case api.ObservationOutcomeObserved:
-		if observed.Snapshot.State != api.WorkStateComplete {
-			fmt.Println("still working:", observed.Snapshot.State)
-			return
-		}
-	case api.ObservationOutcomeUnknown:
-		log.Fatal("absence: no record under this identity on this binding")
-	case api.ObservationOutcomeForbidden:
-		log.Fatal("not authorized to observe this job")
-	default:
-		log.Fatalf("observation refused: %s", observed.Outcome)
+		log.Fatalf("not accepted: %s %s", accepted.Outcome, accepted.Reason)
 	}
 
-	result, err := restored.ReadResult(ctx, id, 0, 65536)
-	if err != nil {
-		log.Fatal(err)
-	}
-	switch result.Outcome {
-	case api.ResultOutcomeData:
-		fmt.Println("bytes:", len(result.Chunk.Data), "eof:", result.Chunk.EOF)
-	case api.ResultOutcomeNotReady:
-		fmt.Println("not ready yet")
-	case api.ResultOutcomeForbidden:
-		log.Fatal("not authorized to read this result")
-	default:
-		log.Fatalf("result unavailable: %s", result.Outcome)
-	}
-
-	// The bridge into abstraction-storage: page the finished download's
-	// bytes out of ReadResult and write them through content-writer@1.
-	writer, err := facade.Discover().ResolveStorageWriter(ctx, facade.Requirements{})
-	if err != nil {
-		log.Fatal(err)
-	}
-	writeID, err := storage.NewRequestID() // retain before writing
-	if err != nil {
-		log.Fatal(err)
-	}
-	begun, err := writer.Begin(ctx, writeID, digest, size)
-	if err != nil {
-		log.Fatal(err)
-	}
-	switch begun.Outcome {
-	case content.BeginOutcomeStarted:
-		upload := *begun.Upload
-		for offset := upload.Received; ; {
-			chunk, err := restored.ReadResult(ctx, id, offset, 65536)
-			if err != nil {
-				log.Fatal(err)
-			}
-			if chunk.Outcome != api.ResultOutcomeData {
-				log.Fatalf("result unavailable: %s", chunk.Outcome)
-			}
-			appended, err := writer.Append(ctx, upload, offset, chunk.Chunk.Data)
-			if err != nil {
-				log.Fatal(err)
-			}
-			upload.Received = appended.Received
-			offset = appended.Received
-			if chunk.Chunk.EOF {
-				break
-			}
-		}
-		if _, err := writer.Commit(ctx, upload); err != nil {
+	for { // progress until the job ends
+		observed, err := jobs.ObserveWork(ctx, id)
+		if err != nil {
 			log.Fatal(err)
 		}
-	case content.BeginOutcomeCommitted, content.BeginOutcomePresent:
-		// Another writer already stored these bytes under this digest.
-	default:
-		log.Fatalf("begin refused: %s", begun.Outcome)
+		if observed.Outcome != api.ObservationOutcomeObserved {
+			log.Fatalf("observe: %s", observed.Outcome)
+		}
+		job := observed.Snapshot
+		fmt.Printf("\r%d of %d bytes", job.Progress.Done, job.Progress.Total)
+		if job.State == api.WorkStateComplete {
+			break
+		}
+		if job.State == api.WorkStateFailed || job.State == api.WorkStateCancelled {
+			log.Fatalf("\ndownload %s", job.State)
+		}
+		time.Sleep(time.Second)
 	}
 
-	reader, err := facade.Discover().ResolveStorage(ctx, facade.Requirements{})
+	// Link the result into place; copy it where a link cannot reach.
+	destination, err := filepath.Abs(path)
 	if err != nil {
 		log.Fatal(err)
 	}
-	opened, err := reader.Open(ctx, digest)
+	link, err := jobs.LinkResult(ctx, id, destination)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if opened.Outcome != content.OpenOutcomeOpened {
-		log.Fatalf("storage refused open: %s", opened.Outcome)
+	switch link.Outcome {
+	case api.LinkOutcomeLinked:
+	case api.LinkOutcomeRemote, api.LinkOutcomeOtherVolume, api.LinkOutcomeNoHardLinks,
+		api.LinkOutcomeUnsupported, api.LinkOutcomeForbidden:
+		file, err := os.Create(destination)
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = jobs.CopyResult(ctx, id, file)
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("\nlink: %s", link.Outcome)
 	}
-	fmt.Println("readable by digest:", digest)
+	fmt.Println("\nsaved", destination)
 }
 ```
 
-The download's own result document is its downloaded bytes (contract rule
-DL-R36). `ReadResult` pages through the fetched artifact itself: a caller
-reads it in `65536`-byte chunks until `EOF`, exactly as the block above reads
-its first chunk.
+`request.Encode` serializes the generated download request into the job's
+`Spec`, and `Submit` with `download.Kind` routes it to the download service.
+The digest and size are optional: an empty digest and a zero size mean
+unknown (`request.thrift`). When the publisher gives a SHA-256, put it in
+`Artifact.Digest` and the service verifies the bytes before it reports the
+job complete. `ObserveWork` reports `Done` of `Total` bytes, with `Total` 0
+until the size is known. `LinkResult` hard-links the finished file to an
+absolute path that does not exist yet and never copies. On another volume, a
+file system without hard links or a remote runtime it answers `other_volume`,
+`no_hard_links` or `remote`; a runtime without linking or a refused link
+answers `unsupported` or `forbidden`. In each case `CopyResult` writes the
+bytes instead. A file already at the path stops the link with `exists`, so
+remove the old file before a second run.
 
-`ResolveJobs` binds a `JobsClient` to the service, and `GetHistoryWindow` supplies
-the epoch a `RequestIdentity` needs. `request.Encode` serializes the generated
-download request into the job's opaque `Spec` bytes; `Submit` carries
-`download.Kind` so the service routes the job to the download service. The
-receipt inside `accepted` and `jobs.Binding()` are what a second
-process — run later, or after a restart — uses to find this same job again:
-`ObserveWork` (or, for a caller that lists everything it owns rather than
-remembering one identity, `ListWork`) reads its state without changing it.
-`ReadResult` answers `not_ready` before the bytes are in, `forbidden` when the
-caller may not read them, and the observation call answers `unknown` — absence
-— when the service holds no record under that identity at all: the outcomes an
-application branches on, rather than assuming success. `RestoreJobs` and
-`Reconcile`, above, are the restart step; [the job module's own
-example](https://github.com/openabstractions/abstraction-job#an-example-that-runs)
-carries the full recovery pattern, including retry after a failed attempt.
+Running the program again with the same URL presents the same idempotency key,
+derived from the URL's SHA-256,
+and finds the same job, so an interrupted run resumes and fetches nothing
+twice. A timeout or a closed program ends only the wait; `CancelWork` stops the
+job.
 
 The shipped command follows that path:
 
@@ -211,7 +156,37 @@ openabstractions jobs list
 Use `--sha256` when the publisher supplies a digest. Credentials are registered
 by name through `openabstractions credentials`; URLs should carry no secrets.
 
-### Reading a finished download through storage
+## Surviving a restart
+
+A program that may restart before the job ends keeps two things from the
+first run: the `RequestIdentity` it submitted and `jobs.Binding()`. A later
+run rebinds and reconciles the same job; it never submits again:
+
+```go
+// resume finds a download a previous run submitted. saved is what that run
+// kept from jobs.Binding(), and id is its RequestIdentity.
+func resume(ctx context.Context, saved client.JobsBinding, id api.RequestIdentity) (*facade.JobsClient, error) {
+	jobs, err := facade.Discover().RestoreJobs(ctx, saved)
+	if err != nil {
+		return nil, err
+	}
+	reconciled, err := jobs.Reconcile(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if reconciled.Outcome != api.AcceptanceOutcomeAccepted {
+		return nil, fmt.Errorf("reconcile: %s %s", reconciled.Outcome, reconciled.Reason)
+	}
+	return jobs, nil // observe and link the result as the example above does
+}
+```
+
+`Reconcile` answers for the original submission, including a submission whose
+reply was lost. [The job module's
+example](https://github.com/openabstractions/abstraction-job#an-example-that-runs)
+carries the full recovery pattern, including retry after a failed attempt.
+
+## Into the content store
 
 The content root is a fixed directory the runtime keeps under its own state
 directory (`%LOCALAPPDATA%\openabstractions\runtime-v1` on Windows,
@@ -219,11 +194,11 @@ directory (`%LOCALAPPDATA%\openabstractions\runtime-v1` on Windows,
 `~/Library/Application Support/openabstractions/runtime-v1` on macOS, or the
 `--state-dir` an isolated runtime was given), populated only by
 `content-writer@1` commits. A job-service
-download's destination is always its own result document (contract rule DL-R36,
-above), a location the runtime owns, never that content root, and nothing
-copies one into the other on completion. An application has no destination
-path to open here: `ReadResult` is the only way to reach the bytes. To make
-them readable by digest through
+download's destination is always its own result document (contract rule
+DL-R36), a location the runtime owns, never that content root, and nothing
+copies one into the other on completion. An application reaches the bytes
+through `LinkResult`, `CopyResult` or `ReadResult`. To make them readable by
+digest through
 [`abstraction-storage`](https://github.com/openabstractions/abstraction-storage)'s
 `content-reader@1`, page them out of `ReadResult` and write them through
 `content-writer@1`'s `Begin`/`Append`/`Commit` yourself; nothing does this for
@@ -236,13 +211,61 @@ every appended byte and compares it against whatever digest `Begin` declared.
 Because both hashes cover the identical bytes, the download's own already-
 proven digest can be declared at `Begin` without a third, application-side
 hash. `Commit` recomputes and checks the hash itself before it accepts the
-upload, on its own evidence. The bridge is the second half of [the example
-above](#through-the-shared-runtime), from `ResolveStorageWriter` to the final
-`reader.Open`: `storage` there is
-`github.com/openabstractions/abstraction-storage/go/client` and `content` is
+upload, on its own evidence.
+
+```go
+// store writes a completed download into the content store, where
+// content-reader@1 reads it by digest. digest and size are the request's
+// Artifact, which the download proved before it completed.
+func store(ctx context.Context, jobs *facade.JobsClient, id api.RequestIdentity, digest string, size int64) error {
+	writer, err := facade.Discover().ResolveStorageWriter(ctx, facade.Requirements{})
+	if err != nil {
+		return err
+	}
+	writeID, err := storage.NewRequestID() // retain before writing
+	if err != nil {
+		return err
+	}
+	begun, err := writer.Begin(ctx, writeID, digest, size)
+	if err != nil {
+		return err
+	}
+	switch begun.Outcome {
+	case content.BeginOutcomeCommitted, content.BeginOutcomePresent:
+		return nil // another writer already stored these bytes
+	case content.BeginOutcomeStarted:
+	default:
+		return fmt.Errorf("begin: %s", begun.Outcome)
+	}
+	upload := *begun.Upload
+	for offset := upload.Received; ; {
+		chunk, err := jobs.ReadResult(ctx, id, offset, 65536)
+		if err != nil {
+			return err
+		}
+		if chunk.Outcome != api.ResultOutcomeData {
+			return fmt.Errorf("result: %s", chunk.Outcome)
+		}
+		appended, err := writer.Append(ctx, upload, offset, chunk.Chunk.Data)
+		if err != nil {
+			return err
+		}
+		upload.Received, offset = appended.Received, appended.Received
+		if chunk.Chunk.EOF {
+			break
+		}
+	}
+	_, err = writer.Commit(ctx, upload)
+	return err
+}
+```
+
+`storage` is `github.com/openabstractions/abstraction-storage/go/client` and
+`content` is
 `github.com/openabstractions/abstraction-storage/go/abstraction/storage/content`,
 the same package [the storage README](https://github.com/openabstractions/abstraction-storage#reading-content)
-imports for `content-reader@1` and `content-writer@1`.
+imports for `content-reader@1` and `content-writer@1`. The bridge needs the
+digest and size at `Begin`, so it serves a download whose request named them.
 
 The file-store examples below are explicitly selected native provider APIs with
 separate lifecycle guarantees. Their historical conformance describes that
@@ -426,3 +449,13 @@ runtime path, `h.Destination()` names a real path the caller owns.
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+<!-- BEGIN GENERATED PERMISSION DEFINITIONS -->
+
+## Permission definitions
+
+Generated from the existing compiled catalogue. [RIGHTS.json](RIGHTS.json) contains the complete action/profile records, disclosure, lifecycle, first-use behavior, selector support and finite bundles.
+
+This projection has no named action definition for Download. Delegated jobs and caller/service ownership retain their existing admission; job, credential and storage actions are listed under their defining layers.
+
+<!-- END GENERATED PERMISSION DEFINITIONS -->

@@ -1,0 +1,14 @@
+{
+  "format": "openabstractions-rights@1",
+  "owner": "abstraction.download",
+  "generated": "Do not edit. Run rights-catalogue --write from the existing compiled catalogue.",
+  "source": "github.com/openabstractions/abstraction-facade/go/grants",
+  "availability": "Compiled catalogue reference: served and selector support use the named receiving-service context. Connected-runtime discovery supplies current availability. Facade Applications is experimental. Definitions grant no access.",
+  "compiled_receivers": {
+    "credentials": true,
+    "application_logs": true
+  },
+  "coverage": "This projection has no named action definition for Download. Delegated jobs and caller/service ownership retain their existing admission; job, credential and storage actions are listed under their defining layers.",
+  "definitions": [],
+  "bundles": []
+}

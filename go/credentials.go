@@ -50,9 +50,56 @@ const CredentialAttr = "credential"
 // opaque caller namespace, grants nothing, and is never sent on the wire.
 const CredentialScopeAttr = "credential_scope"
 
+// CredentialRouteAttr records the explicit service authorization route. Old
+// sources omit it and retain credentials@1. A route names a promise, grants no
+// authority, and never goes on the wire.
+const CredentialRouteAttr = "credential_route"
+
+const (
+	CredentialRouteOriginal = "abstraction.download/credentials@1"
+	CredentialRouteScoped   = "abstraction.download/credentials@2"
+)
+
+// CredentialRoute validates a source's retained route. Only a named credential
+// can carry one; scoped execution also needs the receiving job caller's scope.
+func CredentialRoute(src Source) (string, error) {
+	route, explicit := src.Attrs[CredentialRouteAttr]
+	name := src.Attrs[CredentialAttr]
+	if !explicit {
+		if name == "" {
+			return "", nil
+		}
+		return CredentialRouteOriginal, nil
+	}
+	if name == "" || (route != CredentialRouteOriginal && route != CredentialRouteScoped) ||
+		(route == CredentialRouteScoped && src.Attrs[CredentialScopeAttr] == "") {
+		return "", CredentialRefusal(name, "invalid")
+	}
+	return route, nil
+}
+
+// ValidateCredentialRoutes keeps one route for all named sources of a request.
+func ValidateCredentialRoutes(sources []Source) error {
+	selected := ""
+	for _, src := range sources {
+		route, err := CredentialRoute(src)
+		if err != nil {
+			return err
+		}
+		if route == "" {
+			continue
+		}
+		if selected != "" && selected != route {
+			return CredentialRefusal(src.Attrs[CredentialAttr], "invalid")
+		}
+		selected = route
+	}
+	return nil
+}
+
 // SourceCredentials resolves a source's credential for one request to host,
 // with the source's attributes, for a service that applies a credential for the
-// caller that submitted the work (abstraction.credentials/applier@1). When a
+// caller that submitted the work through its retained applier route. When a
 // Credentials value implements it, the runner calls LookupSource instead of
 // Lookup, once for every request. A refusal is a *CredentialError; the headers
 // are sent once and kept out of every record.
@@ -170,6 +217,12 @@ type hopCredential struct {
 	// apply returns the credential's headers for host, nil when the
 	// credential is not bound to host, or the refusal that ends the request.
 	apply func(host string) (map[string]string, error)
+	// refreshInitial rechecks service application when one fetch opens another
+	// request, such as a full GET after an unusable ranged response. The first send
+	// consumes headersFor's result. Each fetch owns this context and sends its
+	// requests and redirects in sequence.
+	refreshInitial func(host string) (map[string]string, error)
+	initialSent    bool
 }
 
 type hopCredentialKey struct{}
@@ -183,6 +236,15 @@ func withCredentialHops(ctx context.Context, src Source, creds Credentials, head
 		return ctx
 	}
 	hop := &hopCredential{}
+	if bound, ok := creds.(SourceCredentials); ok {
+		hop.refreshInitial = func(host string) (map[string]string, error) {
+			host, err := plainHost(host)
+			if err != nil {
+				return nil, err
+			}
+			return bound.LookupSource(src, host)
+		}
+	}
 	for k, v := range headers {
 		if supplied, ok := src.Headers[k]; !ok || supplied != v {
 			hop.applied = append(hop.applied, k)
@@ -225,6 +287,10 @@ func credentialHops(ctx context.Context) *hopCredential {
 // rule — a fifth attribute would have been sent to the server by default.
 // Nothing reads Attrs here, so there is no case left to forget.
 func headersFor(src Source, creds Credentials) (map[string]string, error) {
+	route, err := CredentialRoute(src)
+	if err != nil {
+		return nil, err
+	}
 	out := make(map[string]string, len(src.Headers)+1)
 	for k, v := range src.Headers {
 		out[k] = v
@@ -254,6 +320,9 @@ func headersFor(src Source, creds Credentials) (map[string]string, error) {
 			out[k] = v
 		}
 		return out, nil
+	}
+	if route == CredentialRouteScoped {
+		return nil, CredentialRefusal(name, "unavailable")
 	}
 	got, ok := creds.Lookup(name, host)
 	if !ok {

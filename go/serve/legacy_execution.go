@@ -100,6 +100,27 @@ func containedSink(sink download.Sink) error {
 	return nil
 }
 
+// OperationResultName names results/<id> for new work and the retained
+// relative sink for migrated legacy work, the file ReadOperationResult reads
+// [JOB-A17].
+func (e LegacySinkExecution) OperationResultName(record *job.Record) (string, error) {
+	name, err := e.HTTPExecution.OperationResultName(record)
+	if err != nil {
+		return "", err
+	}
+	spec, err := download.SpecOf(record)
+	if err != nil {
+		return "", errors.New("result unavailable")
+	}
+	if spec.Sink.Final == name {
+		return name, nil
+	}
+	if containedSink(spec.Sink) != nil {
+		return "", errors.New("result unavailable")
+	}
+	return spec.Sink.Final, nil
+}
+
 // ReadOperationResult reads results/<id> for new work and the retained relative
 // sink for migrated legacy work. Preparation proved the sink contained.
 func (e LegacySinkExecution) ReadOperationResult(root string, record *job.Record, offset, maxBytes int64) ([]byte, int64, error) {

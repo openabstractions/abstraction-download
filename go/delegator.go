@@ -513,6 +513,10 @@ func (d *Delegators) WhyNot(spec Spec, src Source, requires []string) []Refusal 
 		if !has(x.Schemes(), src.Scheme) {
 			continue
 		}
+		if why := credentialDelegationRefusal(spec, requires); why != "" {
+			out = append(out, Refusal{x.System(), why})
+			continue
+		}
 		if why := refuted(x, requires); why != "" {
 			out = append(out, Refusal{x.System(), why})
 			continue
@@ -539,7 +543,22 @@ func (d *Delegators) WhyNot(spec Spec, src Source, requires []string) []Refusal 
 }
 
 func (d *Delegators) eligible(x Delegator, spec Spec, src Source, requires []string) bool {
-	return d.suits(x, src, requires) && declined(x, spec) == ""
+	return credentialDelegationRefusal(spec, requires) == "" && d.suits(x, src, requires) && declined(x, spec) == ""
+}
+
+func credentialDelegationRefusal(spec Spec, requires []string) string {
+	if ValidateCredentialRoutes(spec.Sources) != nil {
+		return "invalid credential route"
+	}
+	if has(requires, CredentialRouteScoped) {
+		return "scoped credential authorization cannot be delegated"
+	}
+	for _, source := range spec.Sources {
+		if route, _ := CredentialRoute(source); route == CredentialRouteScoped {
+			return "scoped credential authorization cannot be delegated"
+		}
+	}
+	return ""
 }
 
 func (d *Delegators) suits(x Delegator, src Source, requires []string) bool {

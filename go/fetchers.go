@@ -127,7 +127,11 @@ func (h HTTP) Fetch(ctx context.Context, req Request) (Result, error) {
 	}
 	// The variable, not the value: the restart paths below close the first
 	// response themselves and put a second one here.
-	defer func() { resp.Body.Close() }()
+	defer func() {
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}()
 
 	// A request is ranged if it asked for a range, which is no longer the same
 	// as starting past byte zero: the FIRST gap of a resumed sparse transfer
@@ -284,7 +288,9 @@ func (h HTTP) Ranged(ctx context.Context, src Source, headers map[string]string)
 		return 0, false, err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	// A source may ignore Range and answer with the entire artifact. The status
+	// and headers settle this probe; draining that body would fetch the whole
+	// artifact before the single-stream fallback can begin.
 
 	if resp.StatusCode == http.StatusPartialContent {
 		return sizeFromContentRange(resp.Header.Get("Content-Range")), true, nil

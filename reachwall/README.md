@@ -1,5 +1,7 @@
 # reachwall — enforce a download refusal in the platform firewall
 
+*For operators.*
+
 For an operator hardening a machine against the hosts a download refusal
 already names. An application uses [the shared runtime](https://github.com/openabstractions/abstraction-download#through-the-shared-runtime)
 instead.

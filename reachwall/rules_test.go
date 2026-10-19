@@ -51,6 +51,21 @@ func TestAReasonCannotLeaveItsQuotes(t *testing.T) {
 	}
 }
 
+// TestEveryPowerShellSingleQuoteIsDoubled: PowerShell treats U+2018 through
+// U+201B as single quotes too, so a reason or program holding one would end
+// its literal and run the rest as script.
+func TestEveryPowerShellSingleQuoteIsDoubled(t *testing.T) {
+	for _, q := range []string{"'", "\u2018", "\u2019", "\u201A", "\u201B"} {
+		reason := q + "; Remove-NetFirewallRule -All; " + q
+		program := `C:\a` + q + `b\x.exe`
+		win, _ := windows([]refusal{{"10.0.0.1", reason}}, program)
+		if !strings.Contains(win, "-Description '"+q+q+"; Remove-NetFirewallRule -All; "+q+q+"'") ||
+			!strings.Contains(win, `-Program 'C:\a`+q+q+`b\x.exe'`) {
+			t.Fatalf("%U:\n%s", []rune(q)[0], win)
+		}
+	}
+}
+
 func TestTheKernelLogKeepsAtMost127Bytes(t *testing.T) {
 	r := refusal{"10.0.0.1", strings.Repeat("é", 200)}
 	p := prefix(r)

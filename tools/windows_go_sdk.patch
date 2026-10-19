@@ -1,0 +1,42 @@
+--- a/src/internal/poll/fd_windows.go
++++ b/src/internal/poll/fd_windows.go
+@@ -279,12 +279,13 @@
+ 	o := operationPool.Get().(*operation)
+ 	defer operationPool.Put(o)
+ 	*o = operation{
+-		o: syscall.Overlapped{
+-			OffsetHigh: uint32(fd.offset >> 32),
+-			Offset:     uint32(fd.offset),
+-		},
+ 		runtimeCtx: fd.pd.runtimeCtx,
+ 		mode:       int32(mode),
++	}
++	// File reads and writes hold both locks. Pipes do not use file offsets.
++	if fd.kind == kindFile {
++		o.o.OffsetHigh = uint32(fd.offset >> 32)
++		o.o.Offset = uint32(fd.offset)
+ 	}
+ 	// Start IO.
+ 	if !fd.isBlocking && !fd.pollable() {
+@@ -586,7 +587,9 @@
+ 			err = syscall.ReadFile(fd.Sysfd, buf, &qty, fd.overlapped(o))
+ 			return qty, err
+ 		})
+-		fd.addOffset(n)
++		if fd.kind == kindFile {
++			fd.addOffset(n)
++		}
+ 		switch err {
+ 		case syscall.ERROR_HANDLE_EOF:
+ 			err = io.EOF
+@@ -860,7 +863,9 @@
+ 				err = syscall.WriteFile(fd.Sysfd, b, &qty, fd.overlapped(o))
+ 				return qty, err
+ 			})
+-			fd.addOffset(n)
++			if fd.kind == kindFile {
++				fd.addOffset(n)
++			}
+ 		case kindNet:
+ 			if race.Enabled {
+ 				race.ReleaseMerge(unsafe.Pointer(&ioSync))

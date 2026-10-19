@@ -36,6 +36,21 @@ func (h HTTP) do(hreq *http.Request, reach Reach, supplied map[string]string) (*
 	hop := credentialHops(hreq.Context())
 	var credentialNames []string
 	if hop != nil {
+		if hop.refreshInitial != nil && hop.initialSent {
+			for _, name := range hop.applied {
+				hreq.Header.Del(name)
+			}
+			applied, err := hop.refreshInitial(hreq.URL.Hostname())
+			if err != nil {
+				return nil, err
+			}
+			hop.applied = nil
+			for name, value := range applied {
+				hreq.Header.Set(name, value)
+				hop.applied = append(hop.applied, name)
+			}
+		}
+		hop.initialSent = true
 		credentialNames = append(credentialNames, hop.applied...)
 	}
 	c := *h.client()

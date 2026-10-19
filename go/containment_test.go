@@ -108,10 +108,14 @@ func TestContainmentIsNotAPrefixTest(t *testing.T) {
 		}
 	}
 
-	// Windows ignores case in a path and POSIX does not, so this is asked of
-	// the platform the test is running on rather than assumed either way.
-	if got := under(`C:\Store`, `C:\store\x.gguf`); got != (runtime.GOOS == "windows") {
-		t.Errorf("under(`C:\\Store`, `C:\\store\\x.gguf`) = %v on %s", got, runtime.GOOS)
+	// A resolved destination is the root joined to a relative path, so it
+	// carries the root's own spelling; containment folds no case on any host
+	// (DL-S8, DL-R31). A differently cased root, or a twin spelled with a
+	// KELVIN SIGN, is not that root.
+	for _, other := range []string{`C:\Store\x.gguf`, "C:\\stor\u212a\\x.gguf"} {
+		if under(`C:\store`, other) {
+			t.Errorf("under(`C:\\store`, %q) = true on %s; containment compares the root's spelling", other, runtime.GOOS)
+		}
 	}
 }
 

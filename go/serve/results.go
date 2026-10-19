@@ -14,8 +14,11 @@ import (
 )
 
 // credentialWord finds the credential:<outcome>:<name> word a credential
-// failure records.
-var credentialWord = regexp.MustCompile(`\b(credential:[a-z_]{1,32}:[A-Za-z0-9_.-]{1,64})`)
+// failure records, where the applier's error writes it
+// (download.CredentialError: "download: credential:<outcome>:<name>"): at
+// the end of the recorded error, after any wrapping. The same text anywhere
+// else in the error, a source's own message included, is not the word.
+var credentialWord = regexp.MustCompile(`(?:^|: )download: (credential:[a-z_]{1,32}:[A-Za-z0-9_.-]{1,64})$`)
 
 // OperationWaiting reports the word a waiting attempt records [DL-N5, JOB-A15].
 func (HTTPExecution) OperationWaiting(record *job.Record) string {
@@ -24,6 +27,26 @@ func (HTTPExecution) OperationWaiting(record *job.Record) string {
 
 // OperationFailure reports the recorded class, checked against the record
 // state [JOB-A8], and the typed cause. Messages carry no locator or path.
+// RefusedByRights reports a failed download that ended only because a rights
+// decision refused it: the applier refused its credential's use with
+// not_permitted (abstraction-job JOB-A19). The same request submitted again
+// is then decided again rather than given this failure.
+func (HTTPExecution) RefusedByRights(record *job.Record) bool {
+	if record.State != job.StateFailed {
+		return false
+	}
+	raw, ok := record.Extensions[download.FailureExtension]
+	if !ok {
+		return false
+	}
+	failure, err := download.DecodeFailure(raw)
+	if err != nil || download.LastFailureCause(record) != string(api.FailureCauseCredential) {
+		return false
+	}
+	word := credentialWord.FindStringSubmatch(failure.Error)
+	return word != nil && strings.HasPrefix(word[1], "credential:not_permitted:")
+}
+
 func (HTTPExecution) OperationFailure(record *job.Record) *api.WorkFailure {
 	if raw, ok := record.Extensions[download.FailureExtension]; ok {
 		if failure, err := download.DecodeFailure(raw); err == nil {
@@ -70,6 +93,16 @@ func (HTTPExecution) ReadOperationResult(root string, record *job.Record, offset
 	}
 	// The operation identity alone selects the destination; clients supply no path.
 	return readUnderRoot(root, "results/"+record.ID, offset, maxBytes)
+}
+
+// OperationResultName names a complete download's result file under the
+// provider root, the file ReadOperationResult reads, for a hard link
+// [JOB-A17]. The operation identity alone selects it.
+func (HTTPExecution) OperationResultName(record *job.Record) (string, error) {
+	if record.State != job.StateComplete || record.Kind != download.Kind || record.ID == "" || strings.ContainsAny(record.ID, "/\\.:") {
+		return "", errors.New("result unavailable")
+	}
+	return "results/" + record.ID, nil
 }
 
 // readUnderRoot reads one regular file named relative to the provider root.

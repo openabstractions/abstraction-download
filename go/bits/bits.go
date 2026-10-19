@@ -68,7 +68,6 @@ package bits
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,9 +81,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf16"
 
 	download "github.com/openabstractions/abstraction-download/go"
+	"github.com/openabstractions/abstraction-download/go/powershell"
 )
 
 // System is the value recorded in job.Delegation.System. It is what decides,
@@ -673,7 +672,7 @@ try {
 
 	cmd := exec.CommandContext(ctx, d.shell(),
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodeCommand(full))
+		"-EncodedCommand", powershell.EncodedCommand(full))
 	if len(env) > 0 {
 		e := os.Environ()
 		for k, v := range env {
@@ -701,16 +700,6 @@ try {
 		return out, fmt.Errorf("%v: %s", err, msg)
 	}
 	return out, nil
-}
-
-// encodeCommand produces the UTF-16LE base64 that -EncodedCommand expects.
-func encodeCommand(s string) string {
-	u := utf16.Encode([]rune(s))
-	b := make([]byte, 0, len(u)*2)
-	for _, r := range u {
-		b = append(b, byte(r), byte(r>>8))
-	}
-	return base64.StdEncoding.EncodeToString(b)
 }
 
 // ---------- handles ----------

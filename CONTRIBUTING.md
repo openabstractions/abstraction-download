@@ -105,8 +105,10 @@ easy to miss:
 ### Which commits go together
 
 [`layers.lock`](https://github.com/openabstractions/abstractions/blob/main/layers.lock)
-pins the commit of each repository known to work with the others. It does not yet
-have a row for every layer; where it has none, you are choosing the set yourself.
+retains an early eight-repository snapshot. It is historical evidence, not the
+current runtime's dependency set. Use the selected module's versioned dependency
+metadata and installation instructions. Runtime package versions and module tags
+have separate release histories; qualify the combination your adopter ships.
 
 ### Licence
 

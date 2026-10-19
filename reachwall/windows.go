@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"github.com/openabstractions/abstraction-download/go/powershell"
 )
 
 const group = "openabstractions reach"
@@ -18,24 +20,24 @@ func windows(list []refusal, program string) (string, []string) {
 		b.WriteString("if ((Get-MpPreference).EnableNetworkProtection -eq 0) { throw 'reachwall: a rule on a name is enforced only while Defender Network Protection is on, and it is off: Set-MpPreference -EnableNetworkProtection Enabled, or the rule passes everything in silence' }\n")
 		warnings = append(warnings, "a name is refused by the addresses Windows sees in DNS answers after this runs: an address the program already holds, or fetched over DoH or a proxy, still connects, and a reboot forgets them all until the next query")
 	}
-	fmt.Fprintf(&b, "Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n", ps(group))
+	fmt.Fprintf(&b, "Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n", powershell.Literal(group))
 	for _, r := range list {
 		b.WriteString("\n")
-		match := "-RemoteAddress " + ps(r.host)
+		match := "-RemoteAddress " + powershell.Literal(r.host)
 		if net.ParseIP(r.host) == nil {
 			var ids []string
 			for _, keyword := range []string{r.host, "*." + r.host} {
-				id := ps(guid(keyword))
+				id := powershell.Literal(guid(keyword))
 				fmt.Fprintf(&b, "Remove-NetFirewallDynamicKeywordAddress -Id %s -ErrorAction SilentlyContinue\n", id)
-				fmt.Fprintf(&b, "New-NetFirewallDynamicKeywordAddress -Id %s -Keyword %s -AutoResolve $true\n", id, ps(keyword))
+				fmt.Fprintf(&b, "New-NetFirewallDynamicKeywordAddress -Id %s -Keyword %s -AutoResolve $true\n", id, powershell.Literal(keyword))
 				ids = append(ids, id)
 			}
 			match = "-RemoteDynamicKeywordAddresses @(" + strings.Join(ids, ", ") + ")"
 		}
 		fmt.Fprintf(&b, "New-NetFirewallRule -Group %s -DisplayName %s -Description %s -Direction Outbound -Action Block -Profile Any %s",
-			ps(group), ps("reach "+r.host), ps(r.reason), match)
+			powershell.Literal(group), powershell.Literal("reach "+r.host), powershell.Literal(r.reason), match)
 		if program != "" {
-			fmt.Fprintf(&b, " -Program %s", ps(program))
+			fmt.Fprintf(&b, " -Program %s", powershell.Literal(program))
 		}
 		b.WriteString("\n")
 	}
@@ -49,10 +51,6 @@ func names(list []refusal) bool {
 		}
 	}
 	return false
-}
-
-func ps(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // RFC 9562 UUIDv5 in the DNS namespace, so the same keyword always has the

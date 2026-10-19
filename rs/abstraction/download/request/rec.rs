@@ -115,6 +115,8 @@ pub const DOWNSTREAM_RECOVERY_GUARANTEES: [&str; 1] = ["abstraction.download/rec
 
 pub const CREDENTIAL_GUARANTEES: [&str; 1] = ["abstraction.download/credentials@1"];
 
+pub const SCOPED_CREDENTIAL_GUARANTEES: [&str; 1] = ["abstraction.download/credentials@2"];
+
 pub const NETWORK_COST_GUARANTEES: [&str; 1] = ["abstraction.download/network-cost@1"];
 
 pub const WAITING_EXTENSIONS: [&str; 1] = ["abstraction.download/waiting@1"];
@@ -139,13 +141,18 @@ pub struct Artifact {
 
 /// A location interpreted by its named source scheme. Execution providers
 /// declare which schemes they support. credential, when present, names a
-/// credential registered with abstraction.credentials/holder@1 in the
-/// submitting caller's account; it is a name, never a secret. The executing
-/// service applies it through abstraction.credentials/applier@1 with consumer
-/// abstraction.download/http-execution@1 to each request it sends to this
-/// source, including redirects and resumed ranges, and never records the
-/// applied headers. A request naming a credential requires
-/// abstraction.download/credentials@1.
+/// credential registered in the submitting caller's account; it is a name,
+/// never a secret. A request naming a credential requires exactly one of
+/// abstraction.download/credentials@1 and abstraction.download/credentials@2.
+/// credentials@1 uses abstraction.credentials/applier@1 and its original exact
+/// authorization. Explicit credentials@2 selects
+/// abstraction.credentials/applier@2 and scoped authorization for every named
+/// credential in the request. The executing service uses the receiving job
+/// owner's authenticated subject with consumer
+/// abstraction.download/http-execution@1 on every request, redirect and resumed
+/// range, and never records the applied headers. Accepted work retains its
+/// selected route across recovery. Delegated execution currently refuses
+/// credentials@2.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Source {
     pub scheme: String,

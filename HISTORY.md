@@ -167,6 +167,19 @@ deletes tabs and newlines from an authority before reading it, so
 `hf.co<TAB>.evil.com` becomes a plain host that appears nowhere in the
 locator.
 
+## DL-K1, 2026-10-02
+
+JOB-A16 now lets an executor refuse admission `forbidden` for a rights
+refusal (live walkthrough of 2026-10-02, D11; `abstraction-job/HISTORY.md`).
+A credential the applier refuses `not_permitted` is refused by the caller's
+rights, so admission answers `forbidden` with
+`credential:not_permitted:<name>`; every other refusal stays `invalid`, and
+neither seals the key.
+
+| id | before | now |
+| --- | --- | --- |
+| DL-K1 | every refusal other than `unavailable` is `invalid` | `not_permitted` is `forbidden`; other refusals stay `invalid`; the reason is unchanged |
+
 ## Authority is designation
 
 The runner bus, a local transport `jobd` listened on for `look` and `who`,

@@ -51,6 +51,9 @@ func (e DelegatedExecution) RecoveryGuarantees() []string {
 // source and every execution guarantee together. The receiving service still
 // decides its own credential and authorization admission after handoff.
 func (e DelegatedExecution) CheckAdmission(scope, kind string, raw []byte, required []string) (api.AcceptanceOutcome, string) {
+	if slices.Contains(required, ScopedCredentialGuarantee) {
+		return api.AcceptanceOutcomeInvalid, "delegated execution does not preserve scoped credential authorization"
+	}
 	if len(required) == 0 {
 		return 0, "" // Anonymous work can use the local HTTP executor.
 	}
@@ -108,7 +111,7 @@ func (e DelegatedExecution) PrepareScoped(scope, id, kind string, raw []byte, re
 			return nil, nil, errors.New("unsupported execution guarantee")
 		}
 	}
-	work, _, err := prepareRequest(scope, id, kind, raw, true, false)
+	work, _, err := prepareRequest(scope, id, kind, raw, CredentialGuarantee, false)
 	if err != nil {
 		return nil, nil, err
 	}

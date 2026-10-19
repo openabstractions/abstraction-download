@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
-	"runtime"
 	"strings"
 
+	identity "github.com/openabstractions/abstraction-identity"
 	job "github.com/openabstractions/abstraction-job/go"
 )
 
@@ -222,6 +223,9 @@ func (s Spec) Validate() error { return s.ValidateFor("") }
 // needed because one relative path in the store — work/<id> — is reserved
 // against every job except the one it belongs to.
 func (s Spec) ValidateFor(owner string) error {
+	if err := ValidateCredentialRoutes(s.Sources); err != nil {
+		return err
+	}
 	if len(s.Sources) == 0 {
 		return fmt.Errorf("download: at least one source is required")
 	}
@@ -309,6 +313,9 @@ func SpecOf(rec *job.Record) (Spec, error) {
 		return s, fmt.Errorf("download: job %s is kind %q, not %q", rec.ID, rec.Kind, Kind)
 	}
 	if err := rec.DecodeSpec(&s); err != nil {
+		return s, err
+	}
+	if err := ValidateCredentialRoutes(s.Sources); err != nil {
 		return s, err
 	}
 	return s, nil
@@ -402,10 +409,32 @@ func resolveUnder(root, p string) (string, error) {
 	// legally appear in a Windows filename anyway — so reading it as a separator
 	// is the only interpretation that is ever right.
 	resolved := filepath.Join(root, filepath.FromSlash(strings.ReplaceAll(p, `\`, "/")))
-	if !under(root, resolved) {
+	if !under(root, resolved) || linkedOut(root, resolved) {
 		return "", fmt.Errorf("%w: %s", ErrEscapesRoot, p)
 	}
 	return resolved, nil
+}
+
+// linkedOut reports whether resolved, lexically inside root, lies outside it
+// by file identity: a folder inside the root that is a junction or link to
+// elsewhere carries the path out (identity.Within resolves the deepest
+// existing folder above it). A root that does not exist, such as the
+// stand-in for a record being read, or that identity refuses to open, such as
+// a share, leaves the lexical check above to decide. Any other error, such as
+// a root that cannot be read, refuses: the filesystem could not confirm the
+// path stays inside.
+// withinRoot is identity.Within; tests stand in its errors.
+var withinRoot = identity.Within
+
+func linkedOut(root, resolved string) bool {
+	if comparablePath(resolved) == comparablePath(root) {
+		return false
+	}
+	inside, err := withinRoot(resolved, root)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, identity.ErrNotLocalPath)
+	}
+	return !inside
 }
 
 // probeRoot is a stand-in store root, used to answer the containment question
@@ -441,18 +470,19 @@ func EscapesRoot(p string) error {
 //
 //   - `C:\store2` starts with `C:\store` and is a different directory, so the
 //     prefix has to end on a separator boundary.
-//   - Windows ignores case in a path and POSIX does not, so folding is
-//     conditional on the OS rather than done to be safe.
+//   - resolved is root joined to a relative destination (resolveUnder), so it
+//     carries root's own spelling and compares exactly: no case is folded and
+//     no rule is read off the host's name (DL-R31, VISION.md L623).
 //   - `\\nas\share\store`, `C:\`, `/` and a trailing separator must not change
 //     the answer, so both sides are reduced to one spelling first.
 //
-// What this does NOT close: a directory inside the root that is itself a
-// symlink or a junction pointing out of it. `models/x.gguf` is then contained
-// by every lexical measure and the bytes still land elsewhere. Closing it needs
-// the path resolved at the moment of the write — the file does not exist yet
-// when this runs, and resolving it here would only move the race earlier — and
-// none of Go, Python and C++ has a portable "open without following a link".
-// This is lexical containment and claims nothing more.
+// This is lexical containment, the backstop. A directory inside the root that
+// is itself a symlink or a junction pointing out of it is contained by every
+// lexical measure while the bytes land elsewhere; linkedOut asks the
+// filesystem about that one when the root exists (identity.Within). A link
+// created inside the root after this check, before the write, stays open:
+// closing it needs the path resolved at the moment of the write, and none of
+// Go, Python and C++ has a portable "open without following a link".
 func under(root, resolved string) bool {
 	r := comparablePath(root)
 	c := comparablePath(resolved)
@@ -473,14 +503,12 @@ func under(root, resolved string) bool {
 }
 
 // comparablePath reduces a path for the LEXICAL containment check above:
-// cleaned, forward slashes, no trailing separator, and folded with strings.
-// ToLower when the host is Windows.
-//
-// That fold is a guess about the host, not a reading of the volume, and it is
-// wrong in both directions: measured, it merged K (U+212A) with k against NTFS
-// and split Kelvin from kelvin against APFS. It stays only because containment is a question about a store
-// root's own subtree and both sides are folded alike. Whether two paths name one
-// file is NOT answered here: that is SamePath, which asks the volume.
+// cleaned, forward slashes, no trailing separator, and nothing folded. The
+// fold it once applied on Windows was a guess about the host that merged K
+// (U+212A) with k against NTFS and split Kelvin from kelvin against APFS;
+// containment needs none, because both sides carry the root's spelling.
+// Whether two paths name one file is NOT answered here: that is SamePath,
+// which asks the volume.
 func comparablePath(p string) string {
 	if p == "" {
 		return ""
@@ -497,9 +525,6 @@ func comparablePath(p string) string {
 	s = unc + strings.ReplaceAll(filepath.Clean(s), `\`, "/")
 	for len(s) > 1 && strings.HasSuffix(s, "/") {
 		s = s[:len(s)-1]
-	}
-	if runtime.GOOS == "windows" {
-		s = strings.ToLower(s)
 	}
 	return s
 }

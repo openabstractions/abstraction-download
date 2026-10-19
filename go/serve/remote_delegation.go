@@ -81,7 +81,17 @@ func remoteRequest(spec download.Spec) ([]byte, []string, error) {
 		required = append(required, NetworkCostGuarantee)
 	}
 	named := false
+	if err := download.ValidateCredentialRoutes(spec.Sources); err != nil {
+		return nil, nil, err
+	}
 	for _, src := range spec.Sources {
+		route, err := download.CredentialRoute(src)
+		if err != nil {
+			return nil, nil, err
+		}
+		if route == ScopedCredentialGuarantee {
+			return nil, nil, errors.New("remote job: scoped credential authorization cannot be delegated")
+		}
 		if len(src.Headers) != 0 {
 			return nil, nil, errors.New("remote job: a source with request headers cannot be delegated")
 		}

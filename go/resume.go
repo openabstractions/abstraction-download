@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	job "github.com/openabstractions/abstraction-job/go"
+
+	identity "github.com/openabstractions/abstraction-identity"
 )
 
 // Resume is downloading keyed by DESTINATION rather than by job id.
@@ -425,37 +426,27 @@ func (s *client) destinationOf(sink Sink) string {
 
 // canonicalPath is the string a destination is KEYED on, which is a different
 // question from whether two paths name one file — SamePath answers that, and it
-// answers it by asking the volume. A key cannot: destinationID hashes this
-// string to pick a record id before any record exists, so it must be derivable
-// from the path alone, and two spellings a case-folding volume will merge can
-// still hash apart. The scan in recordsFor runs first and uses SamePath, so the
-// key is a race window rather than the decision.
-//
-// The parent directory is resolved through symlinks rather than the file itself,
-// because the file is usually not there yet — that is the whole situation. A
-// directory that cannot be resolved is used as written, which is right for a
-// destination whose directory has still to be created.
+// answers it by asking the volume. destinationID hashes this string to pick a
+// record id before any record exists, and the destination usually does not
+// exist yet. The key is identity.PlaceKey's (DL-R31): the deepest existing
+// folder's final path, with links, junctions and 8.3 aliases resolved by the
+// volume, and the names still to be created below it, keyed as the file system
+// compares names. No rule is read off the host's name. The scan in recordsFor
+// runs first and uses SamePath, so the key is a race window rather than the
+// decision. A path with no existing folder above it is used cleaned, as
+// written.
 func canonicalPath(p string) string {
 	if strings.TrimSpace(p) == "" {
 		return ""
 	}
 	p = filepath.FromSlash(p)
+	if key, err := identity.PlaceKey(p); err == nil {
+		return key
+	}
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
 	}
-	p = filepath.Clean(p)
-	dir, base := filepath.Split(p)
-	if real, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
-		p = filepath.Join(real, base)
-	}
-	if runtime.GOOS == "windows" {
-		// Windows filenames are case-insensitive, so folding here merges two
-		// spellings of one file. Not done elsewhere: a case-sensitive Linux
-		// volume holds `X.bin` and `x.bin` as two files, and folding them
-		// together would point two downloads at one record.
-		p = strings.ToLower(p)
-	}
-	return p
+	return filepath.Clean(p)
 }
 
 func firstLocator(rec *job.Record) string {

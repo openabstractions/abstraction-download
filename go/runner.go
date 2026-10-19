@@ -728,11 +728,16 @@ func PortableSink(s Sink) bool {
 	return true
 }
 
-func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, rolling bool, gap fetchRange, proven *Ranges, seen *Validators, onIntent func(job.Want)) (int64, bool, error) {
+func (r *Runner) credentialsForOperation(operationID string) Credentials {
 	credentials := r.Credentials
 	if bound, ok := credentials.(OperationCredentials); ok {
-		credentials = bound.ForOperation(rec.ID)
+		credentials = bound.ForOperation(operationID)
 	}
+	return credentials
+}
+
+func (r *Runner) fetch(ctx context.Context, rec *job.Record, spec Spec, epoch int64, f *os.File, h hash.Hash, rolling bool, gap fetchRange, proven *Ranges, seen *Validators, onIntent func(job.Want)) (int64, bool, error) {
+	credentials := r.credentialsForOperation(rec.ID)
 	sources := append([]Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool { return sources[i].Priority < sources[j].Priority })
 
